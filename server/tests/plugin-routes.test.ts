@@ -897,7 +897,12 @@ function brokeredApp(
   const authorized: Array<{ userId: string; toolkit: string }> = [];
   const queried: Array<{ toolkit: string; userId: string }> = [];
   const confirmed: Array<{ toolkit: string; userId: string }> = [];
-  const disconnected: Array<{ toolkit: string; userId: string }> = [];
+  const disconnected: Array<{
+    toolkit: string;
+    userId: string;
+    by: string;
+    reason: string;
+  }> = [];
 
   const store = {
     // Every read the plugins surface makes on its way to the route under test.
@@ -906,6 +911,18 @@ function brokeredApp(
         id: "composio-linear",
         url: "composio://linear",
         provenance: "composio",
+      },
+      /*
+       * An ordinary OAuth row, so that "this app is not brokered" is a real row and not a missing
+       * one. The two routes below answer the same way for both, and this is the half that would
+       * otherwise go untested: an id naming nothing at all is easy to refuse, while a server this
+       * deployment really has whose connection simply does not live at Composio is where a
+       * confusing answer would come from.
+       */
+      {
+        id: "notion",
+        url: "https://notion.test/mcp",
+        provenance: "curated",
       },
     ],
     listSkills: async () => [],
@@ -921,7 +938,12 @@ function brokeredApp(
       confirmed.push(input);
       return { connected: connection !== null };
     },
-    disconnectBrokered: async (input: { toolkit: string; userId: string }) => {
+    disconnectBrokered: async (input: {
+      toolkit: string;
+      userId: string;
+      by: string;
+      reason: string;
+    }) => {
       disconnected.push(input);
       return { vendorRevoked: true };
     },
@@ -967,8 +989,41 @@ function brokeredApp(
           body: JSON.stringify(body),
         },
       ),
+    /*
+     * The two routes a person's own settings page drives, with every input a caller controls left
+     * open: which row, what is in the body, and what is in the query. The tests below hand all
+     * three a user id that is not the session's, because the assertion is that none of them
+     * changed who was acted on.
+     */
+    confirm: (options: Caller = {}) =>
+      app.request(
+        `http://openbot.test/api/plugins/servers/${options.serverId ?? "composio-linear"}/connection/confirm${options.query ?? ""}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(options.body ?? {}),
+        },
+      ),
+    disconnect: (options: Caller = {}) =>
+      app.request(
+        `http://openbot.test/api/plugins/servers/${options.serverId ?? "composio-linear"}/connection${options.query ?? ""}`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(options.body ?? {}),
+        },
+      ),
   };
 }
+
+/** Everything a caller of those two routes gets to choose. */
+type Caller = {
+  /** Which server row the route is aimed at. Defaults to the brokered one. */
+  serverId?: string;
+  body?: unknown;
+  /** A query string, leading `?` included. */
+  query?: string;
+};
 
 describe("connecting a brokered app", () => {
   test("the link is minted for the session's own person, whatever the body says", async () => {
@@ -1038,5 +1093,116 @@ describe("connecting a brokered app", () => {
 
     expect(response.status).toBe(503);
     expect((await response.json()).error).toContain("COMPOSIO_API_KEY");
+  });
+});
+
+/**
+ * Confirming a brokered connection, and ending one.
+ *
+ * CRITERION. Both routes act on the connection of the person whose session made the request, and on
+ * nobody else's, whatever a body or a query says; both refuse a row that is not brokered in so many
+ * words; and both tell a deployment with no broker which setting to set.
+ *
+ * REASON. The store's behaviour is pinned where it is decided — what a confirm writes, what a
+ * disconnect revokes — so what is left here is the routing, and the routing is where the damage
+ * would be. A user id these handlers could take from a caller turns one DELETE into a revoke of
+ * somebody else's grant at the vendor and one POST into a connection recorded under a person who
+ * never made one. It is the defect the prior art this design follows shipped three separate times,
+ * and the first test of each pair hands the route a body AND a query naming somebody else so that
+ * reading either is a failure rather than a silent pass.
+ *
+ * Neither route is admin-gated, deliberately: an administrator adds the app once and everybody then
+ * manages their own account, so `requireUser` is the whole of the gate and the identity is the whole
+ * of the scoping.
+ */
+describe("confirming and ending a brokered connection", () => {
+  test("confirm asks about the session's own person, whatever the caller says", async () => {
+    const { confirmed, confirm } = brokeredApp({
+      connectedAt: "2026-02-02T00:00:00.000Z",
+    });
+
+    const response = await confirm({
+      body: { userId: SOMEBODY_ELSE.id },
+      query: `?userId=${SOMEBODY_ELSE.id}`,
+    });
+
+    expect(response.status).toBe(200);
+    // The store's answer, passed through rather than restated: `connected` is what the vendor said.
+    expect(await response.json()).toEqual({ connected: true });
+    expect(confirmed).toEqual([{ toolkit: "linear", userId: ADMIN.id }]);
+  });
+
+  test("disconnect ends the session's own account, whatever the caller says", async () => {
+    const { disconnected, disconnect } = brokeredApp({
+      connectedAt: "2026-02-02T00:00:00.000Z",
+    });
+
+    const response = await disconnect({
+      body: { userId: SOMEBODY_ELSE.id },
+      query: `?userId=${SOMEBODY_ELSE.id}`,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ vendorRevoked: true });
+    /*
+     * The owner and the actor are the same person, and `reason` is the word that says why. The
+     * trail tells this apart from an administrator offboarding somebody by those three fields and
+     * by nothing else, so a route that filed `person_removed` here, or named a different owner,
+     * would leave a record of an act that did not happen.
+     */
+    expect(disconnected).toEqual([
+      {
+        toolkit: "linear",
+        userId: ADMIN.id,
+        by: ADMIN.id,
+        reason: "self",
+      },
+    ]);
+  });
+
+  test("an app that is not brokered is refused for what is actually wrong", async () => {
+    // `notion` is a row this deployment really has. What is wrong is not that it is missing but
+    // that its connection does not live at Composio, and the sentence says so rather than talking
+    // about a broker setting or an app nobody has heard of.
+    const { confirmed, disconnected, confirm, disconnect } = brokeredApp();
+
+    const confirmResponse = await confirm({ serverId: "notion" });
+    const disconnectResponse = await disconnect({ serverId: "notion" });
+
+    expect(confirmResponse.status).toBe(400);
+    expect(disconnectResponse.status).toBe(400);
+    expect((await confirmResponse.json()).error).toBe(
+      "That app is not reached through a broker.",
+    );
+    expect((await disconnectResponse.json()).error).toBe(
+      "That app is not reached through a broker.",
+    );
+    // And the store was left alone: a confirm here would write a row for an app whose connection
+    // is not Composio's to answer about, and a disconnect would ask the broker to revoke a grant
+    // it never issued.
+    expect(confirmed).toEqual([]);
+    expect(disconnected).toEqual([]);
+  });
+
+  test("a deployment with no broker is told which setting to set", async () => {
+    // The same answer the directory and connect give, for the same reason: nobody was asked, and
+    // the remedy is one environment variable long. Answering "not connected" instead would draw a
+    // settled state over a deployment that has no broker to have connected anybody at.
+    const { confirmed, disconnected, confirm, disconnect } = brokeredApp(
+      null,
+      null,
+    );
+
+    const confirmResponse = await confirm();
+    const disconnectResponse = await disconnect();
+
+    expect(confirmResponse.status).toBe(503);
+    expect(disconnectResponse.status).toBe(503);
+    expect((await confirmResponse.json()).error).toContain("COMPOSIO_API_KEY");
+    expect((await disconnectResponse.json()).error).toContain(
+      "COMPOSIO_API_KEY",
+    );
+    expect(confirmed).toEqual([]);
+    expect(disconnected).toEqual([]);
   });
 });

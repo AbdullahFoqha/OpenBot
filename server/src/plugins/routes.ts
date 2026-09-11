@@ -762,6 +762,151 @@ export function createPluginRoutes(
   });
 
   /**
+   * Which app one of the two routes below is about, or the refusal that ends it.
+   *
+   * Both of them act on a brokered connection and on nothing else, so both ask the same two
+   * questions in the same order and answer them in the same words. It is one function because the
+   * sentence somebody reads when they aim either route at an ordinary OAuth row should not be able
+   * to drift into two sentences.
+   *
+   * THE APP COMES OFF THE ROW'S URL AND NEVER OFF ITS ID, for the reason the directory route and
+   * the connect branch above both give: the url is where the transport reads which app a call is
+   * against, and the id is a row name that happens to look similar.
+   *
+   * A ROW THAT IS NOT BROKERED IS REFUSED IN SO MANY WORDS. The id may well name a server this
+   * deployment really has — what is wrong is that its connection does not live at Composio, and
+   * there is nothing for either route to confirm or to end. `null` from `toolkitOf` also covers an
+   * id naming no row at all, which is the same answer from the caller's side.
+   *
+   * NO BROKER IS A 503 NAMING THE SETTING, as it is on the directory and on connect, and it is
+   * {@link BrokerUnconfiguredError}'s own message rather than a sentence written here.
+   *
+   * The connect route's brokered branch does not come through this function, deliberately: a row
+   * that is not brokered has an OAuth flow below it to fall through to, so refusing there would be
+   * wrong.
+   */
+  const brokeredAppFor = async (
+    serverId: string,
+  ): Promise<
+    | { toolkit: string; refusal?: undefined }
+    | { toolkit?: undefined; refusal: { error: string; status: 400 | 503 } }
+  > => {
+    const row = (await store.listServers()).find(
+      (server) => server.id === serverId,
+    );
+    const toolkit = row ? toolkitOf(row.url) : null;
+    if (!toolkit) {
+      return {
+        refusal: {
+          error: "That app is not reached through a broker.",
+          status: 400,
+        },
+      };
+    }
+    if (!composio) {
+      return {
+        refusal: { error: new BrokerUnconfiguredError().message, status: 503 },
+      };
+    }
+    return { toolkit };
+  };
+
+  /**
+   * Ask Composio whether this person's account is really attached, and write the answer down.
+   *
+   * THE ROUTE EXISTS SO THAT THE VENDOR IS ASKED. The return trip from a consent screen is an
+   * ordinary redirect with nothing signed in it, so a browser landing back on the settings page
+   * proves nothing: not that the flow finished, and not that it finished with the account a row
+   * would go on to claim. Composio tells this deployment nothing by itself — there is no callback
+   * of ours in that flow — so unless something asks, all that stands behind the gate every later
+   * brokered call passes through is a guess about what a redirect meant.
+   *
+   * AND IT IS MEANT TO BE CALLED AGAIN, on any page load, which is the other half of why it is
+   * here. The row is only a cache of the vendor's last answer, so it drifts by construction — an
+   * account ended in Composio's own dashboard, a consent this deployment never saw finish — and
+   * calling this heals it in whichever direction it went: written where the vendor says yes,
+   * deleted where it says no. Repeating it files no trail rows and moves no timestamps; the store
+   * is where that is settled.
+   *
+   * BEHIND `requireUser` AND NOT ADMIN-GATED. An administrator adds the app once; confirming one's
+   * own connection to it is not an administrative act.
+   */
+  routes.post(
+    "/servers/:id/connection/confirm",
+    requireUser,
+    async (context) => {
+      const resolved = await brokeredAppFor(context.req.param("id"));
+      if (resolved.refusal) {
+        return context.json(
+          { error: resolved.refusal.error },
+          resolved.refusal.status,
+        );
+      }
+
+      /*
+       * THE PERSON IS THE SESSION'S, AND THERE IS NO SECOND SOURCE FOR THEM. Nothing here reads a
+       * user id out of the body or the query, and that is the property rather than an
+       * implementation detail: a confirm writes the row every later brokered call is gated on, so
+       * a caller who could name somebody else would be one POST away from recording a connection
+       * under a person who never made one — or, the same defect turned around, from deleting the
+       * row of a person the vendor answers no for.
+       *
+       * The store's answer is passed straight back rather than restated here. `connected` is what
+       * Composio said, and a shape invented at this layer would be a second opinion about a fact
+       * only the vendor holds.
+       */
+      return context.json(
+        await store.confirmBrokeredConnection({
+          toolkit: resolved.toolkit,
+          userId: context.var.actor.id,
+        }),
+      );
+    },
+  );
+
+  /**
+   * End this person's own brokered account, at the vendor first and here after.
+   *
+   * The order is the store's and the argument for it is made there: the row is the only thing that
+   * says which app this person connected, so a delete that ran before the revoke could leave a live
+   * grant on somebody's mailbox that nothing here can reach. What comes back is what happened —
+   * `vendorRevoked` false is a grant that was already gone — and it is passed through rather than
+   * rewritten, because telling those two apart is the whole value of the field.
+   *
+   * `reason` IS "self" BECAUSE OF WHO IS ASKING. The other word the store takes is
+   * `person_removed`, which belongs to an administrator offboarding somebody from the People
+   * screen. The trail tells the two acts apart by this word and by whether `by` and the owner
+   * differ, and on this route they are the same person by construction.
+   *
+   * BEHIND `requireUser` AND NOT ADMIN-GATED, for the reason confirm gives: this is somebody
+   * ending their own account, not an administrator ending anybody's.
+   */
+  routes.delete("/servers/:id/connection", requireUser, async (context) => {
+    const resolved = await brokeredAppFor(context.req.param("id"));
+    if (resolved.refusal) {
+      return context.json(
+        { error: resolved.refusal.error },
+        resolved.refusal.status,
+      );
+    }
+
+    /*
+     * WHOSE ACCOUNT THIS IS COMES FROM THE SESSION, here as on confirm and for a sharper reason: a
+     * user id a caller could name would be a DELETE that revokes somebody else's grant at the
+     * vendor. It is read once, from `context.var.actor`, and used for both the owner and the actor
+     * — nothing in the body or the query is looked at at all.
+     */
+    return context.json(
+      await store.disconnectBrokered({
+        toolkit: resolved.toolkit,
+        userId: context.var.actor.id,
+        by: context.var.actor.id,
+        reason: "self",
+      }),
+    );
+  });
+
+  /**
    * Where the vendor sends somebody back.
    *
    * Deliberately not behind `requireUser`. The person arrives on a redirect from another company's
