@@ -140,6 +140,25 @@ export function addCustomServerMutationOptions(queryClient: QueryClient) {
   });
 }
 
+/**
+ * Add a Composio app to the deployment, named by its slug.
+ *
+ * Its own endpoint rather than a curated key, because the catalogue is the vendor's rather than
+ * ours: the slug is all the server needs to look the app up and record the row.
+ */
+export function enableComposioAppMutationOptions(queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async (input: { slug: string }) => {
+      await client("/api/plugins/composio/apps", {
+        method: "POST",
+        body: input,
+        fallback: "That app could not be added.",
+      });
+    },
+    onSuccess: () => invalidatePlugins(queryClient),
+  });
+}
+
 /** Re-read a server's tool list, which is what makes a newly-added tool appear. */
 export function refreshPluginServerMutationOptions(queryClient: QueryClient) {
   return mutationOptions({
