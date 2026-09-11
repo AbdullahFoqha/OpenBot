@@ -144,7 +144,15 @@ function RouteComponent() {
     return <PageShell title="Bot">{null}</PageShell>;
   }
 
-  if (!server) {
+  /*
+   * Gated on the plugin list having ARRIVED, not on `server` being missing — the same guard, for
+   * the same reason, as the roster check below, and the two are meant to be read together.
+   * `isPending` goes false on a failed fetch exactly as it does on a successful one, so `!server`
+   * alone cannot tell "this deployment has not enabled that app" apart from "the plugin list could
+   * not be read". Only the first is a fact about this deployment, and a request that never came
+   * back is no evidence for it.
+   */
+  if (plugins.data && !server) {
     return (
       <PageShell
         backButton={{ label: "Plugins", linkProps: { to: "/admin/plugins" } }}
@@ -157,7 +165,28 @@ function RouteComponent() {
   }
 
   /*
-   * Gated on the roster having ARRIVED, not on `bot` being missing.
+   * Which leaves the other one: no server because the read itself failed. Nothing on this screen
+   * survives that — the app's title, its actions and this Bot's grants are all that one response —
+   * so it says the read failed and draws nothing else. Not the sentence above, which would be a
+   * claim; and not the list either, because a page of switches built from no actions reads as a
+   * Bot that holds none. Follows `admin/components/$name`, which states a failed read the same way.
+   */
+  if (!server) {
+    return (
+      <PageShell
+        backButton={{ label: "Plugins", linkProps: { to: "/admin/plugins" } }}
+        title="Plugins"
+      >
+        <p className="mt-12 text-destructive text-sm" role="alert">
+          Plugins could not be loaded.
+        </p>
+      </PageShell>
+    );
+  }
+
+  /*
+   * Gated on the roster having ARRIVED, not on `bot` being missing — the same guard as the app
+   * check above, over the other query.
    *
    * `isPending` goes false on a failed fetch exactly as it does on a successful one, so `!bot`
    * alone cannot tell "this deployment has no such Bot" apart from "the roster could not be read"
