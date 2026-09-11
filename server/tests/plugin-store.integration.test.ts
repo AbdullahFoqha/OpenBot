@@ -6855,3 +6855,43 @@ test("removing an app records the grant it did not withdraw as not withdrawn", a
     vendorRevoked: false,
   });
 });
+
+/**
+ * The vendor's destructive label, carried out of the database to the screens that draw it.
+ *
+ * CRITERION. A `mcp_tools` row Composio labelled destructive reaches `listServers` as
+ * `destructive: true`, and every tool in the list carries the field as a boolean.
+ *
+ * REASON. The column has been recorded since the brokered transport landed and reached nothing: the
+ * store selected the row and then built a tool object without the field, so a delete read out
+ * identically to any other write on every screen. The per-Bot grants screen already draws its danger
+ * mark from `PluginTool.destructive`, which could only ever be false while the mapping was missing —
+ * a mark that cannot turn on is worse than no mark, because it reads as an assurance. The second
+ * assertion is the half a `true` alone would not hold: the field must be present on the ordinary read
+ * beside it, not only on the row that happens to be dangerous.
+ */
+test("a destructive action says so in the list the screens read", async () => {
+  const { store, database } = await freshStore();
+  await seedComposioGmail(database, store);
+  await database.insert(mcpTools).values({
+    serverId: "gmail",
+    name: "GMAIL_DELETE_MESSAGE",
+    description: "Delete a message.",
+    effect: "write",
+    destructive: true,
+  });
+
+  const gmail = (await store.listServers()).find(
+    (server) => server.id === "gmail",
+  );
+
+  const deletes = gmail?.tools.find(
+    (tool) => tool.name === "GMAIL_DELETE_MESSAGE",
+  );
+  expect(deletes?.destructive).toBe(true);
+  // Not only on the dangerous row: the reader asks every tool the same question, and an undefined
+  // on the read beside it is a screen with nothing to draw rather than a screen drawing "safe".
+  expect(gmail?.tools.map((tool) => typeof tool.destructive)).toEqual(
+    gmail?.tools.map(() => "boolean"),
+  );
+});

@@ -95,6 +95,15 @@ export type ToolRecord = {
   /** `<serverId>/<name>`. What a grant names and what the model's tool name is derived from. */
   ref: string;
   effect: "read" | "write";
+  /**
+   * Whether the vendor warns that this action destroys something.
+   *
+   * Beside {@link ToolRecord.effect} rather than folded into it: the rule engine judges reads and
+   * writes and gains nothing from a third value, while a person deciding whether to switch an action
+   * on is asking a different question. Recorded from the vendor's own labels, so false is an absence
+   * of a claim rather than a claim of safety.
+   */
+  destructive: boolean;
   grantedTo: string[];
 };
 
@@ -3076,6 +3085,7 @@ export function createPluginStore(options: PluginStoreOptions) {
                 inputSchema: tool.inputSchema as Record<string, unknown>,
                 ref,
                 effect: classifyTool(entry, tool.name, true, tool.effect),
+                destructive: tool.destructive,
                 grantedTo: grants.get(ref) ?? [],
               };
             }),
