@@ -54,6 +54,16 @@ import {
  * structural: a field this file does not read is a field a vendor rename cannot break. `toolkit`
  * is optional because the SDK spells it optional — see {@link ComposioActions.execute} below for
  * what is done when it is in fact missing.
+ *
+ * THIS IS THE ONE ROW BELOW WHOSE FIELDS ARE AS NARROW AS THE SDK'S SCHEMA, AND THE REASON IS THAT
+ * THIS IS THE ONE ROW THE SDK ACTUALLY VALIDATES. `Tools.transformToolCases` ends in
+ * `ToolSchema.parse(...)` (`@composio/core` 0.18.1, `src/models/Tools.ts:193`), a throwing parse
+ * rather than the warn-only `transform()` every other listing here goes through — and both calls
+ * this file makes run through it (`:561` for the listing, `:719` for the single tool). So a tool
+ * whose `slug` is missing, or whose `toolkit` is present without a `slug`, does not arrive as a
+ * malformed row: it arrives as a `ZodError`. `ToolkitSchema` spells that inner `slug` required
+ * (`src/types/tool.types.ts:12-16`), so `toolkit?: { slug: string }` is a guarantee this file may
+ * rest on, unlike every declaration under it.
  */
 type VendorTool = {
   slug: string;
@@ -70,15 +80,37 @@ type VendorTool = {
  * `meta` is where all of it lives and every field of it is optional, which is not the SDK being
  * cautious: Composio genuinely publishes toolkits with no logo, no description and no category.
  * See {@link ComposioBroker.listApps} below for what each absence becomes.
+ *
+ * WIDER THAN THE SDK'S OWN SCHEMA, BECAUSE THE SCHEMA IS NOT ENFORCED ON THIS PATH. `transform()`
+ * validates with `safeParse` and, where that fails, logs a warning and `return transformed` — the
+ * unvalidated object — anyway (`@composio/core` 0.18.1, `src/utils/transform.ts:26-36`). So
+ * `ToolKitItemSchema` spelling `name` required and `toolsCount` a number describes the answer
+ * Composio means to send rather than the one this file has to be able to read: a row whose `name`
+ * is null, or whose count arrives as a string, reaches the map below exactly as it came off the
+ * wire and the only thing that noticed was a log line. A TypeScript interface over a wire value is
+ * an assertion and not a check, so the least this one can do is assert something true.
+ *
+ * `meta` ITSELF IS NOT WIDENED, AND THAT IS A FINDING RATHER THAN AN OVERSIGHT.
+ * `transformToolkitListResponse` builds each row's meta itself and reads `item.meta.categories`
+ * while doing so (`src/utils/transformers/toolkits.ts:21-34`), so a row that carries no meta never
+ * arrives here at all — the read throws and `Toolkits.getToolkits` rethrows it as
+ * `ComposioToolkitFetchError` (`src/models/Toolkits.ts:76-82`). Every row that does arrive carries
+ * a meta object. Its `categories` are objects for the same reason, the transformer constructing
+ * each one; the values inside them are copied across verbatim and are therefore worth exactly what
+ * the wire is worth.
+ *
+ * `description` AND `toolsCount` ARE `unknown` RATHER THAN A WIDER UNION, because the wire can put
+ * anything in them and a union would be another guess. `unknown` is the type that forces the
+ * reader to say what it does with a value it has not checked, which is the whole point.
  */
 type VendorToolkit = {
   slug: string;
-  name: string;
+  name?: string | null;
   meta: {
-    description?: string;
-    logo?: string;
-    categories?: { slug: string; name: string }[];
-    toolsCount?: number;
+    description?: unknown;
+    logo?: string | null;
+    categories?: { name?: string | null }[];
+    toolsCount?: unknown;
   };
 };
 
@@ -94,11 +126,23 @@ type VendorToolkit = {
  * `status` because a DISABLED config is still a config: it answers the listing, it satisfies the
  * "does one exist" question, and a connect link minted against it does not work. The two facts have
  * to be separable or an app with a disabled config reads as an app that is ready.
+ *
+ * BOTH OF THOSE ARE DECLARED AS THE WIRE CAN SEND THEM RATHER THAN AS THE SDK SPELLS THEM, for the
+ * reason the toolkit row above gives at length: `transformAuthConfigRetrieveResponse` copies
+ * `name` and `status` across verbatim inside a warn-only `transform()`
+ * (`@composio/core` 0.18.1, `src/utils/transformers/authConfigs.ts:29-58`), so
+ * `AuthConfigRetrieveResponseSchema` requiring a string name and an `ENABLED`/`DISABLED` enum is
+ * not something this file can rest on. A null name reaches {@link madeHere}, and a status the
+ * enum does not contain reaches the choice of config to connect against — where "not ENABLED" and
+ * "disabled" are different facts and only one of them is worth telling an operator.
+ *
+ * `id` IS LEFT ALONE deliberately: it is as unvalidated as the other two, and widening it belongs
+ * with the guard that would then be written for it rather than ahead of one.
  */
 type VendorAuthConfig = {
   id: string;
-  name: string;
-  status: "ENABLED" | "DISABLED";
+  name?: string | null;
+  status?: string;
 };
 
 /**
@@ -183,7 +227,22 @@ export type ComposioVendor = {
        * it rather than mint a link that cannot work.
        */
       showDisabled: true;
-    }): Promise<{ items: VendorAuthConfig[] }>;
+    }): Promise<{
+      items: VendorAuthConfig[];
+      /**
+       * The vendor's own word for "there is another page", which was being discarded at this type.
+       *
+       * `AuthConfigListResponseSchema` carries it (`@composio/core` 0.18.1,
+       * `src/types/authConfigs.types.ts:129-133`) and
+       * `transformAuthConfigListResponse` fills it in from `next_cursor` on every answer
+       * (`src/utils/transformers/authConfigs.ts:72-80`). Omitting it here did not make the
+       * truncation go away; it made it unobservable, because a field a projection does not name is
+       * a field no caller and no test of a caller can ask about. Declared before anything reads it
+       * for exactly that reason: the listings below take one page at {@link LISTING_LIMIT} and
+       * treat it as the whole answer, and the guard that ends that has to have something to read.
+       */
+      nextCursor?: string | null;
+    }>;
     create(
       toolkit: string,
       options: { type: "use_composio_managed_auth"; name: string },
@@ -230,7 +289,29 @@ export type ComposioVendor = {
        */
       accountType: "ALL";
       limit: number;
-    }): Promise<{ items: { id: string }[] }>;
+    }): Promise<{
+      /**
+       * The id is the only field read off an account, and it is read off the wire unchecked.
+       *
+       * `transformConnectedAccountResponse` spreads the raw item and overrides the fields it
+       * renames (`@composio/core` 0.18.1, `src/utils/transformers/connectedAccounts.ts:52-66`), so
+       * `id` arrives exactly as Composio sent it inside the same warn-only `transform()` as
+       * everything else here. An account with no id is the one shape the revoke below cannot act
+       * on, and it is the shape nothing was checking for.
+       */
+      items: { id?: string | null }[];
+      /**
+       * The same truncation signal as the auth-config listing above, from the same vendor schema.
+       *
+       * `ConnectedAccountListResponseSchema` spells it `nullish`
+       * (`src/types/connectedAccounts.types.ts:297-303`) and the transformer sets it on every
+       * answer (`src/utils/transformers/connectedAccounts.ts:109-117`). It matters more here than
+       * anywhere else in this file: {@link ComposioBroker.revoke} answers `true` for "this
+       * person's access has ended", and it has only ever seen one page of the accounts it would
+       * have to end.
+       */
+      nextCursor?: string | null;
+    }>;
     /**
      * Mint one person's connect link against one auth config, with the page to come back to.
      *
