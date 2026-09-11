@@ -166,14 +166,18 @@ export class BrokerRefusalError extends Error {
  * The state a deployment with no Composio key is in, raised rather than returned.
  *
  * A STATE, NOT A FAULT, in the same sense `./composio`'s unconfigured listing is one: unset
- * `COMPOSIO_API_KEY` is the documented default, and the whole brokered surface is absent by design
- * where it is unset. It is a thrown class rather than a null answer because the broker's methods
+ * `COMPOSIO_API_KEY` is the documented default, and where it is unset there is nothing to connect,
+ * nothing to grant and no brokered tool for a Bot to call — what is left on screen is one row that
+ * goes nowhere, under More apps on the admin Plugins page, naming the setting rather than hiding
+ * the feature. It is a thrown class rather than a null answer because the broker's methods
  * answer apps, booleans and urls, and there is no value in any of those shapes that means "nobody
  * was asked" — an empty app list is indistinguishable from a catalogue outage, and `false` from
  * {@link ComposioBroker.isConnected} is a positive claim about somebody's account.
  *
- * The setting is named in the message because the message is the whole remedy: an operator reading
- * it needs the name of the variable to set, and nothing else about this deployment will tell them.
+ * The setting is named in the message because the message is usually the whole remedy: an operator
+ * reading it needs the name of the variable to set, and the one other place this deployment names
+ * it is that row on the admin Plugins page, which somebody meeting this error through the API may
+ * never have seen.
  *
  * A {@link BrokerRefusalError} BECAUSE IT IS THE ORIGINAL ONE. It was the only authored refusal a
  * route could recognise when this file had one class, and it is a refusal of exactly that kind: a
@@ -184,7 +188,7 @@ export class BrokerRefusalError extends Error {
 export class BrokerUnconfiguredError extends BrokerRefusalError {
   constructor() {
     super(
-      "Composio is not configured for this deployment, so nothing was asked. Set COMPOSIO_API_KEY to make the brokered apps available; until it is set, no Composio surface appears anywhere in the product.",
+      "Composio is not configured for this deployment, so nothing was asked. Set COMPOSIO_API_KEY to make the brokered apps available; until it is set there is nothing to connect, nothing to grant and no Composio tool for a Bot to call, and the admin Plugins page shows one row under More apps that goes nowhere.",
     );
     this.name = "BrokerUnconfiguredError";
   }

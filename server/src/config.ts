@@ -177,8 +177,10 @@ export type DeploymentConfig = {
    * deployment's own registered with each of them.
    *
    * Optional, and undefined is the ordinary state rather than a degraded one. A deployment that has
-   * not bought Composio is not a deployment missing something: no Composio surface appears anywhere
-   * in the product, and nothing else it does is any worse for that.
+   * not bought Composio is not a deployment missing something: there is nothing to connect, nothing
+   * to grant and no Composio tool for a Bot to call, what remains on screen is one row that goes
+   * nowhere under More apps on the admin Plugins page naming this variable, and nothing else it does
+   * is any worse for that.
    *
    * Nothing here validates the key. There is no shape to check it against and no call worth making
    * at boot to find out, so the first real request is what says whether it works — which is also
