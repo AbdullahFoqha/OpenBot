@@ -621,6 +621,55 @@ function withdrawableAccounts(
 }
 
 /**
+ * Composio's own verdict on one withdrawal, as a refusal wherever it is not a yes.
+ *
+ * THE VENDOR TELLS US WHEN THE DELETE DID NOT HAPPEN AND NOTHING WAS LOOKING. `success` is a
+ * required field of `ConnectedAccountDeleteResponse` — see the declaration on
+ * {@link ComposioVendor}'s `connectedAccounts.delete` — and the answer used to be thrown away
+ * unread. A 200 whose body says `success: false` therefore became a withdrawn account in
+ * {@link ComposioBroker.revoke}'s count, a `true` out of that method, and a
+ * `vendorRevocationRequested: true` in the audit trail, over a grant Composio had just said it had
+ * not touched. That is the same class of lie as the unflagged delete before it and the one-page
+ * listing before that, arriving through the one door left unwatched: the reply.
+ *
+ * WHICH DOES NOT BLUR "ASKED" INTO "DONE", and the distinction is worth being exact about because
+ * the whole audit field rests on it. `success: true` still claims no more than it ever did — the
+ * account is gone at the broker and the revocation job was started — and whether Google honoured it
+ * happens afterwards, out of sight, with no supported way to poll. What `success: false` adds is
+ * the other end: Composio did not delete the account, so there is no job and nothing was asked of
+ * the provider at all. Reading it narrows the set of things `true` can be covering up rather than
+ * widening what `true` means.
+ *
+ * TWO SENTENCES, BECAUSE THEY ARE TWO DIFFERENT FACTS ABOUT TWO DIFFERENT THINGS. "Composio said
+ * no" is a fact about this account: the account is still there, a second press reaches it, and the
+ * caller's own count already says to press again. "Composio answered with something where its
+ * verdict belongs" is a fact about the package — nobody holding an admin page can correct the shape
+ * of a reply, and pressing disconnect again would be answered identically — so it carries
+ * {@link VENDOR_SHAPE_REMEDY} instead. Collapsing the two would send an operator to press a button
+ * for a condition no button changes.
+ *
+ * NULLABLE IN THE PARAMETER THOUGH THE DECLARATION SAYS OTHERWISE. The generated client parses the
+ * body and returns it; a `null` body is a `null` here, and reading a field off it would be a
+ * `TypeError` carrying a sentence that reads like a stack trace — which is the one thing every
+ * refusal in this file exists not to be. It falls into the unreadable branch, where it belongs.
+ */
+function withdrawalDeclined(
+  answer: { success?: unknown } | null | undefined,
+  toolkit: string,
+): BrokerRefusalError | null {
+  const verdict = answer?.success;
+  if (verdict === true) return null;
+  if (verdict === false) {
+    return new BrokerRefusalError(
+      `Composio answered the withdrawal of one of this person's ${toolkit} accounts with success: false, so it did not delete the account and started no revocation of the grant behind it. Nothing was asked of the provider for that account, whatever this deployment would otherwise have recorded. Disconnecting again asks Composio for it a second time.`,
+    );
+  }
+  return new BrokerRefusalError(
+    `Composio sent ${sent(verdict)} where its verdict on the withdrawal of one of this person's ${toolkit} accounts belongs, and that field is the only thing in the reply that says whether the account was deleted at all. This deployment cannot tell a withdrawal that happened from one that did not, so the account is reported as still standing rather than counted as ended. ${VENDOR_SHAPE_REMEDY}`,
+  );
+}
+
+/**
  * One tool row as the action this deployment holds, with the one check the SDK's schema leaves open.
  *
  * THIS IS THE ONE ROW HERE THAT THE VENDOR REALLY DOES VALIDATE, AND THE FILE USED TO CHECK IT
@@ -1178,12 +1227,35 @@ export type ComposioVendor = {
      * WHAT THE FLAG BUYS IS A REQUEST AND NOT A RESULT, which is the whole reason
      * {@link ComposioBroker.revoke}'s answer is named the way it is. The upstream revocation runs as
      * a background job; the response carries its `revoke_job_id` and the vendor documents that no
-     * generally available endpoint polls it (`:7447-7459`). So the answer is deliberately typed as
-     * `unknown` and read for nothing: there is no field on it this deployment could turn into a
-     * stronger claim than "we asked", and a shape declared here that nothing reads is a shape a
-     * vendor rename can break for no benefit.
+     * generally available endpoint polls it (`:7447-7459`). Nothing here can say the provider tore
+     * the refresh token up, and nothing here pretends to.
+     *
+     * BUT THE ANSWER DOES SAY WHETHER COMPOSIO DID ITS OWN HALF, AND THAT WAS BEING DISCARDED.
+     * `ConnectedAccountDeleteResponse` carries a REQUIRED `success: boolean`, "indicates whether
+     * the connected account was successfully deleted" (`@composio/client` 0.1.0-alpha.76,
+     * `resources/connected-accounts.d.ts:7445-7459`). This used to be `Promise<unknown>`, read for
+     * nothing, on the argument that no field on the answer could support a stronger claim than "we
+     * asked". That argument is true of the REVOCATION and false of the DELETE: a 200 carrying
+     * `success: false` is Composio saying it did not delete the account, so the background job the
+     * flag asks for was never started either — and {@link ComposioBroker.revoke} answered `true`
+     * over the top of it while the grant stood at the provider. Reading it is not a stronger claim
+     * than "we asked"; it is the difference between having asked and having been refused.
+     *
+     * DECLARED `success?: unknown` RATHER THAN AT THE VENDOR'S OWN `boolean`, for the reason every
+     * other field in this projection is: the generated client parses the body and hands it over, so
+     * "required" is the schema's promise about what Composio means to send rather than a fact about
+     * what arrived. {@link withdrawalDeclined} is where the three answers are told apart.
+     *
+     * `revoke_job_id` IS DELIBERATELY NOT READ, and its absence is deliberately not a refusal. The
+     * same declaration marks it optional and says it is present "only when `revoke_on_delete=true`"
+     * — which says when it CAN appear, not that it always does — so a guard on it would turn every
+     * withdrawal Composio accepted into a permanent failure the first time they stopped sending it,
+     * which is the shape of mistake this file has already made twice in the other direction.
      */
-    delete(id: string, params: { revoke_on_delete: true }): Promise<unknown>;
+    delete(
+      id: string,
+      params: { revoke_on_delete: true },
+    ): Promise<{ success?: unknown }>;
   };
 };
 
@@ -1384,7 +1456,7 @@ export function buildComposioClient(
   };
 
   /**
-   * The auth configs for one app that THIS DEPLOYMENT made, oldest name first.
+   * Every auth config Composio holds for one app, ours and anybody else's alike, in one order.
    *
    * THE LISTING IS SCOPED TO THE PROJECT AND NOT TO THIS DEPLOYMENT, which is the correction. An
    * auth config is scoped to the project the API key belongs to — so nothing here is hidden from
@@ -1393,13 +1465,18 @@ export function buildComposioClient(
    * purposes this deployment knows nothing about. {@link madeHere} is the only thing that tells the
    * two apart, and every caller below is about an object one of them must not touch.
    *
+   * THE UNCLAIMED ROWS ARE RETURNED RATHER THAN DROPPED HERE, which is the part that moved. The
+   * filter used to live on the way out, so "no configs at all" and "configs, none of them ours"
+   * reached every caller as the same empty array — and telling those two apart is the whole of what
+   * {@link ComposioBroker.deleteAuthConfig} was missing. The two callers that only ever want ours
+   * go on asking for exactly that through {@link configsMadeHere}, which is now one line over this
+   * one rather than the only way in.
+   *
    * SORTED SO THAT TWO CALLERS AGREE. The vendor's order is not documented, and the whole failure
    * being fixed here is two calls resolving different rows; a total order on the id makes the
    * choice this file makes a stable one, whoever asks and whenever.
    */
-  const configsMadeHere = async (
-    toolkit: string,
-  ): Promise<CheckedAuthConfig[]> => {
+  const configsFor = async (toolkit: string): Promise<CheckedAuthConfig[]> => {
     /*
      * EVERY PAGE, BECAUSE A CONFIG ON THE SECOND ONE IS STILL OURS. Read one page and the two
      * callers below are wrong in the two opposite directions {@link madeHere} describes:
@@ -1437,9 +1514,14 @@ export function buildComposioClient(
      */
     return rows
       .map((row, position) => configOf(row, position, toolkit))
-      .filter(madeHere)
       .sort((one, other) => one.id.localeCompare(other.id));
   };
+
+  /** The subset of {@link configsFor} this deployment can claim, which is what two callers want. */
+  const configsMadeHere = async (
+    toolkit: string,
+  ): Promise<CheckedAuthConfig[]> =>
+    (await configsFor(toolkit)).filter(madeHere);
 
   /**
    * Ask for every one of them and answer with what refused, rather than stopping at the first.
@@ -1818,8 +1900,61 @@ export function buildComposioClient(
        * press the button together, and an app enabled before this deployment created configs at all
        * has none to drop. In every one of those the end state is the one that was asked for, so a
        * throw would report a failure while the caller got exactly what they wanted.
+       *
+       * AND QUIET USED TO MEAN QUIET OVER A CONFIG THAT WAS STILL STANDING, which is the failure
+       * being closed here. "Nothing of ours" and "nothing at all" are not the same state, and the
+       * listing could not tell a caller which one it was in: rename a config in Composio's
+       * dashboard — drop the suffix, or edit the app's title past it — and every decision in this
+       * file stops recognising the object it made. `ensureAuthConfig` would create a second beside
+       * it, `authorize` would refuse against it, and this returned normally, after which
+       * `removeServer` deleted the app's row. The config and every grant made against it outlive
+       * the removal with nothing in this deployment naming them, and an administrator is told the
+       * app was withdrawn.
        */
-      const ours = await configsMadeHere(toolkit);
+      const held = await configsFor(toolkit);
+      const ours = held.filter(madeHere);
+      if (ours.length === 0 && held.length > 0) {
+        /*
+         * REPORTED, NOT DELETED AND NOT SWALLOWED, AND THE THIRD OPTION IS THE ONLY HONEST ONE.
+         *
+         * Deleting anyway is the worse half of the same guess {@link madeHere} exists to stop: a
+         * row with a readable name that does not carry the suffix is as likely to be an operator's
+         * own dashboard work — their scopes, their tool restrictions, and every account anybody
+         * connected against it — as it is to be ours under a new name. Nothing in the row tells
+         * them apart, which is why nothing here chooses.
+         *
+         * WHICH IS THE SAME REASONING AS THE UNREADABLE NAME IN {@link configOf} AND NOT THE SAME
+         * CASE. There the ambiguity is about ADDRESSING: the field that decides ownership did not
+         * arrive, so no row can be sorted and the removal cannot begin. Here every name arrived and
+         * every row is legible; what is in doubt is whether this deployment's own config is among
+         * them under a title somebody edited. So the refusal is narrower than that one — it fires
+         * only where the removal found nothing it could claim, and stays quiet where a config of
+         * ours was found and dropped beside somebody else's, which is the contract
+         * {@link ComposioBroker.deleteAuthConfig} states.
+         *
+         * IT IS A BLOCK, AND THE BLOCK IS THE POINT. The app's row survives this throw —
+         * `removeServer` deletes it only after this returns — so the app stays on its Plugins page
+         * and stays removable, which is the one thing a silent success took away. The remedy is an
+         * operator's and it is one act in a dashboard: rename the config back so it ends with the
+         * suffix and remove the app again, which finishes the withdrawal, or satisfy yourself that
+         * it is your own and delete it there, which is the only way anything can tell this
+         * deployment that the config it made is genuinely gone.
+         *
+         * A COUNT AND THE SUFFIX, because together they are the whole of what an operator has to
+         * look at: how many objects are standing, and the exact string that would have claimed
+         * them. The names are not quoted — a config's title is an app name an administrator typed
+         * and this file's refusals quote no vendor field it does not have to.
+         *
+         * AND IT CLAIMS NOTHING ABOUT WHAT THIS DEPLOYMENT ONCE MADE. An app enabled before this
+         * deployment created configs at all never had one, which the quiet case above names, so a
+         * sentence opening "the config this deployment made" would be a guess in the one place a
+         * guess is what is being refused. What is said is only what was just read.
+         */
+        throw new BrokerRefusalError(
+          `Removing ${toolkit} found none of this deployment's own authorization configs at Composio, and Composio holds ${held.length} for ${toolkit} whose name does not carry ${CONFIG_SUFFIX} — so nothing was deleted and the app has not been withdrawn, rather than a config this deployment cannot show is its own being deleted along with every account connected against it. Nothing here can tell one of ours, renamed in Composio's dashboard, from an operator's own work. If it is this deployment's, the grants made against it are still live, and renaming it to end with ${CONFIG_SUFFIX} lets removing the app again withdraw them. If it is an operator's, only taking it out of that dashboard leaves this app with nothing standing, after which the removal goes through.`,
+        );
+      }
+
       const refused = await askForEach(ours, (config) =>
         askVendor(
           {
@@ -2041,15 +2176,30 @@ export function buildComposioClient(
        * back in front of the report, which is the order a person's grants actually need.
        */
       const { ids, nameless } = withdrawableAccounts(accounts, toolkit);
-      const refused = await askForEach(ids, (id) =>
-        askVendor(
+      /*
+       * WHAT CAME BACK IS READ, WHICH IS THE HALF THAT USED TO BE MISSING. Not throwing is not the
+       * same as having been done: Composio answers a delete with a `success` saying whether it
+       * performed one, and a `false` there means the account is still attached and no revocation
+       * job was started. It is counted as a refusal — into the same list a thrown vendor error
+       * lands in — so that the sentence below reports it as an account that was not withdrawn,
+       * which is exactly what it is. See {@link withdrawalDeclined}.
+       *
+       * INSIDE THE LOOP AND OUTSIDE {@link askVendor}, deliberately. `askVendor` wraps the
+       * `await vendor.*` and nothing else, because everything it translates is a fault raised
+       * inside the vendor's package; the refusal below is this file's own reading of a reply that
+       * arrived intact, and it already carries an authored sentence.
+       */
+      const refused = await askForEach(ids, async (id) => {
+        const answer = await askVendor(
           {
             outcome: `one of this person's ${toolkit} accounts was not withdrawn`,
             app: toolkit,
           },
           () => vendor.connectedAccounts.delete(id, { revoke_on_delete: true }),
-        ),
-      );
+        );
+        const declined = withdrawalDeclined(answer, toolkit);
+        if (declined !== null) throw declined;
+      });
 
       if (refused.length > 0 || nameless.length > 0) {
         /*
