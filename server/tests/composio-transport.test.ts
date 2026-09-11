@@ -128,6 +128,20 @@ function dumped(body: Record<string, unknown>): Error {
   });
 }
 
+/**
+ * The dump AS A BARE STRING, for the places one arrives already unwrapped from its Error.
+ *
+ * Taken off {@link dumped} rather than written out a second time, so the two cannot drift: what the
+ * envelope's `error` field and a candidate sentence are tested against is byte-for-byte the string
+ * `@composio/client` builds. A vendor gateway that proxies an upstream status and body into the
+ * field its own schema spells a sentence produces exactly this, and so does one that puts its
+ * client's message there — the shape is what is refused, not the route it took.
+ */
+const RESPONSE_DUMP = dumped({
+  detail: [{ loc: ["body", "arguments"], msg: "unrecognised" }],
+  request_id: "must-not-appear",
+}).message;
+
 function recording(answers: Partial<ComposioActions> = {}): {
   client: ComposioActions;
   calls: Recorded[];
@@ -416,6 +430,39 @@ describe("finding the vendor's own sentence", () => {
       vendorSentence(dumped({ detail: "something went wrong" })),
     ).toBeNull();
     expect(vendorSentence(dumped({}))).toBeNull();
+  });
+
+  test("a response dump found where the sentence belongs is not a sentence either", () => {
+    /*
+     * THE OTHER HALF OF THE JUDGEMENT, WHICH ONLY ONE OF THE THREE READERS WAS MAKING. The dump
+     * refusal was added to the thrown-message guard and to nothing else, so a status code followed
+     * by a whole response body arriving AT `error.message` — the field this function reaches for —
+     * was passed on as the vendor's own explanation, at both depths. The test above only covers a
+     * body with no `message` at all; it says nothing about a `message` that is itself a dump, which
+     * is what a gateway proxying an upstream reply puts there.
+     *
+     * Refused for the reason the placeholder is: it is not an explanation, and it costs a request
+     * id in a model's context and an audit row the size of a response body to say so.
+     */
+    expect(vendorSentence(nested(RESPONSE_DUMP))).toBeNull();
+    expect(vendorSentence(unwrapped(RESPONSE_DUMP))).toBeNull();
+  });
+
+  test("a status code with a real sentence after it is still a sentence", () => {
+    /*
+     * THE LIMIT ON THE REFUSAL ABOVE, asserted so that widening it reddens something. What the
+     * module refuses is a three-digit status followed by the OPENING OF A JSON DOCUMENT, because
+     * that is the string the client builds and nothing a person writes. A status code followed by
+     * words is the client's other branch — the body's own `message` came through — and it is the
+     * most useful sentence on this path; refusing it would replace a named cause with advice to
+     * check a connection that is fine.
+     */
+    expect(vendorSentence(nested("400 Invalid auth config id"))).toBe(
+      "400 Invalid auth config id",
+    );
+    expect(vendorSentence(unwrapped("404 status code (no body)"))).toBe(
+      "404 status code (no body)",
+    );
   });
 });
 
@@ -1248,6 +1295,135 @@ describe("listing an app's actions", () => {
     }
   });
 
+  test("a list whose labels are not labels records no action as safe", async () => {
+    /*
+     * THE CONTAINER WAS CHECKED AND ITS CONTENTS WERE TRUSTED, which is the third distinct way this
+     * one field has been found unheld. `Array.isArray` settles that `tags` can be iterated and says
+     * nothing about what comes out, and `effectOf` decides by `Set.has("destructiveHint")` — an
+     * identity comparison that no non-string element can ever satisfy. So a destructive action
+     * whose labels arrive as objects, as nested arrays or as numbers is recorded with
+     * `destructive: false`.
+     *
+     * WHICH IS THE SAME SILENT WRONG ANSWER THE STRING CASE ABOVE IS REFUSED FOR, and worse in the
+     * direction it fails. `new Set("readOnlyHint")` at least loses a READ, and an action wrongly
+     * called a write is only asked about too often. This loses the DESTRUCTIVE flag, and that field
+     * is what decides whether a Bot is stopped before it runs the action at all — nobody sees it is
+     * wrong, because a row that says "not destructive" looks exactly like an action that is not.
+     *
+     * `["readOnlyHint", 7]` IS HERE BECAUSE THE HOLE IS PER-ELEMENT. A list that is mostly labels is
+     * the shape a vendor actually sends when one entry is malformed, and a guard written as "are
+     * any of these strings" rather than "are all of these strings" would pass it.
+     */
+    for (const tags of [
+      [["destructiveHint"]],
+      [{ name: "destructiveHint" }],
+      [123],
+      [null],
+      ["readOnlyHint", 7],
+    ]) {
+      useComposioClient(
+        recording({
+          listActions: async () =>
+            [
+              GMAIL_READ,
+              { slug: "GMAIL_DELETE_DRAFT", description: "Delete.", tags },
+            ] as unknown as ComposioAction[],
+        }).client,
+      );
+
+      const outcome = await listTools({ url: "composio://gmail" }).then(
+        (listed) =>
+          `the listing was committed, as ${JSON.stringify(
+            listed.map((tool) => [tool.name, tool.destructive]),
+          )}`,
+        (error: unknown) => (error as Error).message,
+      );
+
+      const named = JSON.stringify(tags);
+      // NAMED IN THE SUCCESS ARM, so the failure message says what was recorded rather than only
+      // that something was. The wrong answer this test exists for is a specific pair —
+      // ["GMAIL_DELETE_DRAFT",false] — and a reader of a red run should not have to go and find it.
+      expect(`${named}: ${outcome}`).not.toContain("the listing was committed");
+      expect(outcome).toContain("GMAIL_DELETE_DRAFT");
+      expect(outcome).toContain("gmail");
+      expect(outcome).not.toMatch(/is not iterable|is not a function/i);
+    }
+  });
+
+  test("a version that is not a version breaks the listing rather than the runtime", async () => {
+    /*
+     * THE FIELD BESIDE THE LABELS, WITH THE FAILURE THE LABELS' GUARD EXISTS TO PREVENT. `version`
+     * is read as `action.version?.trim()` in a map that sits OUTSIDE the try wrapping the vendor's
+     * call, and `?.` guards nothing but null and undefined — so a number, an object or a boolean
+     * throws `action.version?.trim is not a function` out of `listTools`, and that engine sentence
+     * is what `refreshTools` writes into the row's `lastError` for an administrator to read.
+     *
+     * REFUSED RATHER THAN TREATED AS NO VERSION, which is the other candidate repair and the wrong
+     * one. An action recorded with no version is permanently uncallable and its refusal names a
+     * refresh — which would write the same unreadable field back — and committing the listing
+     * deletes the version already held for every OTHER action on the app, which no later refresh
+     * reconstructs where Composio publishes none. Keeping what is held is what every sibling
+     * refusal on this path does.
+     */
+    for (const version of [5, { major: 1 }, ["20260903_00"], true]) {
+      useComposioClient(
+        recording({
+          listActions: async () =>
+            [
+              GMAIL_READ,
+              { slug: "GMAIL_ODD_VERSION", tags: ["readOnlyHint"], version },
+            ] as unknown as ComposioAction[],
+        }).client,
+      );
+
+      const outcome = await listTools({ url: "composio://gmail" }).then(
+        () => "the listing was committed",
+        (error: unknown) => (error as Error).message,
+      );
+
+      const named = JSON.stringify(version);
+      expect(`${named}: ${outcome}`).not.toBe(
+        `${named}: the listing was committed`,
+      );
+      expect(outcome).toContain("GMAIL_ODD_VERSION");
+      expect(outcome).toContain("gmail");
+      expect(outcome).not.toMatch(/is not a function|undefined is not/i);
+    }
+  });
+
+  test("an absent version is still absent rather than unreadable", async () => {
+    /*
+     * THE LIMIT ON THE REFUSAL ABOVE. "Composio published no version" is a real and common state
+     * this file already has an answer for — the action is listed with no version key — and `null`
+     * is how JSON spells it. The `?.` in the map has always read null that way, so refusing it
+     * would turn a healthy refresh into a total failure for every app that publishes one, which is
+     * exactly the loss the refusal above is written to avoid.
+     */
+    useComposioClient(
+      recording({
+        listActions: async () =>
+          [
+            { slug: "GMAIL_NO_VERSION", tags: ["readOnlyHint"] },
+            {
+              slug: "GMAIL_NULL_VERSION",
+              tags: ["readOnlyHint"],
+              version: null,
+            },
+          ] as unknown as ComposioAction[],
+      }).client,
+    );
+
+    const listed = await listTools({ url: "composio://gmail" });
+
+    expect(listed.map((tool) => tool.name)).toEqual([
+      "GMAIL_NO_VERSION",
+      "GMAIL_NULL_VERSION",
+    ]);
+    for (const tool of listed) {
+      expect(Object.keys(tool)).not.toContain("version");
+    }
+  });
+
   test("a vendor complaint that merely carries issues is not answered with an upgrade", async () => {
     /*
      * `isSchemaMismatch` duck-types on the PRESENCE of an `issues` array, and an array under that
@@ -2021,6 +2197,48 @@ describe("calling one action", () => {
     expect(result.text).toContain("GMAIL_FETCH_EMAILS");
   });
 
+  test("the serialization refusal quotes a reason through the same door as the rest", async () => {
+    /*
+     * THE ONE PATH THAT REACHED A MODEL AND THE AUDIT ROW WITHOUT PASSING THE DOOR AT ALL.
+     *
+     * Every other refusal in this module reads its candidate sentence through the judgement that
+     * refuses the vendor's placeholder and the response dump. This one interpolated a raw
+     * `error.message` — whatever `JSON.stringify` threw with — straight into the sentence
+     * `store.ts` records, with nothing asked of it. A `toJSON` is the vendor's own hook on the
+     * vendor's own data, so what it throws with is theirs; the class of message is the same one
+     * refused four lines away, and the guard is not a guard if the string can walk round it.
+     *
+     * WHAT THE REFUSAL STILL HAS TO SAY is which of the two events this was: the action ran and
+     * Composio answered, and it is this deployment that could not read the answer. That claim is
+     * this file's own and survives having no reason to quote.
+     */
+    useComposioClient(
+      recording({
+        execute: async () =>
+          answered({
+            attachment: {
+              toJSON() {
+                throw new Error(RESPONSE_DUMP);
+              },
+            },
+          }),
+      }).client,
+    );
+
+    const result = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/could not turn that answer into text/i);
+    expect(result.text).toContain("GMAIL_FETCH_EMAILS");
+    expect(result.text).not.toContain("must-not-appear");
+    expect(result.text).not.toContain("unrecognised");
+    expect(result.text).not.toContain("{");
+  });
+
   test("an answer reporting an error while claiming success is a failure", async () => {
     /*
      * `ToolExecuteResponseSchema` spells `error` and `successful` as two independent required
@@ -2236,6 +2454,81 @@ describe("calling one action", () => {
 
     expect(reported.isError).toBe(true);
     expect(reported.text).toContain("Plugins page");
+  });
+
+  test("a reported error that is a response dump is refused like the placeholder", async () => {
+    /*
+     * THE ESCAPE THE EXTRACTION WAS MEANT TO CLOSE, LEFT OPEN ON THE ONE CALLER THAT WAS NOT MOVED.
+     *
+     * `thrownSentence` was given both refusals — the vendor's placeholder AND the status code
+     * followed by a stringified body — precisely so that no path could grow one without the other.
+     * This path never went through it: it tested `VENDOR_PLACEHOLDER` against the envelope's `error`
+     * field itself, so the second refusal simply did not exist here, and a dump arriving in that
+     * field went to the model as the vendor's own report and into `store.ts`'s audit row beside it.
+     *
+     * BOTH FLAG VALUES, because the dump is equally unreadable under either and the branch that
+     * judges the sentence is reached under both. `successful: true` beside a non-empty `error` is
+     * already a reported failure by this module's own rule, so the only question left is what is
+     * said about it — and a request id and a validation payload are not it.
+     */
+    for (const successful of [false, true]) {
+      useComposioClient(
+        recording({
+          execute: async () =>
+            answered(
+              { messages: [{ id: "m1" }] },
+              { successful, error: RESPONSE_DUMP },
+            ),
+        }).client,
+      );
+
+      const result = await callTool(
+        { url: "composio://gmail", actorId: "user_asker" },
+        "GMAIL_FETCH_EMAILS",
+        { __version: "20260903_00" },
+      );
+
+      const named = `successful: ${successful}`;
+      expect(`${named}: ${result.isError}`).toBe(`${named}: true`);
+      // Everything the dump would have carried into a model's context and the audit row.
+      expect(result.text).not.toContain("must-not-appear");
+      expect(result.text).not.toContain("unrecognised");
+      expect(result.text).not.toContain("{");
+      // And what is said instead names the action and the one thing the reader can do about it,
+      // which is what every sibling on this path answers an unreadable report with.
+      expect(result.text).toContain("GMAIL_FETCH_EMAILS");
+      expect(result.text).toMatch(/Plugins page/);
+      // The data must not be handed over as content beside a reported failure either.
+      expect(result.text).not.toContain("m1");
+    }
+  });
+
+  test("a reported error that is a status code and words is still passed on", async () => {
+    /*
+     * THE LIMIT ON THE REFUSAL ABOVE, on this path as well as on `vendorSentence`'s. A dump is a
+     * status followed by the opening of a JSON document; a status followed by the body's own
+     * sentence is the client's other branch and is the most useful thing a reader gets. Widening
+     * the refusal to every message that opens with three digits would swap a named cause for
+     * advice about a connection that is working, so it has to redden something.
+     */
+    useComposioClient(
+      recording({
+        execute: async () =>
+          answered(
+            {},
+            { successful: false, error: "400 Invalid auth config id" },
+          ),
+      }).client,
+    );
+
+    const result = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe("400 Invalid auth config id");
   });
 
   test("a successful flag that is not a boolean is not read as a success", async () => {
