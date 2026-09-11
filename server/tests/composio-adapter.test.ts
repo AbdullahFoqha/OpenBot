@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
-  type ComposioBroker,
   BrokerRefusalError,
   brokerSentence,
+  type ComposioBroker,
 } from "../src/plugins/broker";
 import {
   type ComposioActions,
@@ -89,6 +89,22 @@ function fakeVendor(parts: {
  */
 const WHOLE_LISTING = 1000;
 
+/**
+ * How many pages of one listing the adapter reads before it refuses, WRITTEN OUT for the reason
+ * {@link WHOLE_LISTING} is — and asserted exactly, for a reason of its own.
+ *
+ * `expect(calls).toBeLessThan(200)` stood against a ceiling of 50. That bound pins nothing: it
+ * passes at 50 pages, at 51, at 199, and at any ceiling anybody cares to raise it to short of the
+ * test's own runaway stop — which is to say it asserted that the paging terminated and called that
+ * an assertion about the ceiling. It was also green over the off-by-one it was the only test in a
+ * position to see: the adapter read 51 pages while its refusal said 50, because the ceiling was
+ * tested before the page it was counting had been recorded.
+ *
+ * So the number of pages READ and the number the refusal STATES are both asserted, and both
+ * against this literal.
+ */
+const PAGES_BEFORE_REFUSING = 50;
+
 /** The page this deployment sends somebody back to once the consent screen is done with them. */
 const RETURN_URL = "https://openbot.test/settings/connected-accounts/x";
 
@@ -110,6 +126,18 @@ const RETURN_URL = "https://openbot.test/settings/connected-accounts/x";
  * the reader.
  */
 const WITHDRAWN = { success: true };
+
+/**
+ * What Composio answers a creation it actually performed, for the reason {@link WITHDRAWN} exists.
+ *
+ * `transformCreateAuthConfigResponse` builds this answer by reading `response.auth_config.id`
+ * (`@composio/core` 0.18.1, `src/utils/transformers/authConfigs.ts:96-106`), so an id is the one
+ * thing a created config comes back with. A double answering `undefined` is a double of a reply the
+ * vendor cannot send — harmless only for as long as the adapter read nothing off it, which is
+ * exactly the state that let a shape drift here report that nothing had been created over a config
+ * standing at Composio.
+ */
+const CREATED = { id: "ac_created" };
 
 /**
  * The three auth configs this file reasons about, named once rather than spelled at each fixture.
@@ -260,6 +288,41 @@ describe("listing an app's actions", () => {
         version: "20260903_00",
       },
     ]);
+  });
+
+  test("a page of no rows is refused rather than dropped on the way to the vendor", async () => {
+    const asked: unknown[] = [];
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          getRawComposioTools: async (query: unknown) => {
+            asked.push(query);
+            // Twenty rows: Composio's own default page, which is what a dropped limit produces.
+            return Array.from({ length: 20 }, (_, index) => ({
+              slug: `GMAIL_ACTION_${index}`,
+            }));
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(actions.listActions("gmail", { limit: 0 }));
+
+    /*
+     * A ZERO DOES NOT TRAVEL SHORT — IT DOES NOT TRAVEL. `getRawComposioTools` composes its request
+     * with `...(limit ? { limit } : {})` (`@composio/core` 0.18.1, `src/models/Tools.ts:536`) over
+     * a schema that spells the field `z.number().optional()` with no floor
+     * (`src/types/tool.types.ts:257`), so the request goes out with no limit and Composio answers
+     * with its own page of twenty. Nothing downstream can see that: `./composio` catches a page
+     * that might be a fragment by measuring it against 1000, and twenty is nowhere near it, so the
+     * vendor's default commits as everything the app publishes and every action past it is deleted
+     * from `mcp_tools` by a refresh that reported success.
+     */
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/0 rows is not a page/);
+    expect(refusal.message).toMatch(/tools already held are untouched/);
+    // Nothing went out, which is the point: the fault is in the request, not in the answer.
+    expect(asked).toEqual([]);
   });
 });
 
@@ -996,6 +1059,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
           list: async () => ({ items: [BY_HAND] }),
           create: async (...call: unknown[]) => {
             created.push(call);
+            return CREATED;
           },
         },
       }),
@@ -1183,6 +1247,25 @@ describe("withdrawing one person's grants", () => {
         limit: WHOLE_LISTING,
       },
     ]);
+  });
+
+  test("nobody with no account for the app is answered no", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: { list: async () => ({ items: [] }) },
+      }),
+      () => 1_000_000,
+    );
+
+    /*
+     * THE ONLY TEST IN THIS FILE THAT CAN FAIL A GATE THAT ALWAYS OPENS. Both assertions about
+     * `isConnected` expected `true`, so `async isConnected() { return true }` was green — and a
+     * gate that cannot answer no is a gate that lets every call through, which is exactly the
+     * question `./access` asks this method before running somebody's action.
+     */
+    expect(
+      await broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
+    ).toBe(false);
   });
 
   test("a refusal partway through still asks about the accounts behind it", async () => {
@@ -1817,9 +1900,19 @@ describe("each vendor condition reaches the reader as its own remedy", () => {
     return broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" });
   }
 
+  /**
+   * ONE APP ACROSS ALL FOUR CONTEXTS, WHICH IS WHAT MAKES THE CROSS-CHECK BELOW MEAN ANYTHING.
+   *
+   * Three of these remedies name the app they are about. The linking and creating contexts were
+   * about `linear` and the resolving and running ones about `gmail`, so "this sentence does not
+   * also prescribe somebody else's step" was being asked with a regular expression naming an app
+   * the sentence could not have mentioned — it passed for every pair that crossed the two contexts
+   * for a reason that had nothing to do with the sentences, which is most of the table. One app
+   * makes every row comparable with every other.
+   */
   const CALL = {
-    toolkit: "gmail",
-    slug: "GMAIL_FETCH_EMAILS",
+    toolkit: "linear",
+    slug: "LINEAR_CREATE_ISSUE",
     userId: "user_1",
     version: "20260903_00",
   };
@@ -1839,8 +1932,8 @@ describe("each vendor condition reaches the reader as its own remedy", () => {
       fakeVendor({
         tools: {
           getRawComposioToolBySlug: async () => ({
-            slug: "GMAIL_FETCH_EMAILS",
-            toolkit: { slug: "gmail" },
+            slug: CALL.slug,
+            toolkit: { slug: CALL.toolkit },
           }),
           execute: raise,
         },
@@ -1890,7 +1983,7 @@ describe("each vendor condition reaches the reader as its own remedy", () => {
       name: "ComposioConnectedAccountNotFoundError",
       raisedBy: "tools.execute",
       remedy:
-        /connecting gmail again on this deployment's Connected accounts page/,
+        /connecting linear again on this deployment's Connected accounts page/,
       ask: whileRunning,
     },
     {
@@ -1923,6 +2016,36 @@ describe("each vendor condition reaches the reader as its own remedy", () => {
       }
     });
   }
+
+  /**
+   * ONE VENDOR CLASS OVER EVERY WAY A FETCH CAN FAIL, which is a fact about the SDK rather than a
+   * reading of its name. `getRawComposioToolBySlug` wraps its retrieve in a try whose catch
+   * rethrows everything except a cancellation as `ComposioToolNotFoundError` (`@composio/core`
+   * 0.18.1, `src/models/Tools.ts:709-721`), and `tools.execute` resolves through that same method
+   * (`:1163`). A 500, a 429, a refused key and a socket that hung up therefore all arrive wearing
+   * the name of an action that was withdrawn — and the sentence read the name as the finding,
+   * telling an administrator during an outage that Composio no longer publishes their action and
+   * that pressing Refresh at the vendor that is not answering will fix it.
+   */
+  test("the withdrawn-action condition does not claim to know Composio withdrew anything", async () => {
+    const failure = await failureOf(
+      whileResolving(raising("ComposioToolNotFoundError")),
+    );
+    const sentence = brokerSentence(failure);
+
+    expect(sentence).not.toBeNull();
+    // The refresh stays, because a withdrawn action is the commonest of them and the refresh is
+    // the only act that settles that reading.
+    expect(sentence).toMatch(/records what Composio publishes now/);
+    // What was missing is the other reading, and the fact that separates the two — which is
+    // something an administrator can go and look at.
+    expect(sentence).toMatch(
+      /a timeout, a dropped connection, a 500, a refused key/,
+    );
+    expect(sentence).toMatch(/says nothing that tells the two apart/);
+    // And the claim it must no longer make.
+    expect(sentence).not.toMatch(/no longer publishes that action/);
+  });
 
   /**
    * The vendor's own words win where there are any, which is the limit on translating at all.
@@ -2587,7 +2710,12 @@ describe("a listing that arrived with a cursor still outstanding", () => {
             // the one shape only the ceiling catches. The throw is the test's own stop: without a
             // ceiling in the adapter this listing has no end at all.
             if (calls > 200) throw new Error("The paging did not terminate.");
-            return { items: [], nextCursor: `page_${calls}` };
+            // One row a page, so the row count in the refusal is a figure somebody counted rather
+            // than the page size this deployment asked for.
+            return {
+              items: [{ id: `ca_${calls}` }],
+              nextCursor: `page_${calls}`,
+            };
           },
           delete: async (id: string) => {
             deleted.push(id);
@@ -2604,9 +2732,20 @@ describe("a listing that arrived with a cursor still outstanding", () => {
     // Stopping is the easy half; the half that matters is that stopping is not answering. A ceiling
     // that returned the rows it had would be the page ceiling again, further out and harder to see.
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
-    expect(refusal.message).toMatch(/pages/);
-    expect(calls).toBeLessThan(200);
     expect(deleted).toEqual([]);
+
+    // The number of pages that happened, and the number the sentence states, are the same number.
+    expect(calls).toBe(PAGES_BEFORE_REFUSING);
+    expect(refusal.message).toMatch(
+      new RegExp(`answered ${PAGES_BEFORE_REFUSING} pages`),
+    );
+
+    // And the sentence asserts no page size nobody measured. `at 1000 rows each` was the limit this
+    // deployment ASKED for, stated as a fact about what Composio sent — these pages carry one row.
+    expect(refusal.message).not.toMatch(new RegExp(`${WHOLE_LISTING} rows`));
+    expect(refusal.message).toMatch(
+      new RegExp(`${PAGES_BEFORE_REFUSING} rows in all`),
+    );
   });
 });
 
@@ -2756,6 +2895,25 @@ describe("a vendor answer that is one object rather than a listing", () => {
 describe("what a malformed field of a row actually costs", () => {
   const CATALOGUE_ROWS: { fault: string; row: unknown; names: RegExp }[] = [
     {
+      fault: "a slug that arrived as null",
+      // The slug is the only name this deployment has for an app: it is what enabling one writes
+      // into a url and what every later call names, so a row without one is an app whose Add button
+      // records something nothing can act on. Deleting this guard left the suite green.
+      row: { slug: null, name: "Gmail", meta: {} },
+      names: /slug/,
+    },
+    {
+      fault: "a logo that is not an address",
+      // This value is put in an image address on an administrator's picker. Deleting this guard
+      // also left the suite green: the object went into `src` and the page showed a broken image.
+      row: {
+        slug: "gmail",
+        name: "Gmail",
+        meta: { logo: { url: "https://example.test/gmail.png" } },
+      },
+      names: /logo/,
+    },
+    {
       fault: "a name that arrived as null",
       // `?? ""` here is an app in an administrator's picker with nothing written on it, and `gmail`
       // is a slug rather than a title.
@@ -2902,6 +3060,177 @@ describe("what a malformed field of a row actually costs", () => {
     expect(deleted).toEqual([]);
   });
 
+  test("an unreadable status names every config's own, not the first one's for all of them", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_a", name: "Linear (OpenBot)", status: "PENDING" },
+              { id: "ac_b", name: "Linear (OpenBot)", status: "SUSPENDED" },
+            ],
+          }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(
+      broker.authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: RETURN_URL,
+      }),
+    );
+
+    /*
+     * TWO CONFIGS, TWO STATUSES, AND THE SENTENCE COUNTED BOTH AND QUOTED ONE — asserting of the
+     * pair a fact it had established of the first. The status is quoted because it is the one
+     * thing an operator can search a dashboard and a changelog for, and an operator given PENDING
+     * would never find the config that says SUSPENDED.
+     */
+    expect(refusal.message).toMatch(/"PENDING"/);
+    expect(refusal.message).toMatch(/"SUSPENDED"/);
+    expect(refusal.message).toMatch(/2 of this deployment's 2/);
+  });
+
+  test("a status that is not a vendor enum name is described rather than repeated", async () => {
+    /*
+     * THIS BRANCH IS REACHED PRECISELY BECAUSE THE VALUE IS NOT ONE OF THE WORDS THE CODE EXPECTS,
+     * so "it is a closed set of enum names" — the whole argument for quoting it — is the one thing
+     * that cannot be assumed here. What arrives is whatever came off the wire, and the refusal it
+     * lands in is read off an admin page, written into an app's `lastError` and put in front of a
+     * model.
+     */
+    const WIRE = `<!doctype html>\n<title>502 Bad Gateway</title>\n${"x".repeat(20_000)}`;
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [{ id: "ac_a", name: "Linear (OpenBot)", status: WIRE }],
+          }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(
+      broker.authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: RETURN_URL,
+      }),
+    );
+
+    expect(refusal.message).not.toContain("502 Bad Gateway");
+    expect(refusal.message).not.toContain("x".repeat(64));
+    expect(refusal.message.length).toBeLessThan(1000);
+    // Still a refusal, and still one naming the state: what the value IS remains the finding even
+    // where the value itself is not safe to repeat.
+    expect(refusal.message).toMatch(/neither ENABLED nor DISABLED/);
+    expect(refusal.message).toMatch(/a string/);
+  });
+
+  test("the config a connection is begun against is chosen in one order everywhere", async () => {
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_a", name: "Linear (OpenBot)", status: "ENABLED" },
+              { id: "ac_B", name: "Linear (OpenBot)", status: "ENABLED" },
+            ],
+          }),
+        },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    await broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl: RETURN_URL,
+    });
+
+    /*
+     * `ac_B` BECAUSE "B" IS 0x42 AND "a" IS 0x61, which is the same answer on every machine. Under
+     * `localeCompare` with no locale it is the HOST that decides — an English collation puts
+     * `ac_a` first — and the two callers this order exists to keep in step are a person pressing
+     * Connect and an administrator pressing Remove, who need not be answered by the same process,
+     * container or build of ICU. This pair is the one that tells the two orders apart.
+     */
+    expect(linked).toEqual([["user_1", "ac_B", { callbackUrl: RETURN_URL }]]);
+  });
+
+  test("a created config the answer does not name is reported as possibly standing", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [] }),
+          // The create was accepted; what came back carries no id. The answer used to be awaited
+          // and dropped, so this was a successful enable of an app whose config nothing here could
+          // show existed.
+          create: async () => ({}),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(
+      broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/may well be standing/);
+    expect(refusal.message).toMatch(/enabling linear again finds it/);
+  });
+
+  test("a create whose reply the SDK could not read does not claim nothing was created", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [] }),
+          /*
+           * What `transformCreateAuthConfigResponse` does to an answer with no `auth_config`: it
+           * reads `response.auth_config.id` (`@composio/core` 0.18.1,
+           * `src/utils/transformers/authConfigs.ts:96-106`) and raises inside the vendor's own
+           * package — AFTER the create has been sent and answered.
+           */
+          create: async (): Promise<never> => {
+            throw new TypeError(
+              "undefined is not an object (evaluating 'response.auth_config.id')",
+            );
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(
+      broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" }),
+    );
+
+    /*
+     * THE ONE CONDITION MOST LIKELY TO MEAN THE CONFIG EXISTS WAS THE ONE SAYING IT DID NOT. The
+     * `TypeError` row translates a fault raised inside `@composio/core` while it READ a reply, so
+     * by the time this sentence is composed the request has gone out and Composio has answered it
+     * — and the outcome clause read "no authorization config was created for linear".
+     */
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(/no authorization config was created/);
+    expect(refusal.message).toMatch(
+      /whether an authorization config for linear now stands at Composio is not something this deployment can tell/,
+    );
+  });
+
   const UNSETTLED: { fault: string; status: unknown }[] = [
     { fault: "a status this deployment has never heard of", status: "PENDING" },
     { fault: "no status at all", status: undefined },
@@ -2949,4 +3278,142 @@ describe("what a malformed field of a row actually costs", () => {
       expect(linked).toEqual([]);
     });
   }
+});
+
+/**
+ * WHAT A FIELD COMPOSIO PADDED IS WORTH, WHICH IS THE FIELD AND NOT THE FIELD PLUS ITS PADDING.
+ *
+ * `textOf` decided emptiness on the TRIMMED string and answered the PADDED one — a guard that
+ * checked one value and passed along another — so every identifier this adapter reads travelled
+ * with whatever whitespace the wire wrapped it in. Not one of the four below is cosmetic: three of
+ * them are what a later REQUEST names, and the fourth is both sides of the one comparison this
+ * file refuses a call on.
+ *
+ * WHY A VENDOR WOULD SEND ONE AT ALL is the same reason `madeHere` tolerates a trailing space in a
+ * config's name: these values pass through dashboards where people type, paste and edit them.
+ */
+describe("a field Composio padded with whitespace", () => {
+  test("a padded slug and title reach the picker as the app's own name", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          get: async () => [
+            { slug: "  gmail  ", name: " Gmail ", meta: { toolsCount: 63 } },
+          ],
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const [app] = await broker.listApps();
+
+    /*
+     * THE SLUG IS THE ONE THAT COSTS SOMETHING. `addBrokeredApp` composes `composio://<slug>` from
+     * exactly this value, and `toolkitOf` reads the app back out of that url through a character
+     * class that admits no spaces — so a padded slug here is an enabled app whose url names no app
+     * at all, and every later call through it refuses.
+     */
+    expect(app?.slug).toBe("gmail");
+    expect(app?.name).toBe("Gmail");
+  });
+
+  test("a padded config id is what the delete names, without the padding", async () => {
+    const deleted: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: " ac_ours ", name: "Linear (OpenBot)", status: "ENABLED" },
+            ],
+          }),
+          delete: async (...call: unknown[]) => {
+            deleted.push(call);
+          },
+        },
+      }),
+    );
+
+    await broker.deleteAuthConfig("linear");
+
+    // The id is the whole of what a deletion names, and this one was sent verbatim: Composio is
+    // asked to remove an object with a name nobody holds, and this deployment records a withdrawal.
+    expect(deleted).toEqual([["ac_ours", { revoke_on_delete: true }]]);
+  });
+
+  test("a padded account id is what the withdrawal names", async () => {
+    const deleted: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => ({ items: [{ id: " ca_1 " }] }),
+          delete: async (...call: unknown[]) => {
+            deleted.push(call);
+            return WITHDRAWN;
+          },
+        },
+      }),
+    );
+
+    expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+      true,
+    );
+    expect(deleted).toEqual([["ca_1", { revoke_on_delete: true }]]);
+  });
+
+  test("a padded action slug is recorded as the action rather than as one nothing can call", async () => {
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          getRawComposioTools: async () => [
+            { slug: " GMAIL_FETCH_EMAILS ", version: "20260903_00" },
+          ],
+        },
+      }),
+    );
+
+    const [action] = await actions.listActions("gmail", {
+      limit: WHOLE_LISTING,
+    });
+
+    // This becomes `mcp_tools.name`, which is half that table's primary key, what a grant points at
+    // and what the next call sends back to Composio.
+    expect(action?.slug).toBe("GMAIL_FETCH_EMAILS");
+  });
+
+  test("a padded app slug on the vendor's answer is not a mismatch", async () => {
+    const ran: unknown[] = [];
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          getRawComposioToolBySlug: async () => ({
+            slug: "GMAIL_FETCH_EMAILS",
+            toolkit: { slug: " gmail " },
+          }),
+          execute: async (...call: unknown[]) => {
+            ran.push(call);
+            return { successful: true, data: {}, error: null };
+          },
+        },
+      }),
+    );
+
+    /*
+     * THE MISMATCH REFUSAL IS THE ONE PLACE THIS FILE REFUSES TO RUN SOMETHING, and it exists for a
+     * url edited between a refresh and a call. A padded slug is not that: it is the same app,
+     * refused with a sentence naming a remedy — refresh this app's tools — that cannot change what
+     * Composio pads.
+     */
+    await actions.execute(
+      {
+        toolkit: "gmail",
+        slug: "GMAIL_FETCH_EMAILS",
+        userId: "user_1",
+        version: "20260903_00",
+      },
+      {},
+    );
+
+    expect(ran).toHaveLength(1);
+  });
 });

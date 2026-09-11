@@ -262,10 +262,25 @@ function sent(value: unknown): string {
  * status is one of a closed set of vendor enum names, carries nobody's data, and IS the finding —
  * "Composio called it PENDING" is something an operator can search their dashboard and the vendor's
  * changelog for, where "Composio sent a string" is something they can only shrug at.
+ *
+ * AND THE ARGUMENT ONLY HOLDS WHILE THE VALUE IS ACTUALLY ONE OF THOSE NAMES, which is the hole
+ * this closes. Every caller reaches this function on the branch taken precisely BECAUSE the value
+ * is not one of the words the code expects — so what arrives is not "an enum name Composio has
+ * added", it is whatever came off the wire: a gateway's HTML error page, a stack trace, a sentence
+ * carrying a person's mailbox address, a megabyte of it. That string was interpolated whole into a
+ * refusal that is read off an admin page, written into an app's `lastError` and put in front of a
+ * model.
+ *
+ * SO THE SHAPE OF AN ENUM NAME IS THE TEST, and anything that is not one is described by
+ * {@link sent} like every other wire value in this file. A vendor enum name is a short run of
+ * letters, digits and underscores; nothing that fails that is a word an operator could search a
+ * changelog for, which was the entire argument for quoting it.
  */
+const VENDOR_ENUM_NAME = /^[A-Za-z0-9_]{1,40}$/;
+
 function named(value: unknown): string {
   const text = typeof value === "string" ? value.trim() : "";
-  return text === "" ? sent(value) : `"${text}"`;
+  return VENDOR_ENUM_NAME.test(text) ? `"${text}"` : sent(value);
 }
 
 /*
@@ -301,9 +316,22 @@ function named(value: unknown): string {
  * EMPTY COUNTS AS ABSENT because every caller of this reads an identifier — a slug, an id, a name
  * this file matches a suffix against — and an empty identifier is unusable in exactly the way a
  * missing one is, while being the one that reads as present at every glance.
+ *
+ * AND THE STRING THAT COMES BACK IS THE ONE THAT WAS JUDGED, which it was not. This decided
+ * emptiness on the TRIMMED value and answered the PADDED one, so " " was correctly refused while
+ * " ac_1 " was accepted and handed on with its spaces — a guard that checked one thing and passed
+ * along another. What that reached is the whole of this file: a padded id is what an auth-config
+ * delete and an account withdrawal NAME, so Composio is asked to remove an object nobody has;
+ * a padded slug is what an enabled app records into its url and what an action list writes into
+ * `mcp_tools`; and a padded app slug on the vendor's own answer compares unequal to the app the
+ * caller was gated on, refusing a call that was about the right app the whole time. Trimming is
+ * not tidying here — it is answering with the identifier rather than with the identifier plus
+ * whatever the wire wrapped it in.
  */
 function textOf(value: unknown): string | null {
-  return typeof value === "string" && value.trim() !== "" ? value : null;
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text === "" ? null : text;
 }
 
 /**
@@ -319,6 +347,12 @@ function textOf(value: unknown): string | null {
  * REACHING IT IS A REFUSAL AND NEVER A TRUNCATION, which is the property the whole guard exists for
  * — see {@link everyRowOf}. A ceiling that answered with what it had would be the page ceiling
  * again, one order of magnitude further out and harder to notice.
+ *
+ * AND IT IS THE NUMBER OF PAGES THAT ARE READ, WHICH IS NOT WHAT IT USED TO BE. The test stood
+ * ahead of the line recording the page it was counting, so the set held one fewer than had
+ * arrived and the refusal fired on the fifty-FIRST page while telling its reader fifty. A ceiling
+ * is a number somebody reasons about; stating one and doing another makes it the one number here
+ * nobody can check.
  */
 const PAGE_CEILING = 50;
 
@@ -416,12 +450,22 @@ async function everyRowOf<Row>(
         `Composio answered the same page of ${listing.noun} twice, so ${listing.consequence}: following its cursor did not advance, so the rest of them cannot be reached. ${VENDOR_SHAPE_REMEDY}`,
       );
     }
+    followed.add(follow);
+
+    /*
+     * COUNTED AFTER THE PAGE IS RECORDED, so the number in the sentence is the number of pages that
+     * happened — see {@link PAGE_CEILING} for the off-by-one this order closes.
+     *
+     * AND THE ROWS ARE THE ONES THAT ARRIVED. The sentence asserted `at ${LISTING_LIMIT} rows each`,
+     * which is the page this deployment ASKED FOR and not one thing it measured: Composio is free
+     * to answer fifty pages of one row, and a reader told the listing was fifty thousand rows long
+     * would be reading a figure nothing had counted. What is said now is what was collected.
+     */
     if (followed.size >= PAGE_CEILING) {
       throw new BrokerRefusalError(
-        `Composio has answered ${PAGE_CEILING} pages of ${listing.noun} at ${LISTING_LIMIT} rows each and is still offering another, so ${listing.consequence}: this deployment stops there rather than read on, because what is left cannot be told from a listing that never ends. ${VENDOR_SHAPE_REMEDY}`,
+        `Composio has answered ${PAGE_CEILING} pages of ${listing.noun}, ${rows.length} rows in all, and is still offering another, so ${listing.consequence}: this deployment stops there rather than read on, because what is left cannot be told from a listing that never ends. ${VENDOR_SHAPE_REMEDY}`,
       );
     }
-    followed.add(follow);
     cursor = follow;
   }
 }
@@ -896,14 +940,33 @@ function vendorRefusal(
       );
 
     /*
-     * THE ACTION THIS DEPLOYMENT HOLDS IS NO LONGER ONE COMPOSIO PUBLISHES. Raised by the resolve
-     * that `execute` makes before it runs anything (`src/models/Tools.ts`), so nothing ran. The
-     * tools this deployment stores are a listing taken at some earlier moment, and the remedy is
-     * therefore the same one the app-mismatch refusal below already names: re-read the listing.
+     * THE ACTION COULD NOT BE FETCHED, WHICH IS NOT THE SAME CLAIM AS THE ONE THIS USED TO MAKE.
+     *
+     * The sentence here read "Composio no longer publishes that action", on the strength of the
+     * class's name. The name does not carry that: `getRawComposioToolBySlug` wraps its whole
+     * retrieve in a try whose catch rethrows EVERYTHING except a cancellation as this class —
+     * `throw new ComposioToolNotFoundError(\`Unable to retrieve tool with slug ${"${slug}"}\`, { cause: error })`
+     * (`@composio/core` 0.18.1, `src/models/Tools.ts:709-721`) — and `tools.execute` resolves
+     * through that same method (`:1163`). So a 500, a 429, a refused key, a socket that hung up and
+     * an action genuinely withdrawn all arrive under one name, and nothing on the error tells them
+     * apart. An outage was being reported to an administrator as a catalogue change, with an
+     * instruction to press Refresh at a vendor that was not answering.
+     *
+     * WHAT CAN HONESTLY BE SAID IS THAT IT COULD NOT BE FETCHED, AND WHICH TWO READINGS THAT HAS.
+     * The refresh stays in the sentence because a withdrawn action is the commonest of them and
+     * the refresh is the only act that settles it — but it is named as the remedy for ONE of the
+     * readings rather than as the remedy, and the reader is given the fact that separates them:
+     * whether every other action of every other app is failing too. That is a thing they can look
+     * at, which "no longer publishes" was not.
+     *
+     * THE VENDOR'S OWN WORDS STILL WIN WHERE THERE ARE ANY. Where the failure underneath was an API
+     * error carrying a server sentence, the guard at the top of this function has already returned
+     * null and none of this is reached — so what this row answers is the half of the class that
+     * explained itself least.
      */
     case "ComposioToolNotFoundError":
       return refusal(
-        `Composio no longer publishes that action at the version this deployment recorded for it, so ${outcome}. An action withdrawn from an app and a toolkit version retired both read like this, and a retry reaches neither: refreshing ${app}'s tools on its Plugins page records what Composio publishes now.`,
+        `Composio would not hand that action over at the version this deployment recorded for it, so ${outcome}. This deployment's @composio/core reports an action Composio has withdrawn and a request for one that failed — a timeout, a dropped connection, a 500, a refused key — under one condition and says nothing that tells the two apart, so neither can this deployment. Refreshing ${app}'s tools on its Plugins page records what Composio publishes now, which settles it where the action is gone; where every action of every app is failing the same way, it is the request rather than the action, and Composio's status page is where that shows.`,
       );
 
     /*
@@ -1101,10 +1164,33 @@ export type ComposioVendor = {
        */
       nextCursor?: unknown;
     }>;
+    /**
+     * Create one auth config, and hand back the id Composio gave it.
+     *
+     * `Promise<unknown>` UNTIL NOW, AND THE ANSWER WAS NEVER LOOKED AT. That was read as harmless
+     * because nothing here needs the id — the next listing finds the config by its name. It is not:
+     * `transformCreateAuthConfigResponse` builds what this resolves to by dereferencing
+     * `response.auth_config.id` and `response.toolkit.slug` (`@composio/core` 0.18.1,
+     * `src/utils/transformers/authConfigs.ts:96-106`), so a drift in the answer's SHAPE raises a
+     * `TypeError` inside the vendor's package — after the create has gone out and been answered.
+     * {@link ComposioBroker.ensureAuthConfig} then reported that no config had been created, over a
+     * config standing at Composio that nothing in this deployment names. Reading the reply is what
+     * makes the difference between "nothing was created" and "something may have been" a fact
+     * rather than an assumption.
+     *
+     * `id?: unknown` FOR THE REASON EVERY OTHER FIELD IN THIS PROJECTION IS ONE: the `transform()`
+     * around it is the warn-only kind (`src/utils/transform.ts:26-36`), so
+     * `CreateAuthConfigResponseSchema` spelling the id a required string is the answer Composio
+     * MEANS to send rather than a fact about the one that arrived.
+     *
+     * NULLABLE THOUGH THE VENDOR'S OWN DECLARATION IS NOT, exactly as the account delete below is:
+     * the generated client parses the body and returns it, and reading a field off a `null` would
+     * be a crash carrying a sentence that reads like a stack trace.
+     */
     create(
       toolkit: string,
       options: { type: "use_composio_managed_auth"; name: string },
-    ): Promise<unknown>;
+    ): Promise<{ id?: unknown } | null>;
     /**
      * Delete one auth config, and ask for the upstream credentials on it to be revoked too.
      *
@@ -1267,6 +1353,17 @@ export type ComposioVendor = {
  * choose, so it is where the provenance goes.
  */
 const CONFIG_SUFFIX = "(OpenBot)";
+
+/**
+ * How many different unrecognised statuses one refusal names before it stops naming them.
+ *
+ * The set it bounds is as large as the app's config listing, which is paged — see
+ * {@link everyRowOf} — so without a bound the length of an operator's refusal is decided by how
+ * many authorization configs somebody made. Five is past the number of distinct words this can
+ * plausibly be about: `AuthConfigRetrieveResponseSchema` names two, and a vendor that has invented
+ * five more at once is a package upgrade rather than a sentence to read.
+ */
+const STATUSES_NAMED = 5;
 
 /**
  * Whether this deployment made that auth config, which is the question every decision here turns on.
@@ -1475,6 +1572,15 @@ export function buildComposioClient(
    * SORTED SO THAT TWO CALLERS AGREE. The vendor's order is not documented, and the whole failure
    * being fixed here is two calls resolving different rows; a total order on the id makes the
    * choice this file makes a stable one, whoever asks and whenever.
+   *
+   * BY CODE UNIT RATHER THAN BY `localeCompare`, WHICH IS THE WHOLE POINT OF THE SORT RATHER THAN A
+   * QUIBBLE WITH IT. `localeCompare` called with no locale collates in the HOST's, and the hosts
+   * are not one host: "ac_B" comes before "ac_a" by code unit and after it under an English
+   * collation, and the two callers this order exists to keep in step — a person pressing Connect
+   * and an administrator pressing Remove — need not be answered by the same process, the same
+   * container or the same build of ICU. An order that two machines can disagree about is not an
+   * order two callers agree on. `<` is the same total order everywhere, which is the only property
+   * asked of it here.
    */
   const configsFor = async (toolkit: string): Promise<CheckedAuthConfig[]> => {
     /*
@@ -1514,7 +1620,9 @@ export function buildComposioClient(
      */
     return rows
       .map((row, position) => configOf(row, position, toolkit))
-      .sort((one, other) => one.id.localeCompare(other.id));
+      .sort((one, other) =>
+        one.id < other.id ? -1 : one.id > other.id ? 1 : 0,
+      );
   };
 
   /** The subset of {@link configsFor} this deployment can claim, which is what two callers want. */
@@ -1667,6 +1775,29 @@ export function buildComposioClient(
   const actions: ComposioActions = {
     async listActions(toolkit, page): Promise<ComposioAction[]> {
       /*
+       * A LIMIT THAT CANNOT TRAVEL IS THE VENDOR'S DEFAULT WEARING THE CALLER'S NAME.
+       *
+       * `getRawComposioTools` composes its request with `...(limit ? { limit } : {})`
+       * (`@composio/core` 0.18.1, `src/models/Tools.ts:536`), and its schema spells the field
+       * `z.number().optional()` with no floor (`src/types/tool.types.ts:257`). So a zero is not
+       * sent short — it is not sent at all: the request goes out with no limit, Composio applies
+       * its own page of twenty, and twenty rows come back looking exactly like everything a small
+       * app publishes. Nothing downstream can see it. `./composio` measures the answer against
+       * {@link LISTING_LIMIT} to catch a page that might be a fragment, and twenty is nowhere near
+       * it, so a refresh commits the vendor's default as the whole truth about the app and deletes
+       * every action past it from `mcp_tools` while reporting success.
+       *
+       * REFUSED RATHER THAN DEFAULTED, because the page is required on this seam precisely so that
+       * no layer supplies one quietly — and a caller asking for no rows is a caller with a fault,
+       * which is a thing to report rather than a thing to correct on their behalf.
+       */
+      if (!Number.isInteger(page.limit) || page.limit < 1) {
+        throw new Error(
+          `A page of ${page.limit} rows is not a page Composio can be asked for, so ${toolkit}'s action list was not refreshed and the tools already held are untouched. This deployment's @composio/core drops a limit it reads as falsy rather than refusing it, so the request would have gone out with no limit at all and come back as the vendor's own default page — indistinguishable from everything ${toolkit} publishes.`,
+        );
+      }
+
+      /*
        * The caller's page is passed through rather than defaulted here, because the seam made
        * `page` required precisely so that no layer could quietly supply one. See the module
        * comment on what an omitted limit does beyond truncating.
@@ -1742,13 +1873,20 @@ export function buildComposioClient(
       const answeredApp = resolved.toolkit;
       let ran: string | undefined;
       if (answeredApp !== undefined) {
-        const named = textOf(answeredApp.slug);
-        if (named === null) {
+        /*
+         * `answeredSlug` RATHER THAN `named`, WHICH IS ONLY A RENAME AND IS WORTH ONE LINE. This
+         * binding was called `named` and shadowed the module helper of that name for the rest of
+         * the block — so {@link named} was unreachable here, and an edit reaching for it would have
+         * been calling a string. Nothing was wrong today; the next change to this block is what the
+         * rename is for.
+         */
+        const answeredSlug = textOf(answeredApp.slug);
+        if (answeredSlug === null) {
           throw new Error(
             `Composio sent ${sent(answeredApp.slug)} where the slug of the app ${call.slug} belongs to should be, so nothing was run: a name this deployment cannot read is not one it can compare with ${call.toolkit}. ${VENDOR_SHAPE_REMEDY}`,
           );
         }
-        ran = named;
+        ran = answeredSlug;
       }
 
       if (ran !== call.toolkit) {
@@ -1869,9 +2007,20 @@ export function buildComposioClient(
       const existing = await configsMadeHere(toolkit);
       if (existing.length > 0) return;
 
-      await askVendor(
+      /*
+       * THE OUTCOME NO LONGER CLAIMS NOTHING WAS CREATED, BECAUSE THIS CALL CANNOT KNOW THAT.
+       *
+       * It said "no authorization config was created for gmail", and {@link vendorRefusal} reads
+       * every condition out through that clause — including the `TypeError` row, which is reached
+       * exactly when the vendor's own transformer could not read a reply it had already received.
+       * So the one condition most likely to mean the config EXISTS was the one telling an
+       * administrator it did not, and nothing in this deployment then named the object standing at
+       * Composio. What is true of every condition here is the half that is said now: the app is not
+       * enabled, and what is at Composio is not something this call can report.
+       */
+      const created = await askVendor(
         {
-          outcome: `no authorization config was created for ${toolkit} and the app is not enabled`,
+          outcome: `the app is not enabled, and whether an authorization config for ${toolkit} now stands at Composio is not something this deployment can tell`,
           app: toolkit,
         },
         () =>
@@ -1880,6 +2029,26 @@ export function buildComposioClient(
             name: `${name} ${CONFIG_SUFFIX}`,
           }),
       );
+
+      /*
+       * THE REPLY IS READ, WHICH IS THE HALF THAT WAS MISSING. Composio names the config it just
+       * made, and the answer was awaited and dropped — so an answer carrying no id at all was a
+       * successful enable of an app whose config this deployment could not show existed. It is not
+       * an id anything here needs: the next listing finds the config by its name. It is the only
+       * evidence in the reply that the creation this method reports actually happened, and a method
+       * that returns nothing has no other way to have checked.
+       *
+       * AND THE REFUSAL SAYS WHAT IS PROBABLY TRUE RATHER THAN WHAT WOULD BE TIDY. The request went
+       * out and Composio replied to it, so a config very likely IS standing there — saying "none
+       * was created" would be the same lie the outcome above stopped telling. The remedy is the
+       * button they just pressed, because {@link ComposioBroker.ensureAuthConfig} is idempotent
+       * through the name: a second enable finds the suffix and adopts what is there.
+       */
+      if (textOf(created?.id) === null) {
+        throw new BrokerRefusalError(
+          `Composio answered the creation of an authorization config for ${toolkit} with ${sent(created?.id)} where the new config's id belongs, so this deployment cannot show that the config it just asked for exists and the app is not enabled. The request went out and Composio replied to it, so one may well be standing there: enabling ${toolkit} again finds it rather than making a second, because a config whose name ends with ${CONFIG_SUFFIX} is one this deployment claims. ${VENDOR_SHAPE_REMEDY}`,
+        );
+      }
     },
 
     async deleteAuthConfig(toolkit): Promise<void> {
@@ -2057,10 +2226,29 @@ export function buildComposioClient(
          * operator can search a dashboard and a changelog for.
          */
         const unreadable = ours.filter((held) => held.status !== "DISABLED");
-        const first = unreadable[0];
-        if (first !== undefined) {
+        if (unreadable.length > 0) {
+          /*
+           * EVERY STATUS THAT WAS ACTUALLY READ, AND NONE OF THEM SPEAKING FOR THE REST. The
+           * sentence counted the whole set and quoted `unreadable[0]` — "Composio describes 3 of
+           * this deployment's configs as PENDING" is a claim about three rows established of one,
+           * and an operator searching their dashboard for the word they were handed would never
+           * reach the two that say something else. Each distinct word once, so two configs wearing
+           * one status do not read as two findings.
+           *
+           * AND THE LIST IS BOUNDED, for the reason {@link named} bounds each word. This set is as
+           * large as the listing, which is paged; a refusal whose length is decided by how many
+           * configs an app has is a refusal nothing downstream can hold.
+           */
+          const words = [
+            ...new Set(unreadable.map((held) => named(held.status))),
+          ];
+          const shown = words.slice(0, STATUSES_NAMED);
+          const said =
+            words.length > shown.length
+              ? `${shown.join(", ")} and ${words.length - shown.length} other words`
+              : shown.join(", ");
           throw new BrokerRefusalError(
-            `Composio describes ${unreadable.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${named(first.status)}, which is neither ENABLED nor DISABLED, so whether a connection begun against one could complete is not something this deployment can tell. No link was made, because consent spent against a config that turns out to be disabled attaches nothing. ${VENDOR_SHAPE_REMEDY}`,
+            `Composio describes ${unreadable.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether a connection begun against one could complete is not something this deployment can tell. No link was made, because consent spent against a config that turns out to be disabled attaches nothing. ${VENDOR_SHAPE_REMEDY}`,
           );
         }
         throw new BrokerRefusalError(
