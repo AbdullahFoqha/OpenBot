@@ -77,6 +77,8 @@ import { intelligenceChannelMappings } from "./db/schema";
 import { createOnboardingStore } from "./people/onboarding";
 import { createPeopleStore } from "./people/store";
 import { useRoutineTools } from "./plugins/builtin-routines";
+import { useComposioClient } from "./plugins/composio";
+import { createComposioClient } from "./plugins/composio-adapter";
 import { redirectUriFor } from "./plugins/oauth";
 import { createPluginStore } from "./plugins/store";
 import { grantedSkills, grantedTools } from "./plugins/tools";
@@ -315,6 +317,28 @@ const computerGateway = computerProvider
  */
 const sandboxedStore = createSandboxedStore(database, bootAuditStore);
 
+/**
+ * Composio, built ONCE: the client the transport calls through and the broker behind the app
+ * directory are the same client, and the store below and the routes further down share it.
+ *
+ * ONE CLIENT, TWO SEAMS, INSTALLED TWO DIFFERENT WAYS, because the two are reached two different
+ * ways. The transport is reached as a MODULE — `transportFor` maps a kind to one, exactly as the
+ * builtin routines transport above is reached — so there is no constructor to hand a client to and
+ * the registry is built at IMPORT TIME, long before there is configuration to read. That is why the
+ * actions seam is installed globally, from here, the one place that has the key. The broker has no
+ * such problem: it is an ordinary argument, passed to the store and to `createApp`.
+ *
+ * A DEPLOYMENT WITH NO KEY INSTALLS NEITHER, which is the state the transport is written for rather
+ * than an edge of it. The seam stays null and every Composio listing and call refuses saying the
+ * connector is not configured here; the store gets no broker and the app directory says the same.
+ * Installing a client built from an absent key would turn all of that into a vendor error at first
+ * use, which sends an operator looking for a broken Composio instead of at their own configuration.
+ */
+const composio = config.composioApiKey
+  ? createComposioClient(config.composioApiKey)
+  : null;
+if (composio) useComposioClient(composio.actions);
+
 const pluginStore = createPluginStore({
   database,
   auditStore: bootAuditStore,
@@ -330,6 +354,14 @@ const pluginStore = createPluginStore({
    * registering.
    */
   redirectUri: config.publicUrl ? redirectUriFor(config.publicUrl) : undefined,
+  /*
+   * The same client the transport seam above was installed with, never a second one. Enabling an
+   * app writes the row here and creates the auth config at the vendor, and a store holding a
+   * different client from the one the call goes out through is two deployments' worth of state
+   * behind one screen. Undefined without a key, which leaves enabling an app refused rather than
+   * attempted.
+   */
+  broker: composio?.broker,
 });
 
 /**
@@ -1157,6 +1189,10 @@ const app = createApp(
   // The same store every run reads through `loadInstructionsForActor`, so the screen a person edits
   // and the prompt their coworker is built from can never be two different pieces of text.
   userInstructionsStore,
+  // The app directory, behind the same client the plugin store and the transport already share.
+  // Absent without a key, which leaves the routes reporting no broker rather than listing apps
+  // nobody could connect.
+  composio ? { broker: composio.broker } : undefined,
 );
 
 /**

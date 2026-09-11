@@ -6,6 +6,7 @@ import {
   type ToolExecuteResponse,
 } from "@composio/core";
 import { effectOf, vendorSentence } from "../src/plugins/composio";
+import { createComposioClient } from "../src/plugins/composio-adapter";
 
 /**
  * One real call to Composio, so the shapes this transport is written against are the shapes it gets.
@@ -234,5 +235,37 @@ describe.skipIf(!live)("Composio, for real", () => {
     expect(answer?.error === null || typeof answer?.error === "string").toBe(
       true,
     );
+  });
+
+  /**
+   * The catalogue an administrator picks an app out of, asked for the way the product asks for it.
+   *
+   * THROUGH `createComposioClient`, not through a hand-built `Composio` like the tests above. This
+   * one is about the broker rather than about a vendor shape, and the broker's whole listing is one
+   * request: `listApps` asks for a single page AT THE CEILING sorted by usage, because the SDK has
+   * no cursor to follow and a page is therefore all there is. So the ceiling is what makes one
+   * request the entire catalogue, and the count below is what shows it held — several hundred apps
+   * rather than the vendor's default page of twenty, which would read exactly like a full list.
+   *
+   * A read of the public catalogue: no user id is involved and nobody's account is touched.
+   */
+  test("the broker lists the whole catalogue in one request", async () => {
+    if (!key) {
+      throw new Error(
+        "Precondition not met: no COMPOSIO_API_KEY was set, so no client could be built. Nothing below was exercised.",
+      );
+    }
+    const apps = await createComposioClient(key).broker.listApps();
+
+    // Several hundred, not a page of twenty.
+    expect(apps.length).toBeGreaterThan(50);
+
+    // Not stated as a precondition: the ceiling is what makes this one request the whole listing,
+    // so an absent Gmail is a truncated answer rather than an assertion left unmade. The count is
+    // the field `listApps` reads out of `meta.toolsCount` and zeroes when the vendor publishes
+    // none, which is the one absence that would go unnoticed on the screen.
+    const gmail = apps.find((app) => app.slug === "gmail");
+    expect(gmail?.slug).toBe("gmail");
+    expect(gmail?.actionCount).toBeGreaterThan(0);
   });
 });
