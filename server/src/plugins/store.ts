@@ -897,11 +897,12 @@ export type PluginStoreOptions = {
    * Composio the broker, absent on a deployment that has not configured one.
    *
    * OPTIONAL BECAUSE ITS ABSENCE IS A STATE RATHER THAN A MISCONFIGURATION. An unset
-   * `COMPOSIO_API_KEY` is the documented default and the whole brokered surface is meant to be
-   * missing where it is unset, so the store is constructible without one and every path that needs
-   * one says so by raising {@link BrokerUnconfiguredError}. A required field would make every
-   * caller that never enables an app — the routes, the tests above — invent a broker to get a
-   * store.
+   * `COMPOSIO_API_KEY` is the documented default: where it is unset there is nothing to connect,
+   * nothing to grant and no brokered tool for a Bot to call, and what is left on screen is one row
+   * that goes nowhere under More apps on the admin Plugins page. So the store is constructible
+   * without one and every path that needs one says so by raising {@link BrokerUnconfiguredError}.
+   * A required field would make every caller that never enables an app — the routes, the tests
+   * above — invent a broker to get a store.
    */
   broker?: ComposioBroker;
   /** Where the vendor sends people back; needed to (re)register a dynamic client. */
