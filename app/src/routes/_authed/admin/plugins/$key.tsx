@@ -13,6 +13,10 @@ import {
   PageSection,
   PageShell,
 } from "@/components/layout/page-shell";
+import {
+  BrokeredAccountRow,
+  useBrokeredAccount,
+} from "@/components/plugins/brokered-account-row";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -40,9 +44,7 @@ import { agentListQueryOptions } from "@/lib/agents/queries";
 import { storeMcpToken } from "@/lib/credentials/mutations";
 import {
   addCuratedServerMutationOptions,
-  confirmBrokeredConnectionMutationOptions,
   connectAccountMutationOptions,
-  disconnectBrokeredMutationOptions,
   grantPlugin,
   invalidatePlugins,
   refreshPluginServerMutationOptions,
@@ -216,46 +218,21 @@ function RouteComponent() {
   const title = entry?.title ?? server?.title ?? key;
 
   /*
-   * Ask the vendor whether this person's brokered account is actually live, on arrival.
+   * Everything the brokered row below reads and does, shared with the personal connected-accounts
+   * screen that draws the same row. See `brokered-account-row.tsx`.
    *
-   * The return trip from consent is an ordinary redirect with nothing signed in it, so being back
-   * on this page proves nothing about what happened at the vendor. The row this page would
-   * otherwise read is written from that same unproven return, which is why the answer is asked for
-   * rather than assumed.
-   *
-   * Deliberately not wired into the banner. Somebody who abandoned the consent screen — or who has
-   * simply never connected — arrives here with nothing at the vendor to confirm, and that is an
-   * ordinary state of this page, not a failure of it. It reads as not connected, which is what it
-   * is; a red sentence across the top would be the page reporting its own question as the
-   * administrator's problem.
+   * `connectSelf` above stays: it is the `user-oauth` row's Connect, which is a different row with
+   * no Disconnect beside it and nothing brokered to confirm.
    */
-  const confirmBrokered = useMutation(
-    confirmBrokeredConnectionMutationOptions(queryClient),
-  );
-  const confirmBrokeredAccount = confirmBrokered.mutate;
-  React.useEffect(() => {
-    if (auth !== "brokered") return;
-    confirmBrokeredAccount(key);
-  }, [auth, key, confirmBrokeredAccount]);
-  const disconnectBrokered = useMutation({
-    ...disconnectBrokeredMutationOptions(queryClient),
-    ...report,
+  const brokeredAccount = useBrokeredAccount({
+    brokered: auth === "brokered",
+    configured: plugins.data?.composioConfigured ?? false,
+    recorded: youConnected,
+    report: setError,
+    // Back to this page afterwards, not to the personal settings screen.
+    returnTo: "admin",
+    serverId: key,
   });
-
-  /*
-   * Whether this person's own account is live, for the row that says so.
-   *
-   * For a brokered app that is what the vendor last answered, and only our own record until it has
-   * answered anything: `youConnected` is this deployment's row, `confirmBrokered.data` is the
-   * vendor's answer about the account behind it. The answer wins once there is one, in both
-   * directions — an account ended at Composio by somebody else reads as not connected here too. A
-   * confirm still in flight, or one that could not be made at all, leaves the recorded row
-   * standing rather than inventing either answer.
-   */
-  const accountConnected =
-    auth === "brokered"
-      ? (confirmBrokered.data?.connected ?? youConnected)
-      : youConnected;
 
   /** Adding is two writes when a token was typed: the credential, then the record pointing at it. */
   const add = async () => {
@@ -565,26 +542,41 @@ function RouteComponent() {
              * could only fail. It is the one row on this card that is not optional in practice —
              * a brokered app reaches nobody until somebody connects — but it is still personal,
              * and still this person's account and nobody else's.
+             *
+             * The two are drawn by different things, which is the honest arrangement rather than
+             * one row branching on `auth` in five places. A brokered account is ended from here as
+             * well as begun, and says so; an OAuth one is withdrawn at the vendor and this page
+             * offers no button pretending otherwise.
              */}
-            {auth === "brokered" ||
-            (auth === "user-oauth" &&
-              (server?.hasCredential || server?.dynamicClient)) ? (
+            {auth === "brokered" ? (
+              <>
+                <Separator />
+                <BrokeredAccountRow
+                  account={brokeredAccount}
+                  /* Said beside the button rather than after it: disconnecting ends the account at
+                     Composio, so what it undoes is not the row here but the grant on this person's
+                     mailbox, and connecting again is a fresh consent. */
+                  connectedDescription={`Connected, so a Bot granted these tools uses your ${title} as you. Disconnecting ends the account at Composio, not just here.`}
+                  disconnectedDescription="Connect your own account to try this connector. Setup is complete without it, and it reaches your documents only."
+                />
+              </>
+            ) : null}
+
+            {auth === "user-oauth" &&
+            (server?.hasCredential || server?.dynamicClient) ? (
               <>
                 <Separator />
                 <Item size="sm">
                   <ItemContent>
                     <ItemTitle>Your account</ItemTitle>
                     <ItemDescription>
-                      {accountConnected
-                        ? auth === "brokered"
-                          ? /* Said beside the button rather than after it: disconnecting ends the account at Composio, so what it undoes is not the row here but the grant on this person's mailbox, and connecting again is a fresh consent. */
-                            `Connected, so a Bot granted these tools uses your ${title} as you. Disconnecting ends the account at Composio, not just here.`
-                          : `Connected, so a Bot granted these tools uses your ${title} as you. Everybody else connects their own.`
+                      {youConnected
+                        ? `Connected, so a Bot granted these tools uses your ${title} as you. Everybody else connects their own.`
                         : "Connect your own account to try this connector. Setup is complete without it, and it reaches your documents only."}
                     </ItemDescription>
                   </ItemContent>
                   <ItemActions>
-                    {accountConnected ? (
+                    {youConnected ? (
                       <>
                         {/* Decorative: the word beside it already says which. */}
                         <span
@@ -594,20 +586,6 @@ function RouteComponent() {
                         <span className="text-muted-foreground text-xs">
                           Connected
                         </span>
-                        {auth === "brokered" ? (
-                          <Button
-                            disabled={disconnectBrokered.isPending}
-                            onClick={() => {
-                              setError(null);
-                              disconnectBrokered.mutate(key);
-                            }}
-                            size="sm"
-                            type="button"
-                            variant="outline"
-                          >
-                            Disconnect
-                          </Button>
-                        ) : null}
                       </>
                     ) : (
                       /* The arrow says this leaves OpenBot for the vendor's consent page. It does. */

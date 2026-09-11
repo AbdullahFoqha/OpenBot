@@ -1,13 +1,17 @@
 import { IconArrowUpRight, IconChevronDown } from "@tabler/icons-react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute, useParams } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   PageEmpty,
   PageRows,
   PageSection,
   PageShell,
 } from "@/components/layout/page-shell";
+import {
+  BrokeredAccountRow,
+  useBrokeredAccount,
+} from "@/components/plugins/brokered-account-row";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -23,11 +27,7 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import { Separator } from "@/components/ui/separator";
-import {
-  confirmBrokeredConnectionMutationOptions,
-  connectAccountMutationOptions,
-  disconnectBrokeredMutationOptions,
-} from "@/lib/plugins/mutations";
+import { connectAccountMutationOptions } from "@/lib/plugins/mutations";
 import {
   connectionsQueryOptions,
   pluginsPageQueryOptions,
@@ -49,7 +49,6 @@ function RouteComponent() {
   const { key } = useParams({
     from: "/_authed/settings/connected-accounts/$key",
   });
-  const queryClient = useQueryClient();
   const plugins = useQuery(pluginsPageQueryOptions());
   const connections = useQuery(connectionsQueryOptions());
   const [notice, setNotice] = useState<string | null>(null);
@@ -79,28 +78,14 @@ function RouteComponent() {
    */
   const brokered = server?.provenance === "composio";
 
-  /*
-   * Ask the vendor whether this brokered account is actually live, on arrival.
-   *
-   * The return trip from consent is an ordinary redirect with nothing signed in it, so being back
-   * on this page proves nothing about what happened at the vendor. So the vendor is asked, and its
-   * answer is what the row below is drawn from.
-   *
-   * Deliberately not wired into the banner. Somebody who abandoned the consent screen — or who has
-   * simply never connected — has nothing at the vendor to confirm, and that is an ordinary state of
-   * this page rather than a failure of it. It reads as not connected, which is what it is.
-   */
-  const confirmBrokered = useMutation(
-    confirmBrokeredConnectionMutationOptions(queryClient),
-  );
-  const confirmBrokeredAccount = confirmBrokered.mutate;
-  useEffect(() => {
-    if (!brokered) return;
-    confirmBrokeredAccount(key);
-  }, [brokered, key, confirmBrokeredAccount]);
-  const disconnectBrokered = useMutation({
-    ...disconnectBrokeredMutationOptions(queryClient),
-    onError: (thrown: Error) => setNotice(thrown.message),
+  /* Everything the brokered row below reads and does. See `brokered-account-row.tsx`. */
+  const brokeredAccount = useBrokeredAccount({
+    brokered,
+    configured: plugins.data?.composioConfigured ?? false,
+    recorded: connection !== undefined,
+    report: setNotice,
+    returnTo: "settings",
+    serverId: key,
   });
 
   if (plugins.isPending) {
@@ -121,15 +106,6 @@ function RouteComponent() {
    * better: its title and summary are the catalogue's, and there is none.
    */
   if (brokered && server) {
-    /*
-     * What the vendor last answered, and only our own record until it has answered anything. The
-     * answer wins once there is one, in both directions — an account ended at Composio by somebody
-     * else reads as not connected here too. A confirm still in flight, or one that could not be
-     * made at all, leaves whatever we recorded standing rather than inventing either answer.
-     */
-    const accountConnected =
-      confirmBrokered.data?.connected ?? connection !== undefined;
-
     return (
       <PageShell
         backButton={back}
@@ -145,60 +121,14 @@ function RouteComponent() {
         {/* One decision, so no heading: it would only repeat the row's own title. */}
         <PageSection>
           <PageRows className="mt-0">
-            <Item size="sm">
-              <ItemContent>
-                <ItemTitle>Your account</ItemTitle>
-                <ItemDescription>
-                  {accountConnected
-                    ? /* Said beside the button rather than after it: disconnecting ends the account
-                         at Composio, so what it undoes is not the row here but the grant on your own
-                         mailbox, and connecting again is a fresh consent. */
-                      `A Bot granted its tools reads your ${server.title} as you. Disconnecting ends the account at Composio, not just here.`
-                    : "No Bot can read this as you. Connecting takes you to Composio and then to the vendor to consent."}
-                </ItemDescription>
-              </ItemContent>
-              <ItemActions>
-                {accountConnected ? (
-                  <>
-                    {/* Decorative: the word beside it already says which. */}
-                    <span
-                      aria-hidden="true"
-                      className="size-1.5 rounded-full bg-emerald-500"
-                    />
-                    <span className="text-muted-foreground text-xs">
-                      Connected
-                    </span>
-                    <Button
-                      disabled={disconnectBrokered.isPending}
-                      onClick={() => {
-                        setNotice(null);
-                        disconnectBrokered.mutate(key);
-                      }}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      Disconnect
-                    </Button>
-                  </>
-                ) : (
-                  /* The arrow says this leaves OpenBot for the vendor's consent page. It does. */
-                  <Button
-                    disabled={connect.isPending}
-                    onClick={() => {
-                      setNotice(null);
-                      connect.mutate(key);
-                    }}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    Connect
-                    <IconArrowUpRight />
-                  </Button>
-                )}
-              </ItemActions>
-            </Item>
+            <BrokeredAccountRow
+              account={brokeredAccount}
+              /* Said beside the button rather than after it: disconnecting ends the account at
+                 Composio, so what it undoes is not the row here but the grant on your own mailbox,
+                 and connecting again is a fresh consent. */
+              connectedDescription={`A Bot granted its tools reads your ${server.title} as you. Disconnecting ends the account at Composio, not just here.`}
+              disconnectedDescription="No Bot can read this as you. Connecting takes you to Composio and then to the vendor to consent."
+            />
           </PageRows>
         </PageSection>
       </PageShell>
