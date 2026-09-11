@@ -499,6 +499,42 @@ export async function listTools(connection: {
     );
   }
 
+  /*
+   * A SLUG LISTED TWICE IS NOT REFUSED HERE, and that is a decision rather than an omission.
+   *
+   * `mcp_tools` holds one row per name, so the collision is real — but it is already settled one
+   * layer down and in the other direction: `storableTools` in `./store` keys the insert by name
+   * and keeps the first occurrence, deliberately, so a vendor that names one action twice records
+   * it once under a refresh that stays healthy. Refusing here would turn that refresh into a total
+   * failure and strand every grant on the app, which is the loss the refusals around this one
+   * exist to prevent. What this function owes that de-duplication is the trimmed name the map
+   * below records, so two spellings of one slug collide there rather than surviving as two rows.
+   */
+
+  /*
+   * AN ACTION'S LABELS ARE READ, SO THEY HAVE TO BE READABLE.
+   *
+   * {@link effectOf} builds a Set out of this field, and the element check above settles only that
+   * the action is an object. A `tags` that is not iterable — `{}`, a number, a bag of labels keyed
+   * by index — throws `{} is not iterable` out of the map below, which sits OUTSIDE the try that
+   * wraps the vendor's call, so that string is what `refreshTools` writes into the row's
+   * `lastError` for an administrator to read.
+   *
+   * A STRING IS THE HALF THAT DOES NOT THROW, and it is the worse one. `new Set("readOnlyHint")`
+   * is that word's characters, no hint matches any of them, and a read-only action is recorded as
+   * a write — a classification nobody can see is wrong, on a row an administrator grants from.
+   * Defaulting either shape to "write" would make the same silent answer deliberate, so both are
+   * refused here while a sentence can still name the action.
+   */
+  const oddTags = actions.find(
+    (action) => action.tags !== undefined && !Array.isArray(action.tags),
+  );
+  if (oddTags) {
+    throw new Error(
+      `Composio's action list for ${toolkit} described ${oddTags.slug.trim()}'s tags as something other than a list of labels, and those labels are the only thing that says whether an action reads or writes and whether it destroys anything. Nothing was refreshed and the actions already recorded for this app are kept rather than replaced by a listing whose effects could not be read.`,
+    );
+  }
+
   if (actions.length >= LISTING_LIMIT) {
     /*
      * A FULL PAGE IS NOT A COMPLETE LISTING, and this deployment cannot find out which it is.
@@ -536,28 +572,59 @@ export async function listTools(connection: {
    * that the SDK will read a local path off this server's disk. A model naming a server-side path
    * is a worse offer than one naming a bucket key, not a better one.
    */
-  return actions
-    .filter((action) => !stagesAFile(action.inputParameters))
-    .map((action) => {
-      const { effect, destructive } = effectOf(action.tags);
+  const offered = actions.filter(
+    (action) => !stagesAFile(action.inputParameters),
+  );
+
+  /*
+   * THE FILTER MAY SHORTEN A LISTING AND MAY NOT EMPTY ONE.
+   *
+   * Dropping an action is a standing decision about an action this deployment cannot serve, taken
+   * the same way on every refresh, and the answer is still a listing. Dropping the last one is not
+   * that: what leaves here is `[]`, which means "the vendor was asked and advertises nothing"
+   * everywhere in this codebase, and `refreshTools` commits it as a healthy refresh — a delete and
+   * an insert that takes every recorded action with its `effect`, `destructive` and, fatally, its
+   * `version`, which no later refresh reconstructs where Composio publishes none. That is the same
+   * tool-and-version wipe the empty answer, the unreadable answer, the slug-less action and the
+   * full page above all refuse; arriving through this filter does not make it a different event.
+   *
+   * A vendor answer that was genuinely empty is left alone, because that one IS the vendor
+   * advertising nothing and is the sentence `refreshTools` should record.
+   */
+  if (actions.length > 0 && offered.length === 0) {
+    throw new Error(
+      `Every one of the ${actions.length} actions Composio listed for ${toolkit} asks for a file upload, which this deployment cannot stage, so there is none it can offer. Recording that would say the app advertises nothing and delete every action, effect and version already held for it, so nothing was refreshed and those are kept.`,
+    );
+  }
+
+  return offered.map((action) => {
+    const { effect, destructive } = effectOf(action.tags);
+    /*
+     * TRIMMED HERE BECAUSE IT IS TRIMMED AT THE OTHER END. {@link callTool} trims the recorded
+     * version and refuses an empty one, so a whitespace-only string that counted as a version
+     * was written to `mcp_tools` as a version this deployment believes it holds and was then
+     * permanently uncallable — and the refusal its caller reads names a refresh, which records
+     * the same blank again. Recording exactly what `callTool` will send is what closes that
+     * loop; a blank becomes no version, which is the state whose refusal says so truthfully.
+     */
+    const version = action.version?.trim();
+    return {
       /*
-       * TRIMMED HERE BECAUSE IT IS TRIMMED AT THE OTHER END. {@link callTool} trims the recorded
-       * version and refuses an empty one, so a whitespace-only string that counted as a version
-       * was written to `mcp_tools` as a version this deployment believes it holds and was then
-       * permanently uncallable — and the refusal its caller reads names a refresh, which records
-       * the same blank again. Recording exactly what `callTool` will send is what closes that
-       * loop; a blank becomes no version, which is the state whose refusal says so truthfully.
+       * TRIMMED FOR THE REASON THE VERSION BESIDE IT IS. The guard that admitted this action
+       * measured `slug.trim()`, so padding was never what made it a name — but the padded string
+       * was what got recorded: `mcp_tools.name` is NOT NULL and half the primary key, it is what
+       * a grant points at, and {@link callTool} sends it back to Composio as the action's slug.
+       * A row keyed on " GMAIL_SEND " is a different action from the one an administrator
+       * granted and one Composio has never heard of.
        */
-      const version = action.version?.trim();
-      return {
-        name: action.slug,
-        description: action.description ?? "",
-        inputSchema: action.inputParameters ?? {},
-        effect,
-        destructive,
-        ...(version ? { version } : {}),
-      };
-    });
+      name: action.slug.trim(),
+      description: action.description ?? "",
+      inputSchema: action.inputParameters ?? {},
+      effect,
+      destructive,
+      ...(version ? { version } : {}),
+    };
+  });
 }
 
 /**
@@ -577,6 +644,14 @@ export async function listTools(connection: {
  * inventing one here. That choice is not simply "the thrown message": the thrown message is often the
  * placeholder above, and passing it on tells the reader nothing. See {@link unexplained}.
  *
+ * AND THE PLACEHOLDER IS NOT A SENTENCE WHEREVER IT SITS, which is the half this function was
+ * missing. Both callers check {@link VENDOR_PLACEHOLDER} against the message that was THROWN and
+ * both prefer this answer over that check, so "Error executing the tool X" arriving nested inside
+ * `cause` — which is where the vendor puts it when their own gateway had nothing else to say —
+ * went out past a guard written for exactly that string. A reader who asked for that tool learns
+ * from it only that they asked; that is true at whatever depth it was found, so the judgement
+ * belongs here, in the function whose whole job is deciding what is worth passing on.
+ *
  * TRIMMED ON THE WAY OUT AND NOT ONLY IN THE GUARD. The two used to disagree — the guard measured a
  * trimmed string and the return handed back the padded one — so the decision the function had
  * already made about the string was thrown away at the last line. What comes out is read by a person
@@ -589,7 +664,7 @@ export function vendorSentence(error: unknown): string | null {
   const inner = (outer as { error?: unknown } | null | undefined)?.error;
   const message = (inner as { message?: unknown } | null | undefined)?.message;
   const sentence = typeof message === "string" ? message.trim() : "";
-  return sentence === "" ? null : sentence;
+  return sentence === "" || VENDOR_PLACEHOLDER.test(sentence) ? null : sentence;
 }
 
 /**
@@ -614,19 +689,40 @@ export function unexplained(toolName: string): string {
 }
 
 /**
- * Whether a thrown listing failure is the SDK's own schema refusing the vendor's answer.
+ * Whether a thrown failure is the SDK's own schema refusing the vendor's answer.
  *
  * Duck-typed rather than `instanceof ZodError` so this file keeps no dependency on the vendor's
  * package: `@composio/core` reaches it only through {@link useComposioClient}, and importing `zod`
  * here would tie the transport to whichever major version the vendor happens to bundle — which is
  * exactly the coupling that makes a schema mismatch possible in the first place.
+ *
+ * WHICH IS WHY THE SHAPE HAS TO BE ASKED FOR RATHER THAN THE NAME `issues`. An array under that
+ * name is not rare and is mostly not Zod's: a gateway's validation payload carries one, and so
+ * does any error somebody wrote with a list of complaints in it. Answering true for those replaced
+ * the one sentence saying what actually went wrong with an instruction to upgrade a package that
+ * is working perfectly — the vendor's own explanation, hidden by a guess about who threw.
+ *
+ * A ZOD ISSUE IS RECOGNISED BY WHAT EVERY VERSION OF ONE CARRIES: a `code` naming the failure and
+ * a `path` locating it. Both have been in the type since zod 3 and neither belongs to the
+ * hand-written lists above. An empty array is nobody's schema complaint — a parse that refused
+ * says why — so it is not one either.
  */
 function isSchemaMismatch(error: unknown): boolean {
   const shaped = error as
     | { name?: unknown; issues?: unknown }
     | null
     | undefined;
-  return shaped?.name === "ZodError" || Array.isArray(shaped?.issues);
+  if (shaped?.name === "ZodError") return true;
+
+  const issues = shaped?.issues;
+  return (
+    Array.isArray(issues) &&
+    issues.length > 0 &&
+    issues.every((issue) => {
+      const node = schemaNode(issue);
+      return typeof node?.code === "string" && Array.isArray(node.path);
+    })
+  );
 }
 
 /**
@@ -701,7 +797,20 @@ const NOTHING = new Set(["", "null", "{}"]);
  * CAN THROW, and is called from outside the vendor's `try` for that reason. See {@link callTool}.
  */
 function resultOf(data: ComposioResult["data"] | undefined): McpCallResult {
-  const text = JSON.stringify(data ?? null, null, 2);
+  const text: string | undefined = JSON.stringify(data ?? null, null, 2);
+  /*
+   * `JSON.stringify` ANSWERS `undefined` RATHER THAN THROWING for a value with no JSON form — a
+   * function, a symbol — and this field is the vendor's while the type saying it is a record is
+   * ours. That `undefined` went on to {@link cap}, which measures `.length`, so the engine's
+   * `undefined is not an object (evaluating 'text.length')` became the second half of a sentence
+   * this file wrote about its own failure. Thrown here instead, in words, because the caller's
+   * catch is what turns this into a refusal naming the action.
+   */
+  if (text === undefined) {
+    throw new Error(
+      "its data has no JSON form at all, so there is nothing to show",
+    );
+  }
   if (NOTHING.has(text)) {
     return {
       text: "The action returned nothing.",
@@ -858,6 +967,32 @@ export async function callTool(
       rest,
     );
   } catch (error) {
+    /*
+     * THE SDK'S OWN PARSE THROWS THROUGH HERE, and its message is not a sentence.
+     *
+     * `./composio-adapter` resolves the tool before running it — `getRawComposioToolBySlug`, which
+     * runs `ToolSchema.parse` — and that happens outside the SDK's own try, so a vendor answer
+     * their schema rejects arrives as a raw `ZodError` whose `message` is the issue array as JSON.
+     * Handed on, 400 characters of `{"code":"invalid_type","path":[…]}` went into a model's
+     * context and into `store.ts`'s audit row, wearing the vendor's words for what is a version
+     * skew between this deployment and their package.
+     *
+     * The listing path has refused that string since it was written, and for the same reason it
+     * says here: nothing an administrator does to this connection will help, and upgrading the
+     * package will. There is no `cause` to hang the original on either, because a failure leaves
+     * this function as a RESULT rather than as a throw — so the sentence is the whole of what the
+     * reader and the audit row get, which is why it names the one step that changes anything.
+     *
+     * WHAT IT DOES NOT CLAIM IS THAT NOTHING RAN. The resolve is the likely thrower and it happens
+     * first, but the SDK parses the execute response through a schema of its own, so the same
+     * `ZodError` can arrive from after the action ran. Which of the two it was is exactly what
+     * this deployment cannot read, and a refusal must not settle it by guessing.
+     */
+    if (isSchemaMismatch(error)) {
+      return failure(
+        `Composio was asked about ${toolName} and this deployment's @composio/core would not accept what came back: it did not match the shape that package parses with, so nothing here can say whether the action ran. That is a vendor change rather than a setting on this connection — upgrading the package is the fix.`,
+      );
+    }
     // The vendor's own sentence when there is one, because a generic message costs a diagnosis.
     const thrown = error instanceof Error ? error.message.trim() : "";
     return failure(
