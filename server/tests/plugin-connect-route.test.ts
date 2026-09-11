@@ -40,7 +40,15 @@ function app(store: {
   ) => Promise<OAuthClient | null>;
 }) {
   const routes = createPluginRoutes(
-    store as never,
+    {
+      /*
+       * The read that decides whether this is a brokered row, which the handler makes before
+       * anything about the consent flow. None of these vendors is one: a brokered app is reached
+       * through Composio and enters none of the flow these tests are about.
+       */
+      listServers: async () => [],
+      ...store,
+    } as never,
     signedIn(),
     async () => true,
     {

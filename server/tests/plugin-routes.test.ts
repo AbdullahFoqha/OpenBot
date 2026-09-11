@@ -867,3 +867,176 @@ describe("a person's own connections", () => {
     expect((await response.json()).connections).toEqual([]);
   });
 });
+
+/**
+ * The url a person is sent to when they connect a brokered app to their own account.
+ *
+ * A constant rather than a literal at each assertion, because the thing being asserted about it is
+ * mostly where it does NOT appear: it is handed to the browser that asked and to nothing else.
+ */
+const AUTHORIZATION_URL = "https://backend.composio.dev/s/a-bearer-capability";
+
+/**
+ * One brokered app, added, and the person connecting their own account to it.
+ *
+ * WHICH APP THIS IS COMES OFF THE ROW'S URL. `listServers` answers one row whose url is
+ * `composio://linear`, and the branch under test reads the app out of it with `toolkitOf` rather
+ * than off the id — the id is a row name (`composio-linear`) and reading one as the other works
+ * right up until somebody renames a row.
+ *
+ * `redirectUrl` NULL IS A DEPLOYMENT WITH NO COMPOSIO_API_KEY, the same way `directoryApp`'s null
+ * listing is: there is no broker at all, which is the shipped default and a state the surface has
+ * to answer honestly rather than by pretending nobody is connected.
+ */
+function brokeredApp(
+  /** What this deployment already holds for this person and this app. Null is nobody connected. */
+  connection: { connectedAt: string } | null = null,
+  /** Null is a deployment with no COMPOSIO_API_KEY, which is the shipped default. */
+  redirectUrl: string | null = AUTHORIZATION_URL,
+) {
+  const authorized: Array<{ userId: string; toolkit: string }> = [];
+  const queried: Array<{ toolkit: string; userId: string }> = [];
+  const confirmed: Array<{ toolkit: string; userId: string }> = [];
+  const disconnected: Array<{ toolkit: string; userId: string }> = [];
+
+  const store = {
+    // Every read the plugins surface makes on its way to the route under test.
+    listServers: async () => [
+      {
+        id: "composio-linear",
+        url: "composio://linear",
+        provenance: "composio",
+      },
+    ],
+    listSkills: async () => [],
+    listGrants: async () => [],
+    brokeredConnection: async (input: { toolkit: string; userId: string }) => {
+      queried.push(input);
+      return connection;
+    },
+    confirmBrokeredConnection: async (input: {
+      toolkit: string;
+      userId: string;
+    }) => {
+      confirmed.push(input);
+      return { connected: connection !== null };
+    },
+    disconnectBrokered: async (input: { toolkit: string; userId: string }) => {
+      disconnected.push(input);
+      return { vendorRevoked: true };
+    },
+  };
+
+  const app = createApp(
+    loadConfig(testEnvironment()),
+    {
+      handler: () => new Response(null, { status: 204 }),
+      api: { getSession: async () => ({ user: ADMIN }) },
+    } as never,
+    // Connecting an account is not an administrator's act: an administrator adds the app once, and
+    // then everybody connects their own.
+    { rolesForUser: async () => ["user"] },
+    // Positions 4-14 are the other stores; `store` is 15, pluginStore.
+    ...(Array.from({ length: 11 }) as never[]),
+    store as never,
+    // Positions 16-25 are the stores after it; the broker is 26, `composio`.
+    ...(Array.from({ length: 10 }) as never[]),
+    redirectUrl
+      ? ({
+          broker: {
+            authorize: async (request: { userId: string; toolkit: string }) => {
+              authorized.push(request);
+              return { redirectUrl };
+            },
+          },
+        } as never)
+      : undefined,
+  );
+
+  return {
+    authorized,
+    queried,
+    confirmed,
+    disconnected,
+    connect: (body: unknown) =>
+      app.request(
+        "http://openbot.test/api/plugins/servers/composio-linear/connect",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+  };
+}
+
+describe("connecting a brokered app", () => {
+  test("the link is minted for the session's own person, whatever the body says", async () => {
+    /*
+     * THE USER ID COMES FROM THE SESSION AND FROM NOWHERE ELSE.
+     *
+     * A brokered call opens whichever account the user id names, so a route that would take one
+     * out of a request body is one POST away from attaching somebody else's Linear to this
+     * person's row — or, the same defect turned around, minting a link that connects this person's
+     * account under somebody else's name. It is the defect the prior art this design copies
+     * shipped and fixed three separate times, which is why the body here carries a user id at all:
+     * the assertion is that it changed nothing.
+     */
+    const { authorized, queried, connect } = brokeredApp();
+
+    const response = await connect({ userId: "user_somebody_else" });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      authorizationUrl: AUTHORIZATION_URL,
+    });
+    expect(authorized).toEqual([{ userId: ADMIN.id, toolkit: "linear" }]);
+    // And the read that decided there was no connection yet asked about the same person.
+    expect(queried).toEqual([{ toolkit: "linear", userId: ADMIN.id }]);
+  });
+
+  test("a brokered row never reaches the checks that belong to the OAuth flow", async () => {
+    /*
+     * The ordering, stated as its own case. This deployment has no OPENBOT_PUBLIC_URL and
+     * `composio-linear` is in nobody's catalogue, so a brokered row that fell through to either of
+     * the two checks below the branch would be answered "no public URL" or "is not connected as an
+     * individual person" — the second of which is the opposite of true. Neither check applies: no
+     * authorization code comes back to us, no refresh token is stored, and no redirect URI of ours
+     * is registered anywhere.
+     */
+    const { connect } = brokeredApp();
+
+    const body = await (await connect({})).json();
+
+    expect(body.authorizationUrl).toBe(AUTHORIZATION_URL);
+  });
+
+  test("a second connection is refused with the step to take", async () => {
+    const { authorized, connect } = brokeredApp({
+      connectedAt: "2026-02-02T00:00:00.000Z",
+    });
+
+    const response = await connect({});
+
+    expect(response.status).toBe(409);
+    // Naming the remedy rather than only refusing: the person has an account attached already, and
+    // the only way to a new link is through disconnecting the one they have.
+    expect(((await response.json()).error as string).toLowerCase()).toContain(
+      "disconnect",
+    );
+    // And nothing was minted, which is the half that matters: a link handed out here would attach
+    // a second account behind a row that already says connected.
+    expect(authorized).toEqual([]);
+  });
+
+  test("a deployment with no broker is told which setting to set", async () => {
+    // The same answer the directory gives, for the same reason: nobody was asked, and the remedy
+    // is one environment variable long.
+    const { connect } = brokeredApp(null, null);
+
+    const response = await connect({});
+
+    expect(response.status).toBe(503);
+    expect((await response.json()).error).toContain("COMPOSIO_API_KEY");
+  });
+});

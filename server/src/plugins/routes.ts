@@ -595,6 +595,79 @@ export function createPluginRoutes(
    */
   routes.post("/servers/:id/connect", requireUser, async (context) => {
     const serverId = context.req.param("id");
+
+    /*
+     * A BROKERED APP IS ANSWERED HERE AND GOES NO FURTHER DOWN THIS HANDLER.
+     *
+     * Everything below this branch belongs to the consent flow THIS deployment runs: a public URL
+     * to build a redirect URI out of, a catalogue entry naming the vendor's authorization
+     * endpoint, an OAuth client an administrator registered, a sealed state the callback reads
+     * back. A brokered app has none of it. Composio holds the consent, so no authorization code
+     * ever comes back to us, no refresh token is stored here, and no redirect URI of ours is
+     * registered with anybody — there is nothing for those checks to be about.
+     *
+     * WHICH IS WHY THE ORDER IS THE WHOLE POINT AND NOT A TIDINESS. Falling through, a brokered
+     * row met `catalogueEntry`, which has never heard of `composio-linear`, and the person
+     * pressing Connect was told the app "is not connected as an individual person" — the exact
+     * opposite of true about the one kind of row that is ONLY ever connected as an individual
+     * person. On a deployment with no `OPENBOT_PUBLIC_URL` it failed one step earlier still,
+     * refusing for want of a setting that has no bearing on a flow it does not enter.
+     *
+     * The app comes off the row's url via `toolkitOf` rather than off its id, for the reason the
+     * directory route says: the url is where the transport reads which app a call is against, and
+     * the id is a row name that happens to look similar.
+     */
+    const row = (await store.listServers()).find(
+      (server) => server.id === serverId,
+    );
+    const toolkit = row ? toolkitOf(row.url) : null;
+    if (toolkit) {
+      if (!composio) {
+        return context.json(
+          { error: new BrokerUnconfiguredError().message },
+          503,
+        );
+      }
+
+      /*
+       * THE PERSON IS THE SESSION'S, HERE AND IN THE READ ABOVE IT.
+       *
+       * Nothing in this branch reads a user id out of the body or the query, and that is the
+       * property rather than an implementation detail: the link minted below attaches an account
+       * to whichever person it names, so a user id a caller could choose would let one POST hang
+       * somebody else's mailbox off this deployment. It is the defect the prior art this design
+       * follows shipped three separate times, and it is structural here — there is no line that
+       * could break it.
+       */
+      const existing = await store.brokeredConnection({
+        toolkit,
+        userId: context.var.actor.id,
+      });
+      if (existing) {
+        // Named with the step to take rather than only refused: a second link would attach a
+        // second account behind a row that already says connected, and the way to a new one is
+        // through the connection they have.
+        return context.json(
+          {
+            error: `You already have an account connected to ${serverId}. Disconnect it first if you want to connect a different one.`,
+          },
+          409,
+        );
+      }
+
+      /*
+       * THE URL IS A BEARER CAPABILITY. Whoever opens it attaches an account to this person's
+       * connection, so it is answered to the browser that asked and to nothing else: not logged,
+       * not audited, not put in an error body. A redirect url in a log line is somebody else's
+       * mailbox for as long as it stays valid.
+       */
+      const { redirectUrl } = await composio.broker.authorize({
+        userId: context.var.actor.id,
+        toolkit,
+      });
+      return context.json({ authorizationUrl: redirectUrl });
+    }
+
     if (!connect?.publicUrl) {
       return context.json(
         {
