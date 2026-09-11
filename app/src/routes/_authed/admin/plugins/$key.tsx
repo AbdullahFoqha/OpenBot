@@ -95,6 +95,19 @@ function grantSummary(held: number, total: number): string {
 }
 
 /**
+ * How much of this vendor one Bot holds, in the same voice as {@link grantSummary}.
+ *
+ * The same decision counted the other way round, for the rows that open a Bot's own page against
+ * this app. Named ends rather than a fraction, for the reason recorded above: "0/167" reads as a
+ * score, and the two answers worth recognising without reading are none of it and all of it.
+ */
+function heldSummary(held: number, total: number): string {
+  if (held === 0) return "No tools";
+  if (held === total) return total === 1 ? "1 tool" : "Every tool";
+  return `${held} of ${total} tools`;
+}
+
+/**
  * How this vendor is reached, from whichever record we have.
  *
  * The row's own provenance is asked first because it is a fact this deployment recorded when the
@@ -805,6 +818,56 @@ function RouteComponent() {
               ))}
             </PageRows>
           )}
+
+          {/*
+           * The same grants, from the Bot's end.
+           *
+           * In this section rather than one of its own, because it is not a second subject: the
+           * list above is one action and every Bot, and these rows are one Bot and every action.
+           * Which way round somebody wants it depends on what they came here to do — write a rule
+           * about an action, or set a Bot up — and an app of a hundred and sixty-seven actions is
+           * only approachable from this end.
+           */}
+          {server.tools.length > 0 && bots.length > 0 ? (
+            <>
+              <p className="mt-8 font-medium text-sm">By Bot</p>
+              <PageRows>
+                {bots.map((bot, index) => (
+                  <React.Fragment key={bot.id}>
+                    {/* A real link with no children: children passed to `render` replace the row's own. */}
+                    <Item
+                      render={
+                        <Link
+                          params={{ agentId: bot.id, key }}
+                          to="/admin/plugins/$key/bots/$agentId"
+                        />
+                      }
+                      size="sm"
+                    >
+                      <ItemContent>
+                        <ItemTitle>{bot.name}</ItemTitle>
+                        <ItemDescription>
+                          Every action this app offers, switched one at a time.
+                        </ItemDescription>
+                      </ItemContent>
+                      <ItemActions>
+                        <span className="text-muted-foreground text-xs">
+                          {heldSummary(
+                            server.tools.filter((tool) =>
+                              tool.grantedTo.includes(bot.id),
+                            ).length,
+                            server.tools.length,
+                          )}
+                        </span>
+                        <IconChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                      </ItemActions>
+                    </Item>
+                    {index !== bots.length - 1 && <Separator />}
+                  </React.Fragment>
+                ))}
+              </PageRows>
+            </>
+          ) : null}
         </PageSection>
       ) : null}
 
