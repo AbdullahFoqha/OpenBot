@@ -1,5 +1,5 @@
-import { Composio } from "@composio/core";
 import { describe, expect, test } from "bun:test";
+import { Composio } from "@composio/core";
 import {
   BrokerRefusalError,
   brokerSentence,
@@ -1034,6 +1034,178 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     expect(deleted).toEqual([]);
   });
 
+  /**
+   * A CONFIG ROW THE LISTING NAMED TWICE IS ONE CONFIG, NOT TWO — the twin of the account dedupe
+   * that landed a wave earlier, one function away, and was not brought here.
+   *
+   * The paging loop guards against the vendor repeating a CURSOR and not against it repeating a
+   * ROW: a page boundary crossed while a config is created, or a proxy stitching two overlapping
+   * pages together, hands one id over twice with the cursor advancing perfectly each time. The
+   * second delete of that config then meets Composio's "there is no such auth config", which
+   * arrives as a refusal — so a removal that had in fact COMPLETED was counted as partial,
+   * `removeServer` never deleted the app's row, and every retry met the same duplicate and failed
+   * in the same place. An app in that state can never be removed.
+   *
+   * THE DOUBLE REFUSES THE SECOND DELETE OF ONE CONFIG, which is what the vendor does and what
+   * makes this test able to fail. A stub that answered both identically would be green against an
+   * adapter that sent the delete twice.
+   */
+  test("a config the listing named twice is removed once", async () => {
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async (query: unknown) =>
+            (query as { cursor?: string }).cursor === undefined
+              ? { items: [OURS], nextCursor: "page_2" }
+              : { items: [OURS], nextCursor: null },
+          delete: async (id: string) => {
+            if (deleted.includes(id)) {
+              throw new Error(
+                `Composio holds no auth config with the id ${id}.`,
+              );
+            }
+            deleted.push(id);
+          },
+        },
+      }),
+    );
+
+    await broker.deleteAuthConfig("linear");
+
+    expect(deleted).toEqual(["ac_ours"]);
+  });
+
+  /**
+   * AND THE COUNT IN A REAL PARTIAL REMOVAL IS OF CONFIGS, NOT OF ROWS — the same pairing the
+   * account dedupe has, for the same reason: an inflated denominator is a figure nothing measured,
+   * in the one sentence an operator is meant to act on.
+   */
+  test("a duplicated row is not a third config in the sentence a partial removal carries", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [OURS, OURS, OURS_SPARE] }),
+          delete: async (id: string) => {
+            if (id === "ac_ours_spare") {
+              throw new Error("Composio refused that one.");
+            }
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(broker.deleteAuthConfig("linear"));
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(
+      /removed 1 of this deployment's 2 authorization configs for linear/,
+    );
+  });
+
+  /**
+   * A ROW THAT COULD NOT BE READ MUST NOT BLOCK THE CONNECTION IT HAS NOTHING TO DO WITH.
+   *
+   * Reading the configs used to throw on the first row it could not check, so one unreadable row
+   * refused every call that reads this listing — including this one, where a config of ours was
+   * read, is ENABLED, and is the right thing to attach somebody to whatever else the listing held.
+   * The person is told the vendor's shape is wrong about an app they can perfectly well connect.
+   */
+  test("an unreadable row does not stop a connection against the config that was readable", async () => {
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [{ id: "ac_nameless", status: "ENABLED" }, OURS],
+          }),
+        },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+    );
+
+    await broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl: RETURN_URL,
+    });
+
+    expect(linked).toEqual([
+      ["user_1", "ac_ours", { callbackUrl: RETURN_URL }],
+    ]);
+  });
+
+  /**
+   * AND WHERE THERE IS NOTHING OF OURS TO GO ON, THE REMEDY IS NOT THE ONE FOR AN APP WITH NO
+   * CONFIG. "Remove the app and add it again" is a loop that cannot close in this state: the
+   * removal meets its own refusal over the same unreadable row, and so does the enable. The
+   * sentences are told apart by their remedies here for the reason {@link NO_CONFIG_REMEDY} exists.
+   */
+  test("a listing this deployment cannot read is not an app with no config", async () => {
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [{ id: "ac_nameless" }] }),
+        },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: RETURN_URL,
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).not.toMatch(NO_CONFIG_REMEDY);
+    expect(refusal.message).not.toMatch(DISABLED_REMEDY);
+    // And nobody was sent anywhere: a link is a lasting attachment to one config, so it is never
+    // minted off a listing this deployment could not read.
+    expect(linked).toEqual([]);
+  });
+
+  /**
+   * AND NOTHING IS CREATED BESIDE A ROW THAT MIGHT ALREADY BE OURS, which is the one caller of the
+   * four that must refuse rather than act on what it can name. A second config is not a duplicate
+   * but a SPLIT: two populations of connections for one app, and a removal later that drops half.
+   */
+  test("a row this deployment cannot read stops a second config being created", async () => {
+    const created: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [{ id: "ac_nameless" }] }),
+          create: async (...call: unknown[]) => {
+            created.push(call);
+            return CREATED;
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(created).toEqual([]);
+  });
+
   test("an app Composio holds no configs for at all is still a quiet removal", async () => {
     /*
      * THE HALF THE REFUSAL ABOVE MUST NOT SWALLOW. Removing an app has to be able to happen twice:
@@ -1042,12 +1214,27 @@ describe("telling this deployment's auth configs from anybody else's", () => {
      * In each of those the end state is the one that was asked for, so a throw would report a
      * failure to somebody who got exactly what they wanted — and an implementation that reached
      * green above by refusing whenever it deleted nothing would do precisely that.
+     *
+     * AND IT SAYS SO RATHER THAN LEAVING IT TO BE INFERRED, which it did not: this test held no
+     * assertion at all. What it actually pinned was "the call did not throw", which a reader has to
+     * reconstruct from the absence of an `expect` — and the other half, that nothing was deleted,
+     * rested on {@link fakeVendor}'s stub refusing, where a call that WAS made and a call that was
+     * not both end the test the same way round. Both halves are stated here.
      */
+    const deleted: unknown[] = [];
     const { broker } = buildComposioClient(
-      fakeVendor({ authConfigs: { list: async () => ({ items: [] }) } }),
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [] }),
+          delete: async (...call: unknown[]) => {
+            deleted.push(call);
+          },
+        },
+      }),
     );
 
-    await broker.deleteAuthConfig("linear");
+    await expect(broker.deleteAuthConfig("linear")).resolves.toBeUndefined();
+    expect(deleted).toEqual([]);
   });
 
   test("a disabled config of ours stops a second one being created", async () => {
@@ -1443,6 +1630,55 @@ describe("withdrawing one person's grants", () => {
   });
 
   /**
+   * AND A CONFIG ROW THIS DEPLOYMENT CANNOT READ MUST NOT STOP IT EITHER — the same correction as
+   * the account above, one listing earlier, where it was still live after that one landed.
+   *
+   * Reading the configs threw on the first row it could not check, and the withdrawal reads them
+   * BEFORE it reads a single account. So one unreadable config row meant a person could never
+   * withdraw anything for that app: every press met the same row and the same throw, ahead of the
+   * first delete, with their readable grants standing the whole time. What they are owed is the
+   * withdrawal of every grant this deployment can reach and a sentence about what it could not.
+   */
+  test("a config row that could not be read does not stop the grants behind the one that could", async () => {
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [{ id: "ac_gmail_nameless" }, OUR_GMAIL],
+          }),
+        },
+        connectedAccounts: {
+          list: async () => ({ items: [{ id: "ca_1" }] }),
+          delete: async (id: string) => {
+            deleted.push(id);
+            return WITHDRAWN;
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const failure = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    // The grant on the config that WAS readable is gone, which is the half a throw ahead of the
+    // loop threw away.
+    expect(deleted).toEqual(["ca_1"]);
+    // And still a failure, because a grant of theirs may sit on the config that could not be read
+    // and nothing here ever asked about it — so `store.ts` must not delete the row that names this
+    // person's connection.
+    expect(failure).toBeInstanceOf(BrokerRefusalError);
+    expect(failure.message).not.toMatch(A_CRASH);
+    expect(failure.message).toMatch(/withdrew 1 of this person's 1 accounts/);
+    expect(failure.message).toMatch(/authorization configs for gmail/);
+    // And the reason that row could not be sorted travels as `cause`, because the sentence above is
+    // deliberately a count and leaves the reasons nowhere else to live.
+    expect((failure.cause as Error).message).toMatch(/name/);
+  });
+
+  /**
    * THE GATE IS A COUNT AND WAS ASKING FOR AN ID IT NEVER USES.
    *
    * `isConnected` answers whether this person holds an ACTIVE account for an app, which is a
@@ -1516,12 +1752,12 @@ describe("withdrawing one person's grants", () => {
   });
 
   /**
-   * NOTHING OF OURS IS NOTHING TO WITHDRAW, AND IT IS ANSWERED WITHOUT ASKING.
+   * NOTHING AT ALL IS NOTHING TO WITHDRAW, AND IT IS ANSWERED WITHOUT ASKING.
    *
    * `authorize` mints every connect link against a config this deployment made and refuses where
-   * there is none, so an app with none of ours never had a connection begun through it. Listing
-   * accounts anyway could only turn up somebody else's, and the one thing this call does with an
-   * account it turns up is delete it.
+   * there is none, so an app Composio holds no configs for never had a connection begun through it.
+   * Listing accounts anyway could only turn up somebody else's, and the one thing this call does
+   * with an account it turns up is delete it.
    *
    * THE ASSERTION IS THE DOUBLE. `connectedAccounts.list` is left at {@link fakeVendor}'s refusal,
    * so an implementation that asked the question at all fails here by name — which is a stronger
@@ -1529,16 +1765,53 @@ describe("withdrawing one person's grants", () => {
    * answer `false` too while putting a filter on the wire that the far side is free to read as no
    * filter at all.
    */
-  test("a person's accounts are not listed where this deployment holds no config of its own", async () => {
+  test("a person's accounts are not listed where Composio holds no config for the app", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({ authConfigs: { list: async () => ({ items: [] }) } }),
+    );
+
+    expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+      false,
+    );
+  });
+
+  /**
+   * AND "NONE OF OURS" IS NOT THAT STATE — THE SEVENTH ROUTE TO A REVOCATION THAT DID NOT REVOKE.
+   *
+   * THIS TEST ASSERTED THE `false`, AND THE `false` WAS THE DEFECT. It stood on the reasoning above
+   * — none of ours means nothing was ever granted through this app — which is sound about an app
+   * Composio holds no configs for and cannot tell that app from this one. An operator renames a
+   * config in Composio's dashboard, dropping the suffix or editing the app's title past it, and
+   * this deployment's own live grants read as somebody else's work: `store.ts` then writes
+   * `vendorRevocationRequested: false` into the audit trail and deletes the `composio_connections`
+   * row, so the person's grant stands at the provider with nothing naming it and the trail records
+   * that no withdrawal was even asked for. The assertion is changed on purpose, and the case it
+   * used to cover — Composio holding nothing at all — is asserted next door, where it is true.
+   *
+   * `deleteAuthConfig` HAS REFUSED IN EXACTLY THIS STATE SINCE THE WAVE BEFORE THIS ONE, which is
+   * what makes this a disagreement rather than a judgement call: two halves of removing an app's
+   * access read one condition two different ways, one function apart.
+   *
+   * THE DOUBLE IS STILL THE OTHER HALF OF THE ASSERTION. `connectedAccounts.list` is left refusing,
+   * so an implementation that answered this by listing somebody else's accounts — and then deleting
+   * what it found — fails here by name.
+   */
+  test("an app whose configs no longer carry this deployment's name is not a quiet disconnection", async () => {
     const { broker } = buildComposioClient(
       fakeVendor({
         authConfigs: { list: async () => ({ items: [BY_HAND_GMAIL] }) },
       }),
     );
 
-    expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
-      false,
+    const refusal = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
     );
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    // The count standing and the marker that would have claimed it, which is the same pair
+    // `deleteAuthConfig` hands an operator for the same state and the same one act in a dashboard.
+    expect(refusal.message).toMatch(/Composio holds 1 for gmail/);
+    expect(refusal.message).toMatch(/\(OpenBot\)/);
   });
 
   /**
@@ -3051,6 +3324,91 @@ describe("a listing that arrived with a cursor still outstanding", () => {
     expect(refusal.message).toMatch(/where the cursor to the next page/);
   });
 
+  /**
+   * A CURSOR WITH NOTHING IN IT IS THE END OF THE LISTING, NOT A REFUSAL — AND THE VENDOR'S OWN
+   * TYPES PERMIT IT.
+   *
+   * All four list responses in the installed client declare `next_cursor?: string | null`
+   * (`@composio/client` 0.1.0-alpha.76, `resources/auth-configs.d.ts:248`,
+   * `connected-accounts.d.ts:4987`, `toolkits.d.ts:326`, `tools.d.ts:204`), so `""` is type-legal
+   * on the wire; both transformers write `response.next_cursor ?? null`, which does not catch it;
+   * and it therefore reached the guard and became a hard refusal. What that refusal takes down is
+   * not one call: `revoke`, `authorize`, `ensureAuthConfig`, `deleteAuthConfig` and `isConnected`
+   * all read one of these two listings, so every app in the deployment stops working at once, for
+   * as long as the vendor sends it — over a field whose whole content is that it has none.
+   *
+   * AND THERE IS NO SECOND REQUEST IT COULD HAVE MEANT. An empty cursor is exactly what this loop
+   * sends when it has no position: the first request omits the field. Following it asks for page
+   * one again, which is why the alternative reading ends in the loop guard next door accusing
+   * Composio of answering the same page twice — a complaint about the vendor for something this
+   * deployment did.
+   *
+   * THE ASSERTION IS ON WHAT WENT OUT AS WELL AS ON WHAT CAME BACK. An implementation that read the
+   * empty cursor as the end and ALSO sent a second request would answer identically here without
+   * the call count, and it is the second request that is the defect.
+   */
+  for (const { shape, cursor } of [
+    { shape: "an empty string", cursor: "" },
+    { shape: "a string of blank space", cursor: "   " },
+  ]) {
+    test(`a cursor Composio sent as ${shape} ends the listing rather than refusing it`, async () => {
+      let calls = 0;
+      const deleted: string[] = [];
+      const { broker } = buildComposioClient(
+        fakeVendor({
+          authConfigs: { list: ourGmailConfig },
+          connectedAccounts: {
+            list: async () => {
+              calls += 1;
+              return { items: [{ id: "ca_1" }], nextCursor: cursor };
+            },
+            delete: async (id: string) => {
+              deleted.push(id);
+              return WITHDRAWN;
+            },
+          },
+        }),
+      );
+
+      expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+        true,
+      );
+      expect(deleted).toEqual(["ca_1"]);
+      expect(calls).toBe(1);
+    });
+  }
+
+  /**
+   * AND THE SAME ON THE CONFIG LISTING, WHICH IS THE HALF THIS FILE KEEPS FORGETTING.
+   *
+   * One cursor guard serves both listings, so a fix written against the accounts path is a fix
+   * everywhere — and a test written only against the accounts path is a test that cannot tell the
+   * difference. Removing an app reads this listing and nothing else, so an empty cursor refused
+   * here is an app nobody can withdraw.
+   */
+  test("an empty cursor ends the config listing too, so the app can still be removed", async () => {
+    let calls = 0;
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => {
+            calls += 1;
+            return { items: [OURS], nextCursor: "" };
+          },
+          delete: async (id: string) => {
+            deleted.push(id);
+          },
+        },
+      }),
+    );
+
+    await broker.deleteAuthConfig("linear");
+
+    expect(deleted).toEqual(["ac_ours"]);
+    expect(calls).toBe(1);
+  });
+
   test("a cursor that never advances is refused rather than followed for ever", async () => {
     let calls = 0;
     const deleted: string[] = [];
@@ -3394,6 +3752,159 @@ describe("what a malformed field of a row actually costs", () => {
     expect(refusal.message).toMatch(/tools already held are untouched/);
   });
 
+  /**
+   * A CATEGORY THAT IS NOT A CATEGORY IS DESCRIBED AS WHAT ARRIVED, NOT AS A MISSING NAME.
+   *
+   * The non-object guard here was deleted on the stated ground that the SDK dereferences a category
+   * and dies before this file sees one. Running `@composio/core` 0.18.1 says otherwise: `("crm").id`
+   * is `undefined` and not a throw, so a string, a number or a boolean in that list survives
+   * `transformToolkitListResponse` — only null and undefined die there. What the refusal then said
+   * was "Composio sent nothing where the name of gmail's category 1 belongs", about a value that
+   * was the string "crm", which sends an operator looking in a dashboard for a category with a
+   * missing name. There is no such category.
+   *
+   * THE ASSERTION IS ON THE TWO SENTENCES BEING DIFFERENT, because a test that only required a
+   * refusal was green over the whole defect: the catalogue was refused either way, and what was
+   * wrong was what the operator was told.
+   */
+  for (const { fault, entry, names } of [
+    { fault: "a string", entry: "crm", names: /a string/ },
+    { fault: "a number", entry: 7, names: /a number/ },
+  ]) {
+    test(`a category that arrived as ${fault} is named as one rather than as a missing name`, async () => {
+      const { broker } = buildComposioClient(
+        fakeVendor({
+          toolkits: {
+            get: async () => [
+              { slug: "gmail", name: "Gmail", meta: { categories: [entry] } },
+            ],
+          },
+        }),
+        () => 1_000_000,
+      );
+
+      const refusal = await failureOf(broker.listApps());
+
+      expect(refusal).toBeInstanceOf(BrokerRefusalError);
+      expect(refusal.message).not.toMatch(A_CRASH);
+      expect(refusal.message).toMatch(/gmail's category 1/);
+      expect(refusal.message).toMatch(names);
+      // And NOT the sentence for a category object whose name Composio omitted, which is the other
+      // fault and the other thing to go looking at.
+      expect(refusal.message).not.toMatch(/Composio sent nothing/);
+    });
+  }
+
+  /**
+   * A BLANK IDENTIFIER IS DESCRIBED AS BLANK RATHER THAN AS "A STRING".
+   *
+   * {@link textOf} decides emptiness on the TRIMMED value and `sent` tested `value === ""`, so the
+   * two disagreed about exactly one shape — the padded blank, which is the one a wire value
+   * actually arrives in. A config id of three spaces was refused for being empty and then described
+   * as "a string", which is a sentence with no finding in it: a string is what an id IS, so the
+   * reader is told the field was right and the call refused anyway.
+   */
+  test("a config id that is nothing but spaces is not reported as a string", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [{ id: "   ", name: "Linear (OpenBot)", status: "ENABLED" }],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(broker.deleteAuthConfig("linear"));
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect((refusal.cause as Error).message).toMatch(/blank space/);
+    expect((refusal.cause as Error).message).not.toMatch(
+      /Composio sent a string where/,
+    );
+  });
+
+  /**
+   * THE THREE ACTION FIELDS THIS FILE HANDS ON, AND WHAT EACH BECOMES WHERE IT LANDS.
+   *
+   * The four deleted guards next door were deleted correctly — `ToolSchema.parse` really does raise
+   * a `ZodError` for them — and the argument was then taken one step too far, past the fields
+   * {@link ComposioAction} promises to `./composio` and `./store`. The parse is a fact about
+   * `getRawComposioTools` in one version of one package; the declaration is what the seam a test
+   * satisfies with a literal, and what the next version is read against, actually rest on.
+   *
+   * WHAT THAT COSTS IS NOT A REFUSAL, WHICH IS WHY IT BELONGS HERE. `storableTools` writes
+   * `(tool.description ?? "").replaceAll(NUL, "")` and `tool.version?.replaceAll(NUL, "")`, so a
+   * description or a version that is not a string is a bare "42.replaceAll is not a function"
+   * thrown from outside every vendor `try` in the adapter — a crash where this file's whole
+   * contract is a sentence. An `inputParameters` that is not an object is quieter: it is stored as
+   * the action's input schema and shown to a model as Composio's own.
+   *
+   * EACH ASSERTS THE FIELD IT IS ABOUT, because a table of refusals that only required a refusal
+   * would pass with one guard standing in for three.
+   */
+  for (const { fault, row, names } of [
+    {
+      fault: "a description that is not text",
+      row: { slug: "GMAIL_FETCH_EMAILS", description: 42 },
+      names: /description/,
+    },
+    {
+      fault: "an input schema that is not an object",
+      row: { slug: "GMAIL_FETCH_EMAILS", inputParameters: "not-a-schema" },
+      names: /input schema/,
+    },
+    {
+      fault: "a version that is not text",
+      row: { slug: "GMAIL_FETCH_EMAILS", version: 20_260_903 },
+      names: /version/,
+    },
+  ]) {
+    test(`an action with ${fault} stops the listing rather than crossing the seam`, async () => {
+      const { actions } = buildComposioClient(
+        fakeVendor({ tools: { getRawComposioTools: async () => [row] } }),
+      );
+
+      const failure = await failureOf(
+        actions.listActions("gmail", { limit: WHOLE_LISTING }),
+      );
+
+      expect(failure.message).not.toMatch(A_CRASH);
+      expect(failure.message).toMatch(names);
+      // The tools already recorded for the app are untouched, which is what makes refusing the
+      // right answer rather than a worse outage than the one being avoided.
+      expect(failure.message).toMatch(/tools already held are untouched/);
+    });
+  }
+
+  /**
+   * AND AN ACTION THAT PUBLISHES NONE OF THEM IS ORDINARY. Composio genuinely ships actions with no
+   * description and no version, and one with no parameters at all arrives with none — the SDK
+   * normalizes `{}` to absent before parsing. Absence is a fact about the action; present-and-wrong
+   * is a fact about the answer. A guard that could not tell them apart would refuse most of the
+   * catalogue.
+   */
+  test("an action that publishes no description, schema or version is still listed", async () => {
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          getRawComposioTools: async () => [{ slug: "GMAIL_FETCH_EMAILS" }],
+        },
+      }),
+    );
+
+    expect(
+      await actions.listActions("gmail", { limit: WHOLE_LISTING }),
+    ).toEqual([
+      {
+        slug: "GMAIL_FETCH_EMAILS",
+        description: undefined,
+        inputParameters: undefined,
+        tags: undefined,
+        version: undefined,
+      },
+    ]);
+  });
+
   test("a nameless config stops the removal rather than being left standing", async () => {
     const deleted: unknown[] = [];
     const { broker } = buildComposioClient(
@@ -3418,9 +3929,22 @@ describe("what a malformed field of a row actually costs", () => {
     const refusal = await failureOf(broker.deleteAuthConfig("linear"));
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
     expect(refusal.message).toMatch(/name/);
-    // Not even the row that WAS readable: a listing this deployment cannot sort is not a listing to
-    // act on half of, because a half-done removal reported as done is the state being avoided.
-    expect(deleted).toEqual([]);
+    /*
+     * AND THE CONFIG THAT WAS READABLE IS GONE, WHICH THIS ASSERTED THE OPPOSITE OF ON PURPOSE AND
+     * IS CHANGED ON PURPOSE. It required `[]` — not even the row that WAS readable — on the ground
+     * that a half-done removal reported as done is the state being avoided. The first half of that
+     * is right and the second half does not describe this: the call still refuses, so `removeServer`
+     * never deletes the app's row and nothing is reported as done. What the old shape actually
+     * bought was a permanent block. The unreadable row is unreadable on every retry, so the app
+     * could never be removed at all while a config of ours held live grants the whole time — which
+     * is the defect the accounts path was corrected for one wave earlier, sitting one function
+     * away. Every config this deployment CAN name goes, and the row it cannot is what the refusal
+     * counts.
+     */
+    expect(deleted).toEqual([["ac_ours", { revoke_on_delete: true }]]);
+    // And the remedy for the row that is left is the dashboard rather than the button just pressed,
+    // because the next press meets exactly the same unreadable row.
+    expect(refusal.message).toMatch(/Composio's own dashboard/);
   });
 
   test("a config with no id stops the removal, and no delete is sent", async () => {
