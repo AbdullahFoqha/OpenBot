@@ -180,6 +180,25 @@ export type ComposioVendor = {
 const CONFIG_SUFFIX = "(OpenBot)";
 
 /**
+ * How long one catalogue answer is served to everybody who asks for it.
+ *
+ * THE CATALOGUE IS READ ONCE PER SEARCH KEYSTROKE OTHERWISE, WHICH IS WHAT THIS IS ABOUT. The admin
+ * picker debounces its search field and then asks `/composio/apps`, and that route filters in this
+ * process precisely because Composio's toolkit listing takes no search term — so every distinct term
+ * a person types is another request for the whole directory, a few hundred rows of it, to answer a
+ * question about one. Typing "linear" pulls the catalogue four or five times, and enabling the app
+ * afterwards pulls it once more.
+ *
+ * TEN MINUTES BECAUSE OF WHAT GOES STALE IN IT. The rows are Composio's published toolkits: an app
+ * is added to their catalogue or its action count moves every so often, never within one
+ * administrator's sitting, and the worst a stale row can do here is show a description or a count
+ * that is a few minutes behind. Held for a working session it would be a cache nobody could explain
+ * to an operator whose new app is missing; held for seconds it would not survive the debounce it
+ * exists for.
+ */
+const DIRECTORY_TTL_MS = 10 * 60 * 1000;
+
+/**
  * Both seams, over one vendor client.
  *
  * TAKING THE VENDOR OBJECT RATHER THAN A KEY IS THE SEAM. It is what lets every test of this
@@ -189,8 +208,18 @@ const CONFIG_SUFFIX = "(OpenBot)";
  *
  * The vendor is captured in a closure rather than stored on either returned object, so neither
  * `actions` nor `broker` offers a route back to the client or to the key it holds.
+ *
+ * @param now The clock the catalogue's lifetime is measured against, injected for the same reason
+ * the vendor is. A test that could not move the clock could only assert the cache's hit by counting
+ * calls and would have to sleep ten minutes to assert its expiry, so the window would be the one
+ * thing here no test could reach. It is a parameter of the builder rather than of
+ * {@link ComposioBroker.listApps}, because the seam's callers are routes and none of them has an
+ * opinion about what time it is.
  */
-export function buildComposioClient(vendor: ComposioVendor): {
+export function buildComposioClient(
+  vendor: ComposioVendor,
+  now: () => number = Date.now,
+): {
   actions: ComposioActions;
   broker: ComposioBroker;
 } {
@@ -230,6 +259,66 @@ export function buildComposioClient(vendor: ComposioVendor): {
       limit: LISTING_LIMIT,
     });
     return answer.items;
+  };
+
+  /**
+   * The catalogue answer this process is currently serving, and the moment it was asked for.
+   *
+   * A PROMISE RATHER THAN THE ROWS, WHICH IS THE WHOLE ANSWER TO CONCURRENCY. The entry is written
+   * before the request is answered, so a second caller arriving while the first is still in flight
+   * finds it and awaits the same request. Holding the resolved rows instead would leave the window
+   * this cache exists to close wide open: three people opening the picker together, or one person's
+   * debounce firing twice, are exactly the case where nothing is cached yet, and each of them would
+   * start their own catalogue fetch and then overwrite each other's answer.
+   *
+   * IT IS PER BUILT CLIENT, not per module. This adapter is built once per deployment key, so in
+   * this process that is one cache; in a test it is one cache per {@link buildComposioClient}, which
+   * is what lets each test below start from nothing without an API for emptying it.
+   */
+  let heldDirectory: { at: number; apps: Promise<BrokerApp[]> } | null = null;
+
+  /**
+   * The catalogue as the vendor answers it, mapped to the rows an administrator chooses from.
+   *
+   * ONE PAGE AT THE CEILING, SORTED BY USAGE, AND NO SEARCH TERM.
+   *
+   * The order matters because the page is finite: at the ceiling the apps most likely to be wanted
+   * are the ones that must not be the ones cut off. The absent search term is the subtler half —
+   * the SDK's list params name no search field
+   * (`ToolkitsListParamsSchema`, `@composio/core` 0.18.1, `src/types/toolkit.types.ts:9-15`)
+   * and the parse strips what it does not name, so a term passed here would vanish before the
+   * request and leave a caller believing they had filtered a list nobody filtered. Searching the
+   * catalogue is this deployment's own job, over the rows below.
+   */
+  const fetchDirectory = async (): Promise<BrokerApp[]> => {
+    const toolkits = await vendor.toolkits.get({
+      limit: LISTING_LIMIT,
+      sortBy: "usage",
+    });
+    return toolkits.map((toolkit) => ({
+      slug: toolkit.slug,
+      name: toolkit.name,
+      /*
+       * Each absence becomes the value that reads honestly on an administrator's screen. An empty
+       * description shows as no description; a null logo is the field's documented way of saying
+       * the vendor published none, which renders as a gap rather than as a broken image.
+       *
+       * The categories are the DISPLAY names rather than the slugs, because this list is read by a
+       * person choosing an app and "Productivity" is what they are choosing by.
+       *
+       * A MISSING COUNT BECOMES ZERO, WHICH IS THE ONE IMPERFECT ANSWER HERE. `actionCount` is a
+       * number and the shape offers no way to say "not published", so a toolkit that publishes no
+       * count reads as an app with no actions. It is the conservative direction — it understates
+       * the size of a change rather than overstating it — and Composio publishes a count for every
+       * toolkit measured, so this is a guard against the vendor rather than a routine case.
+       */
+      description: toolkit.meta.description ?? "",
+      logo: toolkit.meta.logo ?? null,
+      categories: (toolkit.meta.categories ?? []).map(
+        (category) => category.name,
+      ),
+      actionCount: toolkit.meta.toolsCount ?? 0,
+    }));
   };
 
   const actions: ComposioActions = {
@@ -303,47 +392,58 @@ export function buildComposioClient(vendor: ComposioVendor): {
   };
 
   const broker: ComposioBroker = {
+    /**
+     * The catalogue, from memory where this process asked for it less than ten minutes ago.
+     *
+     * BOTH CALLERS READ THE SAME HELD ANSWER, AND THE SECOND OF THEM IS THE INTERESTING ONE. The
+     * search route filters the directory in this process, so caching it is what stops a debounced
+     * search field from pulling a few hundred rows once per term. The enable route then reads the
+     * directory again to check that the slug it was handed is one Composio lists, and that read
+     * comes out of the same cache — which is the right answer rather than a concession, because
+     * the slug being checked is one this deployment handed the browser out of THIS cache moments
+     * earlier. The check exists to refuse a slug the catalogue never published — a request composed
+     * by hand, or a row left over from a url somebody edited — and a ten-minute-old catalogue
+     * settles that question exactly as well as a fresh one. The case it gives up is an app Composio
+     * withdrew within the window, whose cost is one `mcp_servers` row for an app that answers
+     * nothing, removable on the page that added it; the case it buys is that pressing Add does not
+     * re-read a catalogue the picker just read.
+     *
+     * A FAILURE IS NEVER HELD. The entry is dropped when its request rejects, so a vendor that
+     * refused once is asked again by the next caller rather than refusing from memory for ten
+     * minutes — the failures here are an unset or wrong API key and Composio being down, and the
+     * first two are fixed by an operator who then presses the button again, which must be allowed
+     * to work. The callers already sharing that one in-flight request do share its failure, which
+     * is the truth about their request: they asked while it was being answered.
+     *
+     * THERE IS NO INVALIDATION, AND THE DESIGN ASKED FOR ONE. It wanted the directory "refreshable
+     * by an explicit reload", and that is not built: the lifetime above is the whole of the
+     * freshness story. Nothing in this deployment reloads a catalogue today — no page, route or job
+     * has such a control — so the method would have no caller, and an invalidation API with no
+     * caller is an untested path that reads like a guarantee. The moment a reload button exists,
+     * this is where it attaches.
+     */
     async listApps(): Promise<BrokerApp[]> {
+      const held = heldDirectory;
+      if (held && now() - held.at < DIRECTORY_TTL_MS) return held.apps;
+
       /*
-       * ONE PAGE AT THE CEILING, SORTED BY USAGE, AND NO SEARCH TERM.
-       *
-       * The order matters because the page is finite: at the ceiling the apps most likely to be
-       * wanted are the ones that must not be the ones cut off. The absent search term is the
-       * subtler half — the SDK's list params name no search field
-       * (`ToolkitsListParamsSchema`, `@composio/core` 0.18.1, `src/types/toolkit.types.ts:9-15`)
-       * and the parse strips what it does not name, so a term passed here would vanish before the
-       * request and leave a caller believing they had filtered a list nobody filtered. Searching
-       * the catalogue is this deployment's own job, over the rows below.
+       * Stamped when the request goes out rather than when it comes back, so a slow catalogue is
+       * held for slightly less than the full window rather than for the window plus its own
+       * latency. Written into the slot before it is awaited, which is what a concurrent caller
+       * finds.
        */
-      const toolkits = await vendor.toolkits.get({
-        limit: LISTING_LIMIT,
-        sortBy: "usage",
+      const entry = { at: now(), apps: fetchDirectory() };
+      heldDirectory = entry;
+      /*
+       * The drop on failure, registered here rather than written as a try/catch around an await so
+       * that this method hands every caller the one shared promise. `heldDirectory === entry`
+       * because a later request may already have replaced this one, and clearing that would throw
+       * away a good answer over an old failure.
+       */
+      entry.apps.catch(() => {
+        if (heldDirectory === entry) heldDirectory = null;
       });
-      return toolkits.map((toolkit) => ({
-        slug: toolkit.slug,
-        name: toolkit.name,
-        /*
-         * Each absence becomes the value that reads honestly on an administrator's screen. An
-         * empty description shows as no description; a null logo is the field's documented way of
-         * saying the vendor published none, which renders as a gap rather than as a broken image.
-         *
-         * The categories are the DISPLAY names rather than the slugs, because this list is read
-         * by a person choosing an app and "Productivity" is what they are choosing by.
-         *
-         * A MISSING COUNT BECOMES ZERO, WHICH IS THE ONE IMPERFECT ANSWER HERE. `actionCount` is a
-         * number and the shape offers no way to say "not published", so a toolkit that publishes
-         * no count reads as an app with no actions. It is the conservative direction — it
-         * understates the size of a change rather than overstating it — and Composio publishes a
-         * count for every toolkit measured, so this is a guard against the vendor rather than a
-         * routine case.
-         */
-        description: toolkit.meta.description ?? "",
-        logo: toolkit.meta.logo ?? null,
-        categories: (toolkit.meta.categories ?? []).map(
-          (category) => category.name,
-        ),
-        actionCount: toolkit.meta.toolsCount ?? 0,
-      }));
+      return entry.apps;
     },
 
     async ensureAuthConfig({ toolkit, name }): Promise<void> {

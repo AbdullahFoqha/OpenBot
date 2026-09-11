@@ -177,6 +177,161 @@ describe("the app catalogue", () => {
   });
 });
 
+/**
+ * The catalogue's lifetime, asserted by counting what the vendor was asked rather than what came
+ * back.
+ *
+ * THE COST BEING AVOIDED IS NOT HYPOTHETICAL. The admin picker's search field debounces and then
+ * asks `/composio/apps`, which filters the whole directory in this process because Composio's
+ * toolkit listing takes no search term — so without a cache each distinct term a person types pulls
+ * a few hundred rows over the wire, and pressing Add pulls them once more. Every test here therefore
+ * asserts a CALL COUNT: an implementation that answered correctly and asked five times would pass
+ * any assertion that only looked at the rows.
+ *
+ * The clock is the builder's second argument, which is why these can be written at all. Each
+ * {@link buildComposioClient} holds its own cache, so a test starts from an empty one by building,
+ * and moves time by assigning rather than by waiting ten minutes.
+ */
+describe("holding the catalogue", () => {
+  /** The one row these tests map, kept out of the way of what they are actually asserting. */
+  const GMAIL = {
+    slug: "gmail",
+    name: "Gmail",
+    meta: { description: "Send and read mail.", toolsCount: 63 },
+  };
+  const GMAIL_ROW = {
+    slug: "gmail",
+    name: "Gmail",
+    description: "Send and read mail.",
+    logo: null,
+    categories: [],
+    actionCount: 63,
+  };
+
+  test("a second listing inside the window asks the vendor nothing", async () => {
+    let calls = 0;
+    let clock = 1_000_000;
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          get: async () => {
+            calls += 1;
+            return [GMAIL];
+          },
+        },
+      }),
+      () => clock,
+    );
+
+    const first = await broker.listApps();
+    // Nine minutes is a person searching, choosing and enabling: the whole interaction this cache
+    // exists for happens inside one window.
+    clock += 9 * 60 * 1000;
+    const second = await broker.listApps();
+
+    expect(calls).toBe(1);
+    expect(first).toEqual([GMAIL_ROW]);
+    expect(second).toEqual([GMAIL_ROW]);
+  });
+
+  test("a listing after the window asks again, and answers with what it just read", async () => {
+    let calls = 0;
+    let clock = 1_000_000;
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          get: async () => {
+            calls += 1;
+            // The catalogue moves between the two reads, which is the only way to tell a second
+            // request apart from a cache that happened to be asked twice.
+            return calls === 1
+              ? [GMAIL]
+              : [
+                  GMAIL,
+                  { slug: "linear", name: "Linear", meta: { toolsCount: 12 } },
+                ];
+          },
+        },
+      }),
+      () => clock,
+    );
+
+    await broker.listApps();
+    clock += 10 * 60 * 1000 + 1;
+    const later = await broker.listApps();
+
+    expect(calls).toBe(2);
+    expect(later).toEqual([
+      GMAIL_ROW,
+      {
+        slug: "linear",
+        name: "Linear",
+        description: "",
+        logo: null,
+        categories: [],
+        actionCount: 12,
+      },
+    ]);
+  });
+
+  test("callers arriving while a listing is in flight share the one request", async () => {
+    let calls = 0;
+    let answer: (toolkits: unknown[]) => void = () => {};
+    const inFlight = new Promise<unknown[]>((resolve) => {
+      answer = resolve;
+    });
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          get: () => {
+            calls += 1;
+            return inFlight;
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    // Not awaited between the two, because that is the case: three people opening the picker
+    // together, or one debounce firing twice, all arrive before the first answer exists. A cache
+    // that held the ROWS rather than the request would be empty for every one of them.
+    const both = Promise.all([broker.listApps(), broker.listApps()]);
+    answer([GMAIL]);
+    const [first, second] = await both;
+
+    expect(calls).toBe(1);
+    expect(first).toEqual([GMAIL_ROW]);
+    expect(second).toEqual([GMAIL_ROW]);
+  });
+
+  test("a refusal is not held, so the next caller asks the vendor again", async () => {
+    let calls = 0;
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          get: async () => {
+            calls += 1;
+            // The real first failure here is a key that is unset or wrong, and the operator who
+            // fixes it presses the button again within seconds. A cached refusal would keep
+            // refusing for ten minutes with nothing left to fix.
+            if (calls === 1) throw new Error("Composio refused the catalogue.");
+            return [GMAIL];
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    await expect(broker.listApps()).rejects.toThrow(/refused/);
+    // The clock has not moved: the window is still open and it is the FAILURE rather than the
+    // window that must not be remembered.
+    const recovered = await broker.listApps();
+
+    expect(calls).toBe(2);
+    expect(recovered).toEqual([GMAIL_ROW]);
+  });
+});
+
 describe("executing an action", () => {
   test("an action belonging to another app is refused before anything is sent", async () => {
     const executed: unknown[] = [];
