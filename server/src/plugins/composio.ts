@@ -19,14 +19,15 @@ import { type ListedTool, MAX_RESULT_CHARS, type McpCallResult } from "./mcp";
  *
  * It implements the same interface as the other three, as module-level exports, because that is the
  * shape {@link ./transport} resolves: a `TransportKind` maps to a MODULE. Which is also why the client
- * would have to arrive through a setter rather than a constructor — the registry is built at import
- * time, long before anything has read configuration. {@link useComposioClient} is that setter.
+ * arrives through a setter rather than a constructor — the registry is built at import time, long
+ * before anything has read configuration. {@link useComposioClient} is that setter.
  *
- * NOTHING IN THE SHIPPED PRODUCT CALLS IT. There is no adapter under `server/src`: the only caller
- * is the test suite. So on every real deployment `installed` is null, which is a state this module
- * is written for rather than an outage — {@link listTools} throws a sentence saying so and
- * {@link callTool} refuses with one. Read every mention of "the client" below as a description of
- * the seam an adapter would plug into, not of wiring that exists.
+ * `index.ts` CALLS IT AT STARTUP, from the one place that holds the key: it builds the client
+ * through `./composio-adapter` where `config.composioApiKey` is set and installs the actions seam
+ * with it. So on a deployment that has a key `installed` is a real client, and every mention of
+ * "the client" below describes wiring that runs. A deployment with no key installs nothing and
+ * leaves it null, which is a state this module is written for rather than an outage —
+ * {@link listTools} throws a sentence saying so and {@link callTool} refuses with one.
  */
 
 /**
@@ -81,12 +82,14 @@ export type ComposioAction = {
    *
    * WHY THE CLAIM WAS DROPPED RATHER THAN THE LOSS FIXED. The strip happens inside the vendor's own
    * parse, upstream of every byte this module receives, so there is nothing here to restore a key
-   * from — "stop losing them" is not an option this file has. The one place it could be avoided is
-   * the adapter that has yet to be written, by reading `client.tools.list` directly rather than
-   * `tools.getRawComposioTools` and never running `ToolSchema` over the answer; that is a decision
-   * about the vendor's types, and it belongs where the vendor's types belong. What this module can
-   * honestly promise is the narrower thing: it adds nothing to this schema and removes nothing from
-   * it, so what the SDK handed over is exactly what a model is shown.
+   * from — "stop losing them" is not an option this file has. The loss is live rather than
+   * theoretical: `./composio-adapter` fills this field from `tools.getRawComposioTools`, which is
+   * the call that runs the parse. The one place it could be avoided is that same file, by reading
+   * `client.tools.list` directly and never running `ToolSchema` over the answer — a decision about
+   * the vendor's types, belonging where the vendor's types belong, and one somebody can now make in
+   * a file that exists. What this module can honestly promise is the narrower thing: it adds
+   * nothing to this schema and removes nothing from it, so what the SDK handed over is exactly what
+   * a model is shown.
    *
    * Absent for the occasional action that publishes none — and equally for one that published `{}`,
    * which the SDK normalizes to absent before parsing (`src/models/Tools.ts:76-93`).
@@ -104,8 +107,8 @@ export type ComposioAction = {
  * `ToolExecuteResponseSchema` in `@composio/core` 0.18.1 spells all three of these REQUIRED — `data`
  * a record, `error` a nullable string, `successful` a boolean — so the outcome of a call is a field
  * on a resolution and not only a thrown exception. Named here rather than imported so this module
- * keeps no compile-time dependency on the vendor's package; the adapter that would install a real
- * client is the one place their types belong, and it has not been written.
+ * keeps no compile-time dependency on the vendor's package; `./composio-adapter` is the one file
+ * under `server/src` that imports `@composio/core`, and that is where their types belong.
  *
  * `logId` and `sessionInfo` are the rest of the envelope, carried so the type stays a true statement
  * about what arrives. Nothing here reads them and nothing here shows them to a model.
@@ -122,8 +125,9 @@ export type ComposioResult = {
  * What this module needs of Composio, and nothing more.
  *
  * A narrow projection rather than their client, so a test satisfies it with two functions and the
- * SDK's shape is confined to one place: the adapter that would install a real client. No such
- * adapter exists yet, so today the only implementations of this type are stubs.
+ * SDK's shape is confined to one place: `./composio-adapter`, which `index.ts` builds from
+ * `config.composioApiKey` and installs here at startup. That adapter is the only implementation
+ * that reaches Composio; every other one is a stub in the suite.
  *
  * `execute` RESOLVES AN OUTCOME, AND RESOLVING IS NOT SUCCEEDING. This comment used to say the
  * opposite — "resolves or throws, with no error field to check" — and {@link callTool} was written to
@@ -190,12 +194,13 @@ export type ComposioActions = {
 let installed: ComposioActions | null = null;
 
 /**
- * The seam an adapter would hand this module its client through, once, at startup.
+ * The seam `index.ts` hands this module its client through, once, at startup.
  *
- * WOULD, BECAUSE NO SUCH ADAPTER EXISTS. Nothing under `server/src` calls this function — the only
- * callers are tests — so `installed` is null on every deployment of the shipped product. The
- * comment here used to describe `index.ts` doing the installing, and the code below was written
- * around a state that was treated as an edge case when it is in fact the only state.
+ * A SETTER RATHER THAN A CONSTRUCTOR ARGUMENT, BECAUSE THERE IS NOTHING TO HAND A CLIENT TO. A
+ * transport is reached as a MODULE — `transportFor` maps a kind to one — and that registry is built
+ * at import time, long before there is configuration to read. So the client is installed globally
+ * instead, from the one place that holds the key: `index.ts` builds it from `config.composioApiKey`
+ * and calls this with `composio.actions`.
  *
  * `null` is a supported argument, and not only for symmetry: the suite is one process, so a test that
  * installs a stub has to be able to take it back out. It is also the unconfigured state — a
@@ -390,13 +395,14 @@ export async function listTools(connection: {
     /*
      * A STATE, NOT A FAULT, and the sentence has to read as one.
      *
-     * Nothing under `server/src` installs a Composio client — see {@link useComposioClient} — so
-     * this is what every Composio refresh on every real deployment answers today, by design and
-     * not by accident. An operator who reads it as a crash goes looking for a broken vendor; what
-     * they need to know is that the connector is not wired up here and that nothing was lost.
+     * `index.ts` installs a Composio client only where `COMPOSIO_API_KEY` is set — see
+     * {@link useComposioClient} — so this is what every Composio refresh on a deployment without
+     * one answers, by design and not by accident. An operator who reads it as a crash goes looking
+     * for a broken vendor; what they need to know is that the connector is not configured here and
+     * that nothing was lost.
      */
     throw new Error(
-      `Composio is not configured for this deployment, so nothing could be asked what ${toolkit} offers. That is the expected answer until a Composio client is installed at startup, and the actions already recorded for this app are kept rather than cleared.`,
+      `Composio is not configured for this deployment, so nothing could be asked what ${toolkit} offers. That is the expected answer until COMPOSIO_API_KEY is configured, and the actions already recorded for this app are kept rather than cleared.`,
     );
   }
 
@@ -423,10 +429,11 @@ export async function listTools(connection: {
 
   /*
    * NOTHING IS READ OFF THE ANSWER UNTIL IT IS A LIST, and the check is here rather than assumed
-   * from the type. `ComposioActions` is this module's own projection, the adapter that would
-   * satisfy it has not been written, and a return type is not a promise about what resolves at
-   * runtime — a client that answers null, or a bare envelope with the array one level down, is a
-   * mistake this file will meet before a type checker does.
+   * from the type. `ComposioActions` is this module's own projection, what satisfies it is
+   * `./composio-adapter` mapping an answer off the wire that no type checker here has seen, and a
+   * return type is not a promise about what resolves at runtime — a client that answers null, or a
+   * bare envelope with the array one level down, is a mistake this file will meet before a type
+   * checker does.
    *
    * Both reads below sit OUTSIDE the try that wraps the vendor's call, so before this guard
    * `actions.length` propagated `null is not an object (evaluating 'actions.length')` — which is
