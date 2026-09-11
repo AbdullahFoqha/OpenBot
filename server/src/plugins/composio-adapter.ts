@@ -103,9 +103,16 @@ type VendorTool = {
  * `description` AND `toolsCount` ARE `unknown` RATHER THAN A WIDER UNION, because the wire can put
  * anything in them and a union would be another guess. `unknown` is the type that forces the
  * reader to say what it does with a value it has not checked, which is the whole point.
+ *
+ * `slug` IS AS WIDE AS `name` NOW, AND FOR THE SAME REASON. It was left narrow while the other
+ * fields were widened, on no argument that distinguishes it: `ToolKitItemSchema` spells it required
+ * and the warn-only `transform()` above copies it across whatever it turns out to be, exactly as it
+ * does the name. A slug is the only name this deployment has for an app — it is what enabling one
+ * records and what every later call names — so the one it must not quietly become is `undefined`
+ * read as a string. {@link appOf} has refused that since the sweep; the declaration says so now.
  */
 type VendorToolkit = {
-  slug: string;
+  slug?: string | null;
   name?: string | null;
   meta: {
     description?: unknown;
@@ -137,11 +144,14 @@ type VendorToolkit = {
  * enum does not contain reaches the choice of config to connect against — where "not ENABLED" and
  * "disabled" are different facts and only one of them is worth telling an operator.
  *
- * `id` IS LEFT ALONE deliberately: it is as unvalidated as the other two, and widening it belongs
- * with the guard that would then be written for it rather than ahead of one.
+ * `id` IS NOW DECLARED THE SAME WAY, AND THE GUARD IT WAS WAITING FOR IS WRITTEN. It was left narrow
+ * on the argument that widening belongs beside the check rather than ahead of one; {@link configOf}
+ * makes that check, so the declaration no longer claims more than the wire promises. It is the one
+ * of the three whose absence sends a request: a delete named with `undefined` asks Composio to
+ * remove whatever it cares to, and this deployment then records that the app was withdrawn.
  */
 type VendorAuthConfig = {
-  id: string;
+  id?: string | null;
   name?: string | null;
   status?: string;
 };
@@ -275,6 +285,120 @@ function isTextList(value: unknown): value is string[] {
   return (
     Array.isArray(value) && value.every((entry) => typeof entry === "string")
   );
+}
+
+/**
+ * How many pages of one listing this deployment will read before it stops and says so.
+ *
+ * THE BOUND IS AGAINST A VENDOR THAT NEVER STOPS, not against a large answer. Both listings paged
+ * below are narrow — one app's authorization configs, or one person's accounts for one app — at
+ * {@link LISTING_LIMIT} rows a page, so a second page is already extraordinary and a fiftieth is
+ * not a data set. What it is is a cursor that keeps being handed back, which without a ceiling is
+ * a request that never returns: a person waiting on a page they pressed disconnect from, and a
+ * process holding every row it has read so far.
+ *
+ * REACHING IT IS A REFUSAL AND NEVER A TRUNCATION, which is the property the whole guard exists for
+ * — see {@link everyRowOf}. A ceiling that answered with what it had would be the page ceiling
+ * again, one order of magnitude further out and harder to notice.
+ */
+const PAGE_CEILING = 50;
+
+/**
+ * The listing a refusal is about, as the two clauses every sentence below is built from.
+ *
+ * WRITTEN AT THE CALL SITE for the same reason {@link VendorCall}'s outcome is: what could not be
+ * told is a fact about the question being asked — "whether this person is connected" is not
+ * something {@link everyRowOf} can know — and composing it beside the call keeps it true.
+ */
+type Listing = {
+  /** The listing as a noun phrase: "this person's gmail accounts". */
+  noun: string;
+  /** What could not be told, as a clause following "so": "whether one exists could not be read". */
+  consequence: string;
+};
+
+/**
+ * EVERY ROW OF A LISTING THE VENDOR PAGES, or a refusal rather than a fragment read as the whole.
+ *
+ * WHY THIS PAGES WHERE THE CATALOGUE REFUSES, which is the one decision worth writing down here.
+ * `fetchDirectory` below meets a full page and refuses, and `./composio` does the same with a full
+ * action listing, and both say why in the same words: the SDK offers no cursor to ask for a second
+ * page with, so an answer at the ceiling and an answer past it are indistinguishable and no second
+ * request could tell them apart. That is a refusal born of an inexpressible request rather than a
+ * house style. Here the request IS expressible: `AuthConfigListParamsSchema` and
+ * `ConnectedAccountListParamsSchema` both name a `cursor` (`@composio/core` 0.18.1,
+ * `src/types/authConfigs.types.ts:124-131`, `src/types/connectedAccounts.types.ts:259-266`), both
+ * models forward it (`src/models/AuthConfigs.ts:95`, `src/models/ConnectedAccounts.ts:118`) and
+ * both transformers fill `nextCursor` in from the response's `next_cursor`
+ * (`src/utils/transformers/authConfigs.ts:80`, `connectedAccounts.ts:116`).
+ *
+ * AND THE CALLER THAT DECIDES IT IS `revoke`. Refusing a truncated listing would be honest and
+ * would also mean that the person it happened to could never disconnect: every attempt would meet
+ * the same page and the same refusal, with their grants standing the whole time. The removal of an
+ * app is the same shape one level up. Reading the rest is the answer that finishes the job, and
+ * refusing is what is left for the cases where reading the rest is not possible — which is what the
+ * three refusals below are, and why none of them can be reached by a caller carrying a partial
+ * answer that reports itself complete.
+ *
+ * THE FIRST REQUEST CARRIES NO CURSOR FIELD AT ALL rather than an undefined one, which is what
+ * {@link everyRowOf}'s callers spread for: a `cursor: undefined` would reach the vendor's `parse`
+ * as a key, and an explicit undefined is not something this file needs to make the SDK have an
+ * opinion about.
+ */
+async function everyRowOf(
+  listing: Listing,
+  page: (cursor: string | undefined) => Promise<unknown>,
+): Promise<unknown[]> {
+  const rows: unknown[] = [];
+  const followed = new Set<string>();
+  let cursor: string | undefined;
+
+  for (;;) {
+    const answered: unknown = await page(cursor);
+    const items = itemsOf(answered);
+    if (items === null) {
+      throw new BrokerRefusalError(
+        `Composio answered ${listing.noun} with ${sent(answered)} where a list of them belongs, so ${listing.consequence}. ${VENDOR_SHAPE_REMEDY}`,
+      );
+    }
+    rows.push(...items);
+
+    /*
+     * ABSENT AND NULL BOTH MEAN THE END, and they are the two the vendor actually sends: the
+     * auth-config schema spells the field nullable and the connected-account one spells it nullish,
+     * and a transformer that met no `next_cursor` writes null. Anything else is a field this
+     * deployment cannot follow, and reading it as the end would be the exact mistake this function
+     * exists to prevent — one page treated as the whole answer, by a reader that had been told
+     * otherwise in a way it did not understand.
+     */
+    const next = hasFields(answered) ? answered.nextCursor : undefined;
+    if (next === undefined || next === null) return rows;
+
+    const follow = textOf(next);
+    if (follow === null) {
+      throw new BrokerRefusalError(
+        `Composio sent ${sent(next)} where the cursor to the next page of ${listing.noun} belongs, so ${listing.consequence}: there are more of them than arrived and no cursor this deployment can ask for the rest with. ${VENDOR_SHAPE_REMEDY}`,
+      );
+    }
+
+    /*
+     * A CURSOR ALREADY FOLLOWED IS A LOOP AND NOT A PAGE. Nothing here can tell a vendor bug from a
+     * proxy answering from a cache, and both end the same way: the same rows for ever. Refusing on
+     * the second sight of one is what keeps a person's disconnect a request that returns.
+     */
+    if (followed.has(follow)) {
+      throw new BrokerRefusalError(
+        `Composio answered the same page of ${listing.noun} twice, so ${listing.consequence}: following its cursor did not advance, so the rest of them cannot be reached. ${VENDOR_SHAPE_REMEDY}`,
+      );
+    }
+    if (followed.size >= PAGE_CEILING) {
+      throw new BrokerRefusalError(
+        `Composio has answered ${PAGE_CEILING} pages of ${listing.noun} at ${LISTING_LIMIT} rows each and is still offering another, so ${listing.consequence}: this deployment stops there rather than read on, because what is left cannot be told from a listing that never ends. ${VENDOR_SHAPE_REMEDY}`,
+      );
+    }
+    followed.add(follow);
+    cursor = follow;
+  }
 }
 
 /**
@@ -845,6 +969,16 @@ export type ComposioVendor = {
        * it rather than mint a link that cannot work.
        */
       showDisabled: true;
+      /**
+       * Where the last page left off, ABSENT on the first request rather than undefined.
+       *
+       * `AuthConfigListParamsSchema` names it and `AuthConfigs.list` forwards it
+       * (`@composio/core` 0.18.1, `src/types/authConfigs.types.ts:124-131`,
+       * `src/models/AuthConfigs.ts:95`), which is the fact that decides how a truncated answer is
+       * handled here: the catalogue refuses a full page because it has no way to ask for the next
+       * one, and this listing does. See {@link everyRowOf}.
+       */
+      cursor?: string;
     }): Promise<{
       items: VendorAuthConfig[];
       /**
@@ -855,9 +989,9 @@ export type ComposioVendor = {
        * `transformAuthConfigListResponse` fills it in from `next_cursor` on every answer
        * (`src/utils/transformers/authConfigs.ts:72-80`). Omitting it here did not make the
        * truncation go away; it made it unobservable, because a field a projection does not name is
-       * a field no caller and no test of a caller can ask about. Declared before anything reads it
-       * for exactly that reason: the listings below take one page at {@link LISTING_LIMIT} and
-       * treat it as the whole answer, and the guard that ends that has to have something to read.
+       * a field no caller and no test of a caller can ask about. {@link everyRowOf} reads it, and
+       * follows it until the vendor stops offering one — so a listing at {@link LISTING_LIMIT} is
+       * no longer a fragment this file can mistake for the whole answer.
        */
       nextCursor?: string | null;
     }>;
@@ -907,6 +1041,16 @@ export type ComposioVendor = {
        */
       accountType: "ALL";
       limit: number;
+      /**
+       * Where the last page left off, ABSENT on the first request rather than undefined.
+       *
+       * `ConnectedAccountListParamsSchema` names it and `ConnectedAccounts.list` forwards it
+       * (`@composio/core` 0.18.1, `src/types/connectedAccounts.types.ts:259-266`,
+       * `src/models/ConnectedAccounts.ts:118`). This is the listing the paging matters most for:
+       * {@link ComposioBroker.revoke} answers `true` for "this person's access has ended", and one
+       * page of their accounts is not the set of their accounts. See {@link everyRowOf}.
+       */
+      cursor?: string;
     }): Promise<{
       /**
        * The id is the only field read off an account, and it is read off the wire unchecked.
@@ -925,8 +1069,8 @@ export type ComposioVendor = {
        * (`src/types/connectedAccounts.types.ts:297-303`) and the transformer sets it on every
        * answer (`src/utils/transformers/connectedAccounts.ts:109-117`). It matters more here than
        * anywhere else in this file: {@link ComposioBroker.revoke} answers `true` for "this
-       * person's access has ended", and it has only ever seen one page of the accounts it would
-       * have to end.
+       * person's access has ended", and it used to have seen only one page of the accounts it
+       * would have to end. {@link everyRowOf} follows it until there is none left.
        */
       nextCursor?: string | null;
     }>;
@@ -1139,34 +1283,38 @@ export function buildComposioClient(
     toolkit: string,
     statuses: VendorAccountStatus[],
   ): Promise<string[]> => {
-    const answered: unknown = await askVendor(
-      {
-        outcome: `this person's ${toolkit} accounts were not read`,
-        app: toolkit,
-      },
-      () =>
-        vendor.connectedAccounts.list({
-          userIds: [userId],
-          toolkitSlugs: [toolkit],
-          statuses,
-          accountType: "ALL",
-          limit: LISTING_LIMIT,
-        }),
-    );
     /*
-     * CHECKED HERE RATHER THAN AT EITHER CALLER, so that the two questions cannot drift on this.
-     * `isConnected` answers a boolean and `revoke` deletes by id, and an unreadable listing is the
-     * wrong answer to both of them for the same reason — `false` claims somebody has no account for
-     * an app when nobody looked, and a delete without an id claims a withdrawal that never went
-     * out. The ids are all either caller takes, so the listing hands back ids and nothing else.
+     * EVERY PAGE, AND THE SHAPE OF EACH ONE CHECKED HERE RATHER THAN AT EITHER CALLER, so that the
+     * two questions cannot drift on either. `isConnected` answers a boolean and `revoke` deletes by
+     * id, and both a truncated listing and an unreadable one are the wrong answer to both for the
+     * same reason — `false` claims somebody has no account for an app when nobody looked at all of
+     * them, and a delete without an id claims a withdrawal that never went out. The ids are all
+     * either caller takes, so this hands back ids and nothing else.
      */
-    const items = itemsOf(answered);
-    if (items === null) {
-      throw new BrokerRefusalError(
-        `Composio answered this person's ${toolkit} accounts with ${sent(answered)} where a list of them belongs, so neither whether they are connected nor what there is to withdraw could be read. ${VENDOR_SHAPE_REMEDY}`,
-      );
-    }
-    return items.map((row, position) => accountIdOf(row, position, toolkit));
+    const rows = await everyRowOf(
+      {
+        noun: `this person's ${toolkit} accounts`,
+        consequence:
+          "neither whether they are connected nor what there is to withdraw could be read",
+      },
+      (cursor) =>
+        askVendor(
+          {
+            outcome: `this person's ${toolkit} accounts were not read`,
+            app: toolkit,
+          },
+          () =>
+            vendor.connectedAccounts.list({
+              userIds: [userId],
+              toolkitSlugs: [toolkit],
+              statuses,
+              accountType: "ALL",
+              limit: LISTING_LIMIT,
+              ...(cursor === undefined ? {} : { cursor }),
+            }),
+        ),
+    );
+    return rows.map((row, position) => accountIdOf(row, position, toolkit));
   };
 
   /**
@@ -1186,17 +1334,33 @@ export function buildComposioClient(
   const configsMadeHere = async (
     toolkit: string,
   ): Promise<CheckedAuthConfig[]> => {
-    const answered: unknown = await askVendor(
+    /*
+     * EVERY PAGE, BECAUSE A CONFIG ON THE SECOND ONE IS STILL OURS. Read one page and the two
+     * callers below are wrong in the two opposite directions {@link madeHere} describes:
+     * `ensureAuthConfig` finds none and creates the second config it exists to prevent, and
+     * `deleteAuthConfig` leaves one standing, reports a clean removal, and lets `removeServer`
+     * delete the app's row over the top of a live grant.
+     */
+    const rows = await everyRowOf(
       {
-        outcome: `this deployment's authorization configs for ${toolkit} were not read`,
-        app: toolkit,
+        noun: `this deployment's authorization configs for ${toolkit}`,
+        consequence:
+          "whether one exists is not something this deployment can tell",
       },
-      () =>
-        vendor.authConfigs.list({
-          toolkit,
-          limit: LISTING_LIMIT,
-          showDisabled: true,
-        }),
+      (cursor) =>
+        askVendor(
+          {
+            outcome: `this deployment's authorization configs for ${toolkit} were not read`,
+            app: toolkit,
+          },
+          () =>
+            vendor.authConfigs.list({
+              toolkit,
+              limit: LISTING_LIMIT,
+              showDisabled: true,
+              ...(cursor === undefined ? {} : { cursor }),
+            }),
+        ),
     );
     /*
      * CHECKED BEFORE THE FILTER AND NOT AFTER IT, which is the order the whole guard turns on. The
@@ -1205,13 +1369,7 @@ export function buildComposioClient(
      * costs. Every row therefore passes {@link configOf} first, including the ones that turn out to
      * belong to an operator's own dashboard work.
      */
-    const items = itemsOf(answered);
-    if (items === null) {
-      throw new BrokerRefusalError(
-        `Composio answered this deployment's authorization configs for ${toolkit} with ${sent(answered)} where a list of them belongs, so whether one exists is not something this deployment can tell. ${VENDOR_SHAPE_REMEDY}`,
-      );
-    }
-    return items
+    return rows
       .map((row, position) => configOf(row, position, toolkit))
       .filter(madeHere)
       .sort((one, other) => one.id.localeCompare(other.id));
@@ -1404,7 +1562,16 @@ export function buildComposioClient(
        * rather than a saved one. It buys the one thing a single request cannot: a mismatch that is
        * refused before anything runs, rather than discovered in an audit row afterwards.
        */
-      const resolved = await askVendor(
+      /*
+       * READ OUT OF `unknown`, LIKE EVERY LISTING, AND FOR THE REASON THE LISTINGS GIVE. This is
+       * one of the two answers in this file that is a single object rather than a page of them,
+       * and that is the whole of why it went unchecked for as long as it did: a row type widened to
+       * what the wire can send makes an unchecked read fail to build, and an object read straight
+       * off an `await` has a declared type that looks settled. It is not — `transformToolCases`'
+       * throwing parse is an argument about the SDK's code rather than about this deployment's, and
+       * the same one {@link actionOf} declines to rest on.
+       */
+      const resolved: unknown = await askVendor(
         {
           outcome: `${call.slug} was not resolved and nothing was run`,
           app: call.toolkit,
@@ -1414,7 +1581,37 @@ export function buildComposioClient(
             version: call.version,
           }),
       );
-      const ran = resolved.toolkit?.slug;
+      if (!hasFields(resolved)) {
+        throw new Error(
+          `Composio answered ${sent(resolved)} where the ${call.slug} action belongs, so nothing was run: this deployment cannot show that the call it was about to make is for ${call.toolkit} rather than for some other app. ${VENDOR_SHAPE_REMEDY}`,
+        );
+      }
+
+      /*
+       * AN UNREADABLE APP IS NOT THE SAME FACT AS NO APP, AND THEIR REMEDIES DIFFER. The mismatch
+       * refusal below ends by telling an administrator to refresh this app's tools, which is right
+       * for a slug recorded against a url that has since changed and useless for an SDK that has
+       * begun answering a different shape. So a `toolkit` that is present and not an object, or
+       * whose slug is not a usable name, is refused as what it is rather than folded into "no app
+       * at all" — where it would arrive wearing a remedy that cannot work.
+       */
+      const answeredApp = resolved.toolkit;
+      let ran: string | undefined;
+      if (answeredApp !== undefined) {
+        if (!hasFields(answeredApp)) {
+          throw new Error(
+            `Composio sent ${sent(answeredApp)} where the app ${call.slug} belongs to should be, so nothing was run: this deployment cannot show that the call is for ${call.toolkit}. ${VENDOR_SHAPE_REMEDY}`,
+          );
+        }
+        const named = textOf(answeredApp.slug);
+        if (named === null) {
+          throw new Error(
+            `Composio sent ${sent(answeredApp.slug)} where the slug of the app ${call.slug} belongs to should be, so nothing was run: a name this deployment cannot read is not one it can compare with ${call.toolkit}. ${VENDOR_SHAPE_REMEDY}`,
+          );
+        }
+        ran = named;
+      }
+
       if (ran !== call.toolkit) {
         /*
          * REFUSED RATHER THAN FORWARDED, and both apps are named.
@@ -1696,7 +1893,7 @@ export function buildComposioClient(
        * calls it a "magic function" for exactly that — which is the opposite of what this
        * deployment wants.
        */
-      const request = await askVendor(
+      const request: unknown = await askVendor(
         {
           outcome: `this person's connection to ${toolkit} was not begun`,
           app: toolkit,
@@ -1706,7 +1903,34 @@ export function buildComposioClient(
             callbackUrl: returnUrl,
           }),
       );
+      /*
+       * THE OTHER SINGLE OBJECT, AND THE ONE WITH A PERSON WAITING ON IT. Read out of `unknown` for
+       * the reason the resolve in `execute` is: nothing about this answer is validated any harder
+       * than a listing row, and a field read off a null answer is a `TypeError` that reaches
+       * somebody who has just pressed Connect as though Composio were down.
+       */
+      if (!hasFields(request)) {
+        throw new BrokerRefusalError(
+          `Composio answered ${sent(request)} where the connection it was asked to begin to ${toolkit} belongs, so there is nothing to send this person to — and whether anything was begun at Composio is not something this deployment can tell from that. ${VENDOR_SHAPE_REMEDY}`,
+        );
+      }
+
       const redirectUrl = request.redirectUrl;
+      /*
+       * PRESENT AND NOT A URL IS THE SHAPE THE ABSENCE GUARD BELOW CANNOT SEE. `!redirectUrl` is
+       * false for an object, a number and a list alike, so each of those would be returned as the
+       * `redirectUrl: string` this method promises and put in a `Location` header — a page nobody
+       * can visit, handed to a person as the consent screen they were sent to.
+       */
+      if (
+        redirectUrl !== undefined &&
+        redirectUrl !== null &&
+        typeof redirectUrl !== "string"
+      ) {
+        throw new BrokerRefusalError(
+          `Composio sent ${sent(redirectUrl)} where the page to send this person to for ${toolkit} belongs, so nobody was sent anywhere. ${VENDOR_SHAPE_REMEDY}`,
+        );
+      }
       if (!redirectUrl) {
         /*
          * The SDK spells `redirectUrl` nullable because not every auth scheme has one — an API-key
