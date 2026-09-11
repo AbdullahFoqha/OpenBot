@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { createAuditStore } from "../src/audit";
 import type { ActionPolicy } from "../src/computer/policy";
 import type {
@@ -16,6 +16,7 @@ import {
   pluginGrants,
   users,
 } from "../src/db/schema";
+import type { ComposioBroker } from "../src/plugins/broker";
 import type { ComposioActions, ComposioResult } from "../src/plugins/composio";
 import { useComposioClient } from "../src/plugins/composio";
 import { createPluginStore } from "../src/plugins/store";
@@ -129,9 +130,108 @@ const auditStore = {
   },
 };
 
+/**
+ * Every connection row THIS RUN owns, as `<app>/<person or "">`, in a fixed order.
+ *
+ * SCOPED TO THE APP AND ORDERED, both load-bearing. {@link toolkit} carries this run's suffix, so
+ * this reads nothing another run inserted — which matters most for the anonymous actor, whose half
+ * of the key names nobody and is therefore the one pair another run legitimately holds too. A read
+ * filtered on the person alone would take in every app's anonymous row at once, and a run that died
+ * before its cleanup would leave one standing that no cleanup here can reach: these tests run
+ * against the shared development database, so that row would redden this file for everybody until
+ * somebody edited the database by hand. The ordering is the same argument one step down — Postgres
+ * promises none without one, so an unordered read of two rows is compared against whichever order
+ * the plan happened to produce.
+ */
+async function connectionsHeld(): Promise<string[]> {
+  const rows = await database
+    .select({
+      toolkit: composioConnections.toolkit,
+      userId: composioConnections.userId,
+    })
+    .from(composioConnections)
+    .where(eq(composioConnections.toolkit, toolkit))
+    .orderBy(asc(composioConnections.userId));
+  return rows.map((row) => `${row.toolkit}/${row.userId}`);
+}
+
+/**
+ * THE BROKER, ASKED FOR REAL, because what these tests name is its own answer.
+ *
+ * Every `mcp.account_disconnected` row here carries `vendorRevocationRequested`, and the whole
+ * value of that field is that a reader can tell an account this deployment ended at Composio from
+ * one that outlives it there. A store built with NO broker cannot produce anything but `false` for
+ * it: `removeServer` and `retireConnectionsFor` both spell the absent-broker case as that constant.
+ * So a suite asserting `false` against a brokerless store was asserting the missing dependency and
+ * never the implementation — and the same absence hid the revokes themselves and the auth config,
+ * because with nothing to call, deleting all three call sites changed nothing this file could see.
+ *
+ * WHAT IS NOT NAMED THROWS, the discipline `plugin-store.integration.test.ts`'s own spy keeps, and
+ * for its reason. "The removal asked the broker to revoke" is worth little beside "and asked it
+ * nothing else": a removal that also listed the catalogue or began somebody's connection would be
+ * acting on somebody's behalf in a way nothing here has reasoned about, and a stub answering
+ * plausibly would let that pass unremarked. Nothing in this file enables an app or confirms a
+ * connection, so those four methods have no caller here and say so.
+ */
+const unasked = (what: string) => async (): Promise<never> => {
+  throw new Error(`this suite's path asked the broker to ${what}`);
+};
+
+/**
+ * Each ask that reached the vendor, in order, with what this run's table held at the moment of it.
+ *
+ * `held` IS HOW "REVOKE BEFORE DELETE" BECOMES AN ASSERTION, and that order is the whole of both
+ * removals: the row is the only thing in this deployment naming which app a person connected, so a
+ * delete that ran first would leave a failed revoke with nothing to revoke under — a live grant on
+ * somebody's mailbox that no operation here could reach. A spy that only counted calls would see
+ * the two orders identically, so each handler reads the table itself rather than recording its own
+ * arguments.
+ */
+const asks: { ask: string; held: string[] }[] = [];
+
+/** The asks alone, which is what an ordering assertion is about. */
+function asksMade(): string[] {
+  return asks.map((entry) => entry.ask);
+}
+
+/**
+ * Whether the vendor finds an account to withdraw, which is the answer the trail has to carry.
+ *
+ * A function of the request rather than a flag, so one act can be given a different answer per
+ * person — the shape that tells a passed-through answer from a constant of either polarity.
+ */
+let vendorFinds: (request: { userId: string; toolkit: string }) => boolean =
+  () => true;
+
+const broker: ComposioBroker = {
+  listApps: unasked("list the catalogue"),
+  ensureAuthConfig: unasked("create an auth config"),
+  authorize: unasked("begin somebody's connection"),
+  isConnected: unasked("check somebody's connection"),
+  revoke: async (request) => {
+    asks.push({
+      // Named by app AND person: "two revokes happened" says nothing about who they were for, and
+      // for `removeServer` who they were for is the whole of what makes a removal repeatable.
+      ask: `revoke:${request.toolkit}/${request.userId}`,
+      held: await connectionsHeld(),
+    });
+    return vendorFinds(request);
+  },
+  deleteAuthConfig: async (forToolkit) => {
+    // Named by app as well, because the app and the `mcp_servers` id are allowed to differ and the
+    // config belongs to the app. A removal that dropped the config for the row id would be deleting
+    // a shape this deployment never made and leaving standing the one it did.
+    asks.push({
+      ask: `deleteAuthConfig:${forToolkit}`,
+      held: await connectionsHeld(),
+    });
+  },
+};
+
 const store = createPluginStore({
   database,
   auditStore,
+  broker,
   credentials: credentialsStub,
   encryptionKey: "x".repeat(44),
   policy: () => policy,
@@ -210,12 +310,29 @@ async function seedApp(options: { connect?: boolean } = {}) {
   }
 }
 
-/** What this deployment still believes somebody has connected. */
+/**
+ * Which of THIS RUN'S apps this deployment still believes somebody has connected.
+ *
+ * Narrowed to {@link toolkit} and ordered for the reason {@link connectionsHeld} gives, which is
+ * the same reason and matters for the same row: the anonymous actor. `notNull` admits the empty
+ * string, so `(toolkit, "")` is a legal pair and every run of this file inserts one — and the only
+ * half of it that is this run's is the app. Asking what `""` has connected across the whole table
+ * therefore reads every other run's anonymous row too, including one left behind by a run that was
+ * interrupted before its cleanup; against the shared development database that row is permanent,
+ * unreachable by the cleanup here, and reddens this file for everybody until the database is edited
+ * by hand. Narrowing to this run's app is what makes the assertion about this run.
+ */
 async function connectedToolkitsFor(userId: string): Promise<string[]> {
   const rows = await database
     .select({ toolkit: composioConnections.toolkit })
     .from(composioConnections)
-    .where(eq(composioConnections.userId, userId));
+    .where(
+      and(
+        eq(composioConnections.userId, userId),
+        eq(composioConnections.toolkit, toolkit),
+      ),
+    )
+    .orderBy(asc(composioConnections.toolkit));
   return rows.map((row) => row.toolkit);
 }
 
@@ -229,6 +346,10 @@ beforeEach(async () => {
   await clean();
   events.length = 0;
   reached.length = 0;
+  asks.length = 0;
+  // The vendor finding an account is the ordinary case — somebody connected, so there is a grant to
+  // withdraw. The one test about the answer itself says otherwise for itself.
+  vendorFinds = () => true;
 });
 
 afterEach(() => useComposioClient(null));
@@ -258,6 +379,17 @@ test("offboarding somebody retires the app they connected, and the next call is 
   expect(retired).toBe(1);
   expect(await connectedToolkitsFor(askerId)).toEqual([]);
 
+  /*
+   * THE ACCOUNT ENDED AT THE VENDOR, not merely forgotten here, which is the half an administrator
+   * was actually promised. Deleting the row shuts the gate this deployment owns and does nothing to
+   * the grant: the person's mailbox stays attached at Composio and the offboarding was a lie about
+   * the only thing that matters. So the ask is asserted, and asserted WHILE THE ROW STILL STOOD —
+   * the row is the only thing naming which app to revoke, so the other order leaves a failed revoke
+   * with nothing to revoke under.
+   */
+  expect(asksMade()).toEqual([`revoke:${toolkit}/${askerId}`]);
+  expect(asks[0].held).toEqual([`${toolkit}/${askerId}`]);
+
   await expect(
     store.callTool({ ref, args: {}, botId, actorId: askerId }),
   ).rejects.toThrow(/have not connected/i);
@@ -269,11 +401,11 @@ test("offboarding somebody retires the app they connected, and the next call is 
     actor: admin,
     server: toolkit,
     owner: askerId,
-    // An administrator removing somebody, never somebody changing their own mind. And false
-    // because this store was built with no broker, so there was nobody to revoke at:
-    // `retireConnectionsFor` ends the account at Composio on a deployment that has one.
+    // An administrator removing somebody, never somebody changing their own mind. And true because
+    // the broker answered that it had found this person's account and asked for its withdrawal:
+    // the field is the vendor's own answer passed through, not that a call was made.
     reason: "person_removed",
-    vendorRevocationRequested: false,
+    vendorRevocationRequested: true,
   });
 });
 
@@ -305,6 +437,10 @@ test("a connection whose person is already deleted is retired, and stops passing
   const { retired } = await store.retireConnectionsFor(leaverId, admin);
   expect(retired).toBe(1);
   expect(await connectedToolkitsFor(leaverId)).toEqual([]);
+  // The grant is withdrawn for somebody who no longer exists here, which is the point of the row
+  // outliving the person: nothing else in this deployment still names the app they connected.
+  expect(asksMade()).toEqual([`revoke:${toolkit}/${leaverId}`]);
+  expect(asks[0].held).toEqual([`${toolkit}/${leaverId}`]);
 
   await expect(
     store.callTool({ ref, args: {}, botId, actorId: leaverId }),
@@ -318,7 +454,12 @@ test("retiring the same person twice retires nothing the second time", async () 
   useAnsweringClient();
 
   expect((await store.retireConnectionsFor(askerId, admin)).retired).toBe(1);
+  expect(asksMade()).toEqual([`revoke:${toolkit}/${askerId}`]);
+
   expect((await store.retireConnectionsFor(askerId, admin)).retired).toBe(0);
+  // Quiet at the vendor too, and not only in the count. The rows are gone, so there is no app left
+  // to name — a second pass that asked Composio again would be this deployment guessing.
+  expect(asksMade()).toEqual([`revoke:${toolkit}/${askerId}`]);
 });
 
 /**
@@ -339,6 +480,9 @@ test("retiring nobody retires nothing and leaves the anonymous row alone", async
 
   expect((await store.retireConnectionsFor("", admin)).retired).toBe(0);
   expect(await connectedToolkitsFor("")).toEqual([toolkit]);
+  // And nothing reached Composio either. An unattributed offboarding has no account to name, so a
+  // revoke sent under an empty user id would be this deployment asking the vendor about nobody.
+  expect(asksMade()).toEqual([]);
 });
 
 /**
@@ -360,12 +504,7 @@ test("the sweep takes this run's anonymous row without reaching by actor", async
 
   await clean();
 
-  expect(
-    await database
-      .select({ userId: composioConnections.userId })
-      .from(composioConnections)
-      .where(eq(composioConnections.toolkit, toolkit)),
-  ).toEqual([]);
+  expect(await connectionsHeld()).toEqual([]);
 });
 
 /**
@@ -384,6 +523,22 @@ test("removing the app takes every brokered connection to it", async () => {
 
   expect(await connectedToolkitsFor(askerId)).toEqual([]);
 
+  /*
+   * THE THREE ASKS THIS ACT OWES THE VENDOR, IN THIS ORDER.
+   *
+   * Every connected person revoked first, while the rows naming the app still stand, for the reason
+   * offboarding revokes first. Then the auth config, LAST OF ALL: an orphaned config grants nobody
+   * anything, while a live account whose config has already been deleted is access nothing left
+   * here can end. And the config is dropped for the APP, which the `deleteAuthConfig:` half of the
+   * entry carries.
+   */
+  expect(asksMade()).toEqual([
+    `revoke:${toolkit}/${askerId}`,
+    `deleteAuthConfig:${toolkit}`,
+  ]);
+  expect(asks[0].held).toEqual([`${toolkit}/${askerId}`]);
+  expect(asks[1].held).toEqual([]);
+
   const disconnected = recordedOfType("mcp.account_disconnected");
   expect(disconnected).toHaveLength(1);
   expect(disconnected[0].payload).toMatchObject({
@@ -393,8 +548,63 @@ test("removing the app takes every brokered connection to it", async () => {
     // An administrator took the whole app away and the person did nothing. Distinct from both
     // "they disconnected" and "they were removed", which is what an auditor is trying to tell apart.
     reason: "mcp_server_removed",
-    vendorRevocationRequested: false,
+    // And the vendor's own answer about this person's account, passed through.
+    vendorRevocationRequested: true,
   });
+});
+
+/**
+ * WHAT WAS ASKED OF THE VENDOR, NOT THAT A CALL WAS MADE.
+ *
+ * CRITERION. `vendorRevocationRequested` on each row is the broker's own answer about THAT person.
+ *
+ * REASON. The field exists so a reader can tell an account this deployment ended at Composio from
+ * one that outlives it somewhere else — a gate cleared here with no grant left at the vendor, and a
+ * grant the vendor really held and was asked to withdraw. A constant is worse than no field at all,
+ * because it reads as evidence about every row while describing none of them; it is how the field
+ * came to be renamed from `vendorRevoked`, when every row saying a grant had been withdrawn was
+ * describing one still live at Google.
+ *
+ * TWO PEOPLE IN ONE ACT, the vendor finding an account for one and none for the other, is the
+ * smallest shape that tells a passed-through answer from a constant of EITHER polarity: one row
+ * alone is satisfied by a hardcoded `true` just as the brokerless store satisfied a hardcoded
+ * `false`.
+ */
+test("the trail carries the vendor's answer per person, not one answer for the act", async () => {
+  await seedApp();
+  await database
+    .insert(composioConnections)
+    .values({ toolkit, userId: leaverId });
+  vendorFinds = ({ userId }) => userId === askerId;
+
+  await store.removeServer(toolkit, admin);
+
+  expect(asksMade()).toEqual([
+    `revoke:${toolkit}/${askerId}`,
+    `revoke:${toolkit}/${leaverId}`,
+    `deleteAuthConfig:${toolkit}`,
+  ]);
+
+  const disconnected = recordedOfType("mcp.account_disconnected");
+  expect(disconnected).toHaveLength(2);
+  expect(
+    disconnected
+      .map(
+        (event) =>
+          event.payload as {
+            owner: string;
+            vendorRevocationRequested: boolean;
+          },
+      )
+      .map(({ owner, vendorRevocationRequested }) => ({
+        owner,
+        vendorRevocationRequested,
+      }))
+      .sort((left, right) => left.owner.localeCompare(right.owner)),
+  ).toEqual([
+    { owner: askerId, vendorRevocationRequested: true },
+    { owner: leaverId, vendorRevocationRequested: false },
+  ]);
 });
 
 /**
@@ -442,6 +652,15 @@ test("both acts that end a brokered connection file it under the app", async () 
   expect((await store.retireConnectionsFor(leaverId, admin)).retired).toBe(1);
   await store.removeServer(renamedId, admin);
 
+  // The broker is asked about the APP in both acts, and the auth config dropped for the app too —
+  // never for the row id, which is a display key the vendor has never heard of. This is the one
+  // fixture where the two spellings differ, so it is the only one that can tell them apart.
+  expect(asksMade()).toEqual([
+    `revoke:${toolkit}/${leaverId}`,
+    `revoke:${toolkit}/${askerId}`,
+    `deleteAuthConfig:${toolkit}`,
+  ]);
+
   const disconnected = recordedOfType("mcp.account_disconnected");
   expect(disconnected).toHaveLength(2);
   // Both rows, under one key. Asked as the set of keys rather than row by row, because what the
@@ -484,9 +703,14 @@ test("adding the app back does not restore a connection nobody re-granted", asyn
   expect(reached).toEqual([actionName]);
 
   await store.removeServer(toolkit, admin);
+  expect(asksMade()).toEqual([
+    `revoke:${toolkit}/${askerId}`,
+    `deleteAuthConfig:${toolkit}`,
+  ]);
   // The same app at the same id, added again. Only the server and its action: the Bot's grant
   // survived the removal on its own, which is a separate defect about `plugin_grants` and not this
-  // one.
+  // one. Added by insert rather than through `addBrokeredApp`, so nothing asks the broker again —
+  // the refusal below is the consent being gone and not an auth config that was never remade.
   await addApp();
 
   await expect(
