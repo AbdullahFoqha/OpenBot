@@ -102,6 +102,18 @@ export type CatalogueItem = {
   perInstance: boolean;
 };
 
+/** One app in Composio's directory, as the picker shows it. */
+export type ComposioApp = {
+  slug: string;
+  name: string;
+  description: string;
+  logo: string | null;
+  categories: string[];
+  /** The size of the decision, shown before enabling. */
+  actionCount: number;
+  enabled: boolean;
+};
+
 export type PluginsPage = {
   catalogue: CatalogueItem[];
   servers: PluginServer[];
@@ -123,6 +135,14 @@ export type PluginsPage = {
    * consent flow at all.
    */
   redirectUri: string | null;
+  /**
+   * Whether this deployment has Composio configured.
+   *
+   * A boolean about configuration and never the key: the page needs to know whether the directory
+   * can be browsed at all, and that question is answerable without the API key ever leaving the
+   * server.
+   */
+  composioConfigured: boolean;
 };
 
 /** What one Bot holds, which is all the runtime needs to offer it. */
@@ -146,6 +166,8 @@ export const pluginKeys = {
   page: () => ["plugins", "page"] as const,
   forAgent: (agentId: string) => ["plugins", "for-agent", agentId] as const,
   connections: () => ["plugins", "connections"] as const,
+  composioApps: (query: string) =>
+    ["plugins", "composio", "apps", query] as const,
 };
 
 /** One account this person has connected, from their own point of view. */
@@ -186,6 +208,25 @@ export function pluginsPageQueryOptions() {
       const response = await client("/api/plugins", {
         fallback: "Plugins could not be loaded.",
       });
+      return response.json();
+    },
+  });
+}
+
+/**
+ * Composio's app directory, narrowed by a search term.
+ *
+ * The term goes to our own endpoint because the vendor's client drops a search parameter and
+ * answers with an unfiltered page, so filtering has to happen somewhere that admits to doing it.
+ */
+export function composioAppsQueryOptions(query: string) {
+  return queryOptions({
+    queryKey: pluginKeys.composioApps(query),
+    queryFn: async (): Promise<{ apps: ComposioApp[] }> => {
+      const response = await client(
+        `/api/plugins/composio/apps?q=${encodeURIComponent(query)}`,
+        { fallback: "Composio's app directory could not be read." },
+      );
       return response.json();
     },
   });
