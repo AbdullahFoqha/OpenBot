@@ -3,8 +3,9 @@ import { Hono } from "hono";
 import type { BotAccessCheck } from "../agents/profile-policy";
 import type { AppVariables } from "../auth/guards";
 import { requireAdmin } from "../auth/guards";
-import type { ComposioBroker } from "./broker";
+import { BrokerUnconfiguredError, type ComposioBroker } from "./broker";
 import { CATALOGUE, catalogueEntry } from "./catalogue";
+import { toolkitOf } from "./composio";
 import {
   authorizationUrlFor,
   challengeFor,
@@ -414,13 +415,168 @@ export function createPluginRoutes(
   });
 
   /**
+   * The broker's catalogue, as an administrator chooses an app out of it.
+   *
+   * THE SEARCH IS OURS, AND HAS TO BE. `@composio/core`'s toolkit listing forwards category,
+   * managed_by, sort_by, cursor and limit, and takes no search term at all — a term handed to it is
+   * dropped without a word, and what comes back is an unfiltered first page that looks exactly like
+   * a result. So the whole directory is read and filtered in this process, over the three fields an
+   * administrator would actually be typing at: the slug, the name and the description. A few
+   * hundred rows is a list, not a query.
+   *
+   * NO BROKER IS A 503 NAMING THE SETTING, not an empty list. An empty directory and an absent one
+   * are different facts: the first says Composio has nothing to offer, the second says nobody was
+   * asked. Answered as `{ apps: [] }`, a deployment with no key draws "no apps available" over a
+   * remedy that is one environment variable long, which is why
+   * {@link BrokerUnconfiguredError}'s own message is what is sent rather than a sentence written
+   * here.
+   *
+   * `enabled` comes off `toolkitOf(server.url)` and never off the row's id. The url is where the
+   * transport reads which app a call is against, so it is the only reading that decides anything;
+   * the id names the row — `composio-linear` — and reading one as the other would quietly work
+   * until somebody renamed a row.
+   */
+  routes.get("/composio/apps", requireUser, async (context) => {
+    /*
+     * INSIDE THE HANDLER, and the response returned. `requireAdmin` is a function that answers a
+     * response, not Hono middleware: put in the middleware position it typechecks against Hono's
+     * variadic signature, runs, and gates nothing at all, because nobody reads what it returned.
+     */
+    const forbidden = requireAdmin(context);
+    if (forbidden) return forbidden;
+
+    if (!composio) {
+      return context.json(
+        { error: new BrokerUnconfiguredError().message },
+        503,
+      );
+    }
+
+    const directory = await composio.broker.listApps();
+    const term = (context.req.query("q") ?? "").trim().toLowerCase();
+    const matched = term
+      ? directory.filter((app) =>
+          [app.slug, app.name, app.description].some((field) =>
+            field.toLowerCase().includes(term),
+          ),
+        )
+      : directory;
+
+    const enabled = new Set(
+      (await store.listServers())
+        .map((server) => toolkitOf(server.url))
+        .filter((toolkit): toolkit is string => toolkit !== null),
+    );
+    return context.json({
+      apps: matched.map((app) => ({ ...app, enabled: enabled.has(app.slug) })),
+    });
+  });
+
+  /**
+   * Enable one app of that catalogue, which is a third way for a server to arrive.
+   *
+   * THE SLUG VALIDATION IS THE WHOLE ROUTE. `addBrokeredApp` composes `composio://<slug>`, and that
+   * url is what every future call for the app is resolved against — so a slug the directory never
+   * answered with is a row pointing at an app that does not exist: added, grantable, enabled on a
+   * Bot, and dead at the first call, with nothing on the page saying so. The live directory is what
+   * it is checked against rather than a pattern, because the question is not whether the text is
+   * well formed but whether Composio has such an app right now.
+   *
+   * The title comes off the directory entry too. The caller chose an app; they did not choose a
+   * name for it.
+   */
+  routes.post("/composio/apps", requireUser, async (context) => {
+    const forbidden = requireAdmin(context);
+    if (forbidden) return forbidden;
+
+    if (!composio) {
+      return context.json(
+        { error: new BrokerUnconfiguredError().message },
+        503,
+      );
+    }
+
+    const body = (await context.req.json().catch(() => null)) as {
+      slug?: string;
+    } | null;
+    const slug = body?.slug?.trim();
+    const app = slug
+      ? (await composio.broker.listApps()).find(
+          (candidate) => candidate.slug === slug,
+        )
+      : undefined;
+    if (!app) {
+      return context.json(
+        {
+          error: slug
+            ? `${slug} is not an app Composio lists for this deployment.`
+            : "An app is required.",
+        },
+        400,
+      );
+    }
+
+    try {
+      const server = await store.addBrokeredApp({
+        slug: app.slug,
+        title: app.name,
+        by: actorEmail(context),
+      });
+      return context.json({ server }, 201);
+    } catch (error) {
+      // The same mapping the add routes above make, for the same reason: a refusal an
+      // administrator can correct comes back as itself rather than as a 500.
+      if (
+        error instanceof CustomServerRefusedError ||
+        error instanceof PluginRefusedError
+      ) {
+        return context.json({ error: error.message }, 400);
+      }
+      // And, as on those routes, enabling refreshes before it answers, so every fault
+      // `refreshTools` raises arrives here as well.
+      if (isDeploymentFault(error)) {
+        return context.json({ error: deploymentFaultSentence(error) }, 409);
+      }
+      throw error;
+    }
+  });
+
+  /**
    * Where a person's own connections are, and how to start a new one.
    *
    * Not admin-only, and that is the point: an administrator registers the connector once, and then
    * everybody connects their own account. Somebody can only ever see or start their own.
    */
   routes.get("/connections", requireUser, async (context) => {
-    const connections = await store.connectionsFor(context.var.actor.id);
+    /*
+     * BOTH TABLES, ONE LIST, because the person asking has one question.
+     *
+     * "Am I connected to this?" is the same question whether the grant is a refresh token in this
+     * deployment's vault or an account Composio holds on our behalf. Which table a connection lives
+     * in is a fact about how the vendor is reached — the transport, the credential, who keeps the
+     * secret — and none of that is something a settings page should have to know in order to draw a
+     * word beside a row. Answering out of `connectionsFor` alone left the brokered half invisible,
+     * so the page could only either say "Not connected" over a live account or say nothing at all,
+     * and it chose to say nothing.
+     *
+     * A brokered row is an ordinary connection — `brokeredConnectionsFor` answers in the shape
+     * `connectionsFor` answers, deliberately — so nothing here marks which source a row came from
+     * and nothing downstream asks.
+     *
+     * SORTED, so two requests answer in the same order. Each read is ordered by server id within
+     * its own table, and concatenating two sorted lists is not a sorted list. Compared as plain
+     * strings rather than by `localeCompare`, because the order only has to be the SAME one every
+     * time, and a collation that varies with the deployment's locale is not that.
+     */
+    const [held, brokered] = await Promise.all([
+      store.connectionsFor(context.var.actor.id),
+      store.brokeredConnectionsFor(context.var.actor.id),
+    ]);
+    const connections = [...held, ...brokered].sort((left, right) => {
+      if (left.serverId < right.serverId) return -1;
+      return left.serverId > right.serverId ? 1 : 0;
+    });
+
     return context.json({
       connections,
       // Shown to an administrator so they can register the client at the vendor with the exact value

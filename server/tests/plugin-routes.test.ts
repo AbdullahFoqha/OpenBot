@@ -551,3 +551,319 @@ describe("granting a Bot itself", () => {
     expect(calls).toEqual([]);
   });
 });
+
+/**
+ * The app directory an administrator picks a brokered app out of.
+ *
+ * TWO THINGS ARE BEING PINNED, and they are the two a reader would assume the vendor does for us.
+ * The search is ours, because `@composio/core` forwards only category, managed_by, sort_by, cursor
+ * and limit and drops a search term without saying so — a forwarded term comes back as an
+ * unfiltered first page, which looks exactly like a result. And the slug on a POST is checked
+ * against the directory that was just read, because that slug becomes the url every future call
+ * for the app runs against.
+ *
+ * The no-broker answer is a 503 naming the setting rather than an empty list: an empty directory
+ * and an absent one are different facts, and only one of them has a remedy.
+ */
+const DIRECTORY = [
+  {
+    slug: "slack",
+    name: "Slack",
+    description: "Post messages and read channels.",
+    logo: null,
+    categories: ["communication"],
+    actionCount: 63,
+  },
+  {
+    slug: "gmail",
+    name: "Gmail",
+    description: "Read and send mail.",
+    logo: null,
+    categories: ["communication"],
+    actionCount: 24,
+  },
+  {
+    slug: "linear",
+    name: "Linear",
+    description: "Track issues.",
+    logo: null,
+    categories: ["project-management"],
+    actionCount: 18,
+  },
+];
+
+function directoryApp(
+  /** Null is a deployment with no COMPOSIO_API_KEY, which is the shipped default. */
+  listApps: (() => Promise<typeof DIRECTORY>) | null = async () => DIRECTORY,
+  role: "admin" | "user" = "admin",
+  /** What this deployment has already added, which is where `enabled` comes from. */
+  servers: Array<{ id: string; url: string }> = [],
+) {
+  const added: Array<{ slug: string; title: string; by: string }> = [];
+  const store = {
+    // Every read the plugins surface makes on its way to the route under test.
+    listServers: async () => servers,
+    listSkills: async () => [],
+    listGrants: async () => [],
+    addBrokeredApp: async (input: {
+      slug: string;
+      title: string;
+      by: string;
+    }) => {
+      added.push(input);
+      return { id: `composio-${input.slug}`, url: `composio://${input.slug}` };
+    },
+  };
+
+  const app = createApp(
+    loadConfig(testEnvironment()),
+    {
+      handler: () => new Response(null, { status: 204 }),
+      api: { getSession: async () => ({ user: ADMIN }) },
+    } as never,
+    { rolesForUser: async () => [role] },
+    // Positions 4-14 are the other stores; `store` is 15, pluginStore.
+    ...(Array.from({ length: 11 }) as never[]),
+    store as never,
+    // Positions 16-25 are the stores after it; the broker is 26, `composio`.
+    ...(Array.from({ length: 10 }) as never[]),
+    listApps ? ({ broker: { listApps } } as never) : undefined,
+  );
+
+  return { added, app };
+}
+
+describe("the Composio directory", () => {
+  test("a deployment with no broker is told which setting to set", async () => {
+    const { app } = directoryApp(null);
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+    );
+
+    // 503 rather than `{ apps: [] }`. An empty directory and an absent one are different facts,
+    // and a page shown the empty one draws "no apps available" over a deployment that simply has
+    // no key.
+    expect(response.status).toBe(503);
+    expect((await response.json()).error).toContain("COMPOSIO_API_KEY");
+  });
+
+  test("a search term filters the directory here, not at the vendor", async () => {
+    /*
+     * `@composio/core` forwards only category, managed_by, sort_by, cursor and limit, and silently
+     * drops anything else — so a term handed to their client comes back as an unfiltered first
+     * page that reads as a result. The filter is ours, over slug, name and description.
+     */
+    const { app } = directoryApp();
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps?q=sla",
+    );
+
+    expect(response.status).toBe(200);
+    expect(
+      (await response.json()).apps.map((app: { slug: string }) => app.slug),
+    ).toEqual(["slack"]);
+  });
+
+  test("an app is enabled by the url of the row, not by the row's id", async () => {
+    // Which app a row is comes off its url and only off its url, because that is where the
+    // transport reads it from. An id read as an app name is a different question wearing the same
+    // answer's clothes.
+    const { app } = directoryApp(undefined, "admin", [
+      { id: "an-id-nobody-should-read", url: "composio://slack" },
+    ]);
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+    );
+
+    const apps = (await response.json()).apps as Array<{
+      slug: string;
+      enabled: boolean;
+    }>;
+    expect(apps.find((entry) => entry.slug === "slack")?.enabled).toBe(true);
+    expect(apps.find((entry) => entry.slug === "gmail")?.enabled).toBe(false);
+  });
+
+  test("a slug the directory never answered with is refused", async () => {
+    /*
+     * THE VALIDATION IS THE WHOLE ROUTE. The slug becomes `composio://<slug>`, which is the url
+     * every future call for the app is resolved against, so a slug nobody listed is a row pointing
+     * at an app that does not exist — added, grantable, and dead at the first call.
+     */
+    const { added, app } = directoryApp();
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "not-an-app" }),
+      },
+    );
+
+    expect(response.status).toBe(400);
+    expect(added).toEqual([]);
+  });
+
+  test("an app the directory does list is added", async () => {
+    const { added, app } = directoryApp();
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "slack" }),
+      },
+    );
+
+    expect(response.status).toBe(201);
+    // The title comes off the directory entry, never off the request: the caller chose an app, not
+    // a name for it.
+    expect(added).toEqual([{ slug: "slack", title: "Slack", by: ADMIN.email }]);
+  });
+
+  test("somebody who is not an administrator sees none of it", async () => {
+    // Enabling an app writes every one of its actions in front of a model, which is the same
+    // decision as adding an MCP server and stays an administrator's.
+    const { added, app } = directoryApp(undefined, "user");
+
+    expect(
+      (await app.request("http://openbot.test/api/plugins/composio/apps"))
+        .status,
+    ).toBe(403);
+
+    const posted = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "slack" }),
+      },
+    );
+    expect(posted.status).toBe(403);
+    expect(added).toEqual([]);
+  });
+});
+
+/**
+ * What one person's connected accounts are, when some of them are brokered.
+ *
+ * CRITERION. A brokered connection appears in `GET /connections` for the person who holds it, and
+ * for nobody else, in the same list as this deployment's own OAuth connections.
+ *
+ * REASON. The route answered out of `connectionsFor` alone, which reads the vault's join table, so
+ * an app connected through Composio was invisible to the browser however live it was. The settings
+ * page could then only lie about it or say nothing, and it said nothing. The two reads are separate
+ * because the tables are — one holds a refresh token, the other holds only the fact that Composio
+ * said yes — and this pins that the API does not make the reader care which.
+ *
+ * SCOPING IS THE OTHER HALF, and it is a per-person read with no `requireAdmin` in front of it: a
+ * union assembled from the wrong id would put somebody else's connected mailbox on this page.
+ */
+function connectionsApp(
+  person: { id: string; email: string },
+  held: Array<{ serverId: string; scope: string; connectedAt: string }>,
+  brokered: Array<{
+    userId: string;
+    row: { serverId: string; scope: string; connectedAt: string };
+  }>,
+) {
+  const store = {
+    // Every read the plugins surface makes on its way to the route under test.
+    listServers: async () => [],
+    listSkills: async () => [],
+    listGrants: async () => [],
+    connectionsFor: async (userId: string) =>
+      userId === person.id ? held : [],
+    brokeredConnectionsFor: async (userId: string) =>
+      brokered
+        .filter((connection) => connection.userId === userId)
+        .map((connection) => connection.row),
+  };
+
+  const app = createApp(
+    loadConfig(testEnvironment()),
+    {
+      handler: () => new Response(null, { status: 204 }),
+      api: {
+        getSession: async () => ({
+          user: { ...person, name: "Somebody", image: null },
+        }),
+      },
+    } as never,
+    { rolesForUser: async () => ["user"] },
+    // Positions 4-14 are the other stores; `store` is 15, pluginStore.
+    ...(Array.from({ length: 11 }) as never[]),
+    store as never,
+  );
+
+  return () => app.request("http://openbot.test/api/plugins/connections");
+}
+
+const ASKER = { id: "user_asker", email: "asker@openbot.test" };
+const SOMEBODY_ELSE = { id: "user_other", email: "other@openbot.test" };
+
+describe("a person's own connections", () => {
+  test("a brokered connection is in the list beside the OAuth ones", async () => {
+    const request = connectionsApp(
+      ASKER,
+      [
+        {
+          serverId: "notion",
+          scope: "read",
+          connectedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      [
+        {
+          userId: ASKER.id,
+          row: {
+            serverId: "composio-slack",
+            scope: "",
+            connectedAt: "2026-02-02T00:00:00.000Z",
+          },
+        },
+      ],
+    );
+
+    const response = await request();
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      connections: Array<{ serverId: string }>;
+    };
+    // Sorted, so two requests answer in the same order: concatenating two lists that are each
+    // ordered within their own table does not produce an ordered list.
+    expect(body.connections.map((row) => row.serverId)).toEqual([
+      "composio-slack",
+      "notion",
+    ]);
+  });
+
+  test("and is nobody else's", async () => {
+    // The must-not case. This route is behind `requireUser` and nothing else: a union read for the
+    // wrong person would show one person's connected account on another person's settings page.
+    const request = connectionsApp(
+      SOMEBODY_ELSE,
+      [],
+      [
+        {
+          userId: ASKER.id,
+          row: {
+            serverId: "composio-slack",
+            scope: "",
+            connectedAt: "2026-02-02T00:00:00.000Z",
+          },
+        },
+      ],
+    );
+
+    const response = await request();
+
+    expect(response.status).toBe(200);
+    expect((await response.json()).connections).toEqual([]);
+  });
+});
