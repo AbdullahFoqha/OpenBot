@@ -79,6 +79,17 @@ function RouteComponent() {
     (entry) => entry.auth === "user-oauth" && added.has(entry.key),
   );
 
+  /*
+   * Brokered apps belong here for the same reason the OAuth ones do: they answer as you.
+   *
+   * The filter above names the catalogue's `user-oauth` kind, which a brokered row cannot have
+   * because it has no catalogue entry at all — so the one connector that is nothing but per-person
+   * accounts was the one this page never listed.
+   */
+  const brokered = (plugins.data?.servers ?? []).filter(
+    (server) => server.provenance === "composio",
+  );
+
   return (
     <PageShell
       description="Services a Bot reads as you, so it only ever sees what you can see. Connecting is yours to grant, and nobody can grant it for you."
@@ -99,7 +110,7 @@ function RouteComponent() {
         </p>
       ) : (
         <PageSection>
-          {yours.length === 0 ? (
+          {yours.length === 0 && brokered.length === 0 ? (
             /*
              * Says whose move it is. "Nothing here" on its own reads as though you failed to do
              * something, when what is missing is an administrator enabling a connector.
@@ -160,7 +171,64 @@ function RouteComponent() {
                         <IconChevronRight className="size-4 shrink-0 text-muted-foreground" />
                       </ItemActions>
                     </Item>
-                    {index !== yours.length - 1 && <Separator />}
+                    {(index !== yours.length - 1 || brokered.length > 0) && (
+                      <Separator />
+                    )}
+                  </React.Fragment>
+                );
+              })}
+              {brokered.map((server, index) => {
+                const Mark = markFor(server.id);
+                return (
+                  <React.Fragment key={server.id}>
+                    <Item
+                      data-testid={`account-${server.id}`}
+                      render={
+                        <Link
+                          params={{ key: server.id }}
+                          to="/settings/connected-accounts/$key"
+                        />
+                      }
+                      size="sm"
+                    >
+                      <RowMark>
+                        <Mark className="size-4" />
+                      </RowMark>
+                      <ItemContent>
+                        <ItemTitle>{server.title}</ItemTitle>
+                        {/* Written here rather than read off the row: a brokered app has no
+                            catalogue entry, so the summary the server sends back is empty. */}
+                        <ItemDescription>
+                          Reached through Composio, which holds the account, so
+                          a Bot sees only what you can see.
+                        </ItemDescription>
+                      </ItemContent>
+                      <ItemActions>
+                        {/*
+                         * The same dot and the same two words as the rows above, read out of the
+                         * same set. The connections endpoint now answers out of both tables, so a
+                         * brokered app this person has connected is in `connected` under the id of
+                         * its server row — which is the id this row is drawn from. The state was
+                         * never a different kind of fact here, only an unanswerable one.
+                         */}
+                        <span
+                          aria-hidden="true"
+                          className={cn(
+                            "size-1.5 rounded-full",
+                            connected.has(server.id)
+                              ? "bg-emerald-500"
+                              : "bg-muted-foreground/40",
+                          )}
+                        />
+                        <span className="text-muted-foreground text-xs">
+                          {connected.has(server.id)
+                            ? "Connected"
+                            : "Not connected"}
+                        </span>
+                        <IconChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                      </ItemActions>
+                    </Item>
+                    {index !== brokered.length - 1 && <Separator />}
                   </React.Fragment>
                 );
               })}
