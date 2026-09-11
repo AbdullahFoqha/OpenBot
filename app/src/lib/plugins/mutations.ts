@@ -271,6 +271,58 @@ export function connectAccountMutationOptions(
   });
 }
 
+/**
+ * Ask the vendor whether a brokered connection actually completed.
+ *
+ * Exists because the return trip from consent proves nothing. The callback is an ordinary redirect
+ * with nothing signed in it, so somebody arriving back on the page is not evidence that they
+ * finished the flow — or that the account they finished it with is the one the row claims. So the
+ * vendor is asked, and its answer is what the connected state is written from.
+ *
+ * Answers with the body rather than a bare success, because "asked, and told not connected" is a
+ * different thing for a screen to say than "could not ask".
+ *
+ * There is no start half here: beginning a brokered connect is the same write as any other consent
+ * flow, so callers use `connectAccountMutationOptions` above, which already reads the vendor's
+ * `authorizationUrl` off the connect route.
+ */
+export function confirmBrokeredConnectionMutationOptions(
+  queryClient: QueryClient,
+) {
+  return mutationOptions({
+    mutationFn: async (serverId: string): Promise<{ connected: boolean }> => {
+      const response = await client(
+        `/api/plugins/servers/${encodeURIComponent(serverId)}/connection/confirm`,
+        { method: "POST", fallback: "That connection could not be confirmed." },
+      );
+      return (await response.json()) as { connected: boolean };
+    },
+    onSuccess: () => invalidatePlugins(queryClient),
+  });
+}
+
+/**
+ * End the signed-in person's brokered connection.
+ *
+ * Ends the account at Composio rather than only here. Forgetting the row on our side would leave
+ * the vendor still holding a live grant on somebody's mailbox, which is not what the person who
+ * pressed disconnect was told would happen.
+ */
+export function disconnectBrokeredMutationOptions(queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async (serverId: string) => {
+      await client(
+        `/api/plugins/servers/${encodeURIComponent(serverId)}/connection`,
+        {
+          method: "DELETE",
+          fallback: "That account could not be disconnected.",
+        },
+      );
+    },
+    onSuccess: () => invalidatePlugins(queryClient),
+  });
+}
+
 export function removeSkillMutationOptions(queryClient: QueryClient) {
   return mutationOptions({
     mutationFn: async (slug: string) => {
