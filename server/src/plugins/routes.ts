@@ -68,16 +68,25 @@ export type ConnectingPersonCheck = (userId: string) => Promise<boolean>;
  *
  * 502 RATHER THAN 500, because nothing here broke: this deployment asked a third party and the third
  * party did not answer usefully, which is the same reading the dynamic-registration failure below
- * already gives. {@link BrokerUnconfiguredError} is the one exception and keeps the 503 every other
- * no-broker answer on these routes uses — nobody was asked at all, and the remedy is one environment
- * variable long.
+ * already gives.
+ *
+ * `./broker`'s `BrokerRefusalError` IS THE EXCEPTION, AND IT IS A WIDER ONE THAN IT WAS. It used to
+ * be the one no-key state; it is now every refusal the broker layer AUTHORED — no key, an app whose
+ * authorization config this deployment never created or cannot use, a consent the vendor answered
+ * with nowhere to send anybody, a catalogue too large to be sure of. All of them share the property
+ * that made the first one special: Composio answered, this deployment decided, and the sentence
+ * already names the step that fixes it. So the message is passed through and the status stays 503,
+ * which reads correctly for every one of them — the brokered surface is unavailable for this app
+ * until somebody changes something here, rather than unavailable because a third party is down. The
+ * generic sentence below is for failures this deployment genuinely cannot explain, and answering one
+ * of these with it would tell an administrator to check a key that is fine.
  */
 function brokerRefusal(
   error: unknown,
   generic: string,
 ): { error: string; status: 502 | 503 } {
-  const unconfigured = brokerSentence(error);
-  if (unconfigured) return { error: unconfigured, status: 503 };
+  const authored = brokerSentence(error);
+  if (authored) return { error: authored, status: 503 };
   return { error: vendorSentence(error) ?? generic, status: 502 };
 }
 
@@ -1030,9 +1039,9 @@ export function createPluginRoutes(
    *
    * The order is the store's and the argument for it is made there: the row is the only thing that
    * says which app this person connected, so a delete that ran before the revoke could leave a live
-   * grant on somebody's mailbox that nothing here can reach. What comes back is what happened —
-   * `vendorRevoked` false is a grant that was already gone — and it is passed through rather than
-   * rewritten, because telling those two apart is the whole value of the field.
+   * grant on somebody's mailbox that nothing here can reach. What comes back is what was asked for
+   * — `vendorRevocationRequested` false is a grant that was already gone — and it is passed through
+   * rather than rewritten, because telling those two apart is the whole value of the field.
    *
    * `reason` IS "self" BECAUSE OF WHO IS ASKING. The other word the store takes is
    * `person_removed`, which belongs to an administrator offboarding somebody from the People

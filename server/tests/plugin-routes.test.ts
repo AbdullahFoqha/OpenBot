@@ -1066,7 +1066,7 @@ function brokeredApp(
       // The revoke comes before the delete, so a throw here is the product's own ordering: the
       // account is still live at the vendor and the row is still here.
       if (deployment.storeThrows) throw deployment.storeThrows;
-      return { vendorRevoked: true };
+      return { vendorRevocationRequested: true };
     },
   };
 
@@ -1419,7 +1419,7 @@ describe("confirming and ending a brokered connection", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ vendorRevoked: true });
+    expect(await response.json()).toEqual({ vendorRevocationRequested: true });
     /*
      * The owner and the actor are the same person, and `reason` is the word that says why. The
      * trail tells this apart from an administrator offboarding somebody by those three fields and

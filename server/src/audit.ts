@@ -181,10 +181,15 @@ export const auditEventTypes = [
    * their access". `reason` distinguishes somebody disconnecting their own account from an
    * administrator removing them, because those are the same effect and very different events.
    *
-   * `vendorRevoked` says whether the grant at the vendor was withdrawn as well, and is currently
-   * false: removing somebody stops this deployment holding a usable secret, and the grant at Google
-   * outlives it until it is revoked there. Recorded rather than glossed, because a row that implied
-   * otherwise would be worse than no row.
+   * `vendorRevocationRequested` says whether the grant at the vendor was asked to be withdrawn as
+   * well. It is false for every credential this deployment holds in its own vault: removing
+   * somebody stops us holding a usable secret, and the grant at Google outlives it until it is
+   * revoked there, which nothing on that path asks for. It is true for a brokered account whose
+   * withdrawal Composio accepted — accepted rather than completed, because the upstream revocation
+   * runs as a background job with no supported way to poll it, which is why the field is named for
+   * the ask. Recorded rather than glossed, because a row that implied otherwise would be worse
+   * than no row, and this field once did exactly that: it was called `vendorRevoked` and said true
+   * while the grant at Google stood untouched.
    */
   "mcp.account_disconnected",
   // Every action a Bot takes on its computer, allowed or refused. Both, always: a trail that records

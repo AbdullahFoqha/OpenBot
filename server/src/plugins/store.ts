@@ -2514,7 +2514,7 @@ export function createPluginStore(options: PluginStoreOptions) {
              * access should see which of the three this was.
              */
             reason: "mcp_server_removed",
-            vendorRevoked: false,
+            vendorRevocationRequested: false,
           },
         });
       }
@@ -2587,14 +2587,14 @@ export function createPluginStore(options: PluginStoreOptions) {
           .orderBy(asc(composioConnections.userId));
 
         /*
-         * What the broker actually did for each of them, kept so the trail below records the
-         * answer rather than the attempt. False where there is no broker at all: a deployment whose
+         * What the broker was actually asked for each of them, kept so the trail below records the
+         * answer rather than the call. False where there is no broker at all: a deployment whose
          * key has since been unset can still remove the app, and it could not have been calling it
-         * either way — but nothing was ended at Composio and the row must not claim otherwise.
+         * either way — but nothing was asked of Composio and the row must not claim otherwise.
          */
-        const vendorRevoked = new Map<string, boolean>();
+        const vendorRevocationRequested = new Map<string, boolean>();
         for (const connection of connected) {
-          vendorRevoked.set(
+          vendorRevocationRequested.set(
             connection.userId,
             broker
               ? await broker.revoke({ userId: connection.userId, toolkit })
@@ -2638,13 +2638,17 @@ export function createPluginStore(options: PluginStoreOptions) {
               // administrator took the whole app away and the person did nothing.
               reason: "mcp_server_removed",
               /*
-               * What happened, not what was attempted — {@link ComposioBroker.revoke}'s own
-               * answer, passed through. True where a grant was withdrawn, false where there was
-               * none to withdraw or where this deployment has no broker to have asked. The value
-               * of the field is exactly that a reader can tell a grant this deployment ended from
-               * one that outlives it somewhere else, so a constant here would be worse than none.
+               * What was asked of the vendor, not that a call was made — {@link
+               * ComposioBroker.revoke}'s own answer, passed through. True where an account was
+               * found and its withdrawal asked for, false where there was none to withdraw or
+               * where this deployment has no broker to have asked. The value of the field is
+               * exactly that a reader can tell an account this deployment acted on from one that
+               * outlives it somewhere else, so a constant here would be worse than none. It says
+               * "requested" because that is the strongest thing the vendor's answer supports:
+               * the upstream withdrawal runs as a background job nothing here can poll.
                */
-              vendorRevoked: vendorRevoked.get(connection.userId) ?? false,
+              vendorRevocationRequested:
+                vendorRevocationRequested.get(connection.userId) ?? false,
             },
           });
         }
@@ -3905,10 +3909,19 @@ export function createPluginStore(options: PluginStoreOptions) {
      * ends this call, and no row and no trail entry claims an account was disconnected when the
      * account is still live.
      *
-     * `vendorRevoked` IS WHAT HAPPENED, NOT WHAT WAS ATTEMPTED — {@link ComposioBroker.revoke}'s
-     * own answer, passed through. True where a grant was withdrawn, false where there was none to
-     * withdraw, and the value of the field is exactly that a reader can tell a grant this
-     * deployment ended from one that outlives it somewhere else.
+     * `vendorRevocationRequested` IS WHAT WAS ASKED FOR, NOT THAT A CALL WAS MADE — {@link
+     * ComposioBroker.revoke}'s own answer, passed through. True where an account was found and its
+     * withdrawal asked for, false where there was none to withdraw, and the value of the field is
+     * exactly that a reader can tell an account this deployment acted on from one that outlives it
+     * somewhere else.
+     *
+     * IT SAYS "REQUESTED" BECAUSE THE VENDOR'S ANSWER SUPPORTS NOTHING STRONGER, and the field was
+     * renamed from `vendorRevoked` when that turned out to be false in the plainest way: the
+     * adapter behind it was soft-deleting the account and asking for no upstream revocation at all,
+     * so every row saying a grant had been withdrawn described one still live at Google. The ask is
+     * now made; what a broker can promise synchronously is that the account is gone at Composio and
+     * that the provider has been asked, because the withdrawal itself runs as a background job with
+     * no supported way to poll it.
      *
      * THE VENDOR IS ASKED WHETHER OR NOT A ROW IS HERE. The row is a cache of Composio's answer
      * and never the account itself (see {@link brokeredConnection}), so its absence is not
@@ -3928,9 +3941,10 @@ export function createPluginStore(options: PluginStoreOptions) {
      * {@link confirmBrokeredConnection} files its own event under, one act the other way round:
      * the trail records acts, and a call that changed nothing performed none.
      *
-     * WHICH IS NOT THE SAME QUESTION AS `vendorRevoked`. A row here with no grant at the vendor is
-     * a disconnect — the gate this deployment decides every brokered call on was open, and this
-     * call closed it — so the event is filed, saying `vendorRevoked: false`. A grant at the vendor
+     * WHICH IS NOT THE SAME QUESTION AS `vendorRevocationRequested`. A row here with no grant at
+     * the vendor is a disconnect — the gate this deployment decides every brokered call on was
+     * open, and this call closed it — so the event is filed, saying
+     * `vendorRevocationRequested: false`. A grant at the vendor
      * with no row here is a disconnect too, and the weightier of the two, because somebody's live
      * account was ended; the event is filed for that as well. Only where both are absent is there
      * no act to record, and the two cases stay legible in the trail because the field still says
@@ -3949,10 +3963,10 @@ export function createPluginStore(options: PluginStoreOptions) {
        * caller happened to spell.
        */
       reason: "self" | "person_removed";
-    }): Promise<{ vendorRevoked: boolean }> {
+    }): Promise<{ vendorRevocationRequested: boolean }> {
       if (!broker) throw new BrokerUnconfiguredError();
 
-      const vendorRevoked = await broker.revoke({
+      const vendorRevocationRequested = await broker.revoke({
         userId: input.userId,
         toolkit: input.toolkit,
       });
@@ -3969,7 +3983,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         )
         .returning({ toolkit: composioConnections.toolkit });
 
-      if (deleted || vendorRevoked) {
+      if (deleted || vendorRevocationRequested) {
         await recordAuditEvent(auditStore, {
           eventType: "mcp.account_disconnected",
           targetType: "mcp_server",
@@ -3982,12 +3996,12 @@ export function createPluginStore(options: PluginStoreOptions) {
             // row, and only these two fields tell them apart.
             owner: input.userId,
             reason: input.reason,
-            vendorRevoked,
+            vendorRevocationRequested,
           },
         });
       }
 
-      return { vendorRevoked };
+      return { vendorRevocationRequested };
     },
 
     /**
@@ -4079,7 +4093,7 @@ export function createPluginStore(options: PluginStoreOptions) {
              * which one this was.
              */
             reason: "person_removed",
-            vendorRevoked: false,
+            vendorRevocationRequested: false,
           },
         });
       }
@@ -4124,14 +4138,14 @@ export function createPluginStore(options: PluginStoreOptions) {
         .orderBy(asc(composioConnections.toolkit));
 
       /*
-       * What the broker actually did for each app, kept so the trail below records the answer
-       * rather than the attempt. False where there is no broker at all: a deployment whose key has
+       * What the broker was actually asked for each app, kept so the trail below records the answer
+       * rather than the call. False where there is no broker at all: a deployment whose key has
        * since been unset can still offboard somebody, and it could not have been calling Composio
-       * either way — but nothing was ended there and the row must not claim otherwise.
+       * either way — but nothing was asked there and the row must not claim otherwise.
        */
-      const vendorRevoked = new Map<string, boolean>();
+      const vendorRevocationRequested = new Map<string, boolean>();
       for (const connection of brokered) {
-        vendorRevoked.set(
+        vendorRevocationRequested.set(
           connection.toolkit,
           broker
             ? await broker.revoke({ userId, toolkit: connection.toolkit })
@@ -4157,14 +4171,17 @@ export function createPluginStore(options: PluginStoreOptions) {
             owner: userId,
             reason: "person_removed",
             /*
-             * What happened, not what was attempted — {@link ComposioBroker.revoke}'s own answer,
-             * passed through, and the one place this half differs from the vault loop above.
-             * There the grant at Google outlives our copy of the secret and the field can only
-             * say so; here there was no secret of ours and the account itself was ended, or was
-             * already gone, or there was no broker to ask. The value of the field is exactly that
-             * a reader can tell those apart, so a constant here would be worse than none.
+             * What was asked of the vendor, not that a call was made — {@link
+             * ComposioBroker.revoke}'s own answer, passed through, and the one place this half
+             * differs from the vault loop above. There the grant at Google outlives our copy of
+             * the secret and nothing was asked of anybody, so the field can only say false; here
+             * there was no secret of ours and the account itself was deleted at Composio with its
+             * withdrawal asked for, or there was nothing to ask about, or there was no broker to
+             * ask. The value of the field is exactly that a reader can tell those apart, so a
+             * constant here would be worse than none.
              */
-            vendorRevoked: vendorRevoked.get(connection.toolkit) ?? false,
+            vendorRevocationRequested:
+              vendorRevocationRequested.get(connection.toolkit) ?? false,
           },
         });
       }

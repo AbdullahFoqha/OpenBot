@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { BrokerRefusalError, brokerSentence } from "../src/plugins/broker";
 import { LISTING_LIMIT } from "../src/plugins/composio";
 import { buildComposioClient } from "../src/plugins/composio-adapter";
 
@@ -398,7 +399,13 @@ describe("beginning one person's connection", () => {
           list: async (query: unknown) => {
             listed.push(query);
             return {
-              items: [{ id: "ac_this_deployments", name: "Linear (OpenBot)" }],
+              items: [
+                {
+                  id: "ac_this_deployments",
+                  name: "Linear (OpenBot)",
+                  status: "ENABLED",
+                },
+              ],
             };
           },
         },
@@ -418,9 +425,12 @@ describe("beginning one person's connection", () => {
         "https://openbot.test/settings/connected-accounts/composio-linear",
     });
 
-    // The config this deployment already holds for the app, found by the listing the key itself
-    // scopes — and no `authConfigs.create`, which would refuse in `fakeVendor` if it were reached.
-    expect(listed).toEqual([{ toolkit: "linear", limit: LISTING_LIMIT }]);
+    // The config this deployment already holds for the app — and no `authConfigs.create`, which
+    // would refuse in `fakeVendor` if it were reached. The listing asks for disabled configs too,
+    // because a config it cannot see is one `ensureAuthConfig` would create a second of.
+    expect(listed).toEqual([
+      { toolkit: "linear", limit: LISTING_LIMIT, showDisabled: true },
+    ]);
     expect(linked).toEqual([
       [
         "user_1",
@@ -468,5 +478,479 @@ describe("beginning one person's connection", () => {
     // And nothing was begun at the vendor: a link against a config chosen by nobody would attach
     // this person's account to a configuration this deployment cannot see or tighten.
     expect(linked).toEqual([]);
+  });
+});
+
+/**
+ * Choosing WHICH auth config, which is a question this file used to answer with "the first one".
+ *
+ * An auth config lives in the project the API key belongs to, beside any an operator built by hand
+ * in Composio's own dashboard, and the vendor's listing has no documented order. So "the first row"
+ * is a coin toss between an object this deployment created and an object it knows nothing about —
+ * and the two callers tossed it separately, so they could land on different rows. The name is the
+ * only provenance Composio offers: {@link CONFIG_SUFFIX} is written into it at creation for exactly
+ * this, and was then read by nobody.
+ */
+describe("telling this deployment's auth configs from anybody else's", () => {
+  /** What a listing of one app's configs looks like when an operator has been in the dashboard. */
+  const MIXED = [
+    { id: "ac_by_hand", name: "Linear", status: "ENABLED" },
+    { id: "ac_ours", name: "Linear (OpenBot)", status: "ENABLED" },
+  ];
+
+  test("a connection is begun against the config this deployment made, not the first row", async () => {
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: MIXED }) },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+    );
+
+    await broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl: "https://openbot.test/settings/connected-accounts/x",
+    });
+
+    // A connection is a lasting attachment to whatever config it was made against: scopes, tool
+    // restrictions and a lifetime this deployment neither chose nor can read. Attaching somebody to
+    // the hand-made one is not a mistake a later call can correct.
+    expect(linked).toEqual([
+      [
+        "user_1",
+        "ac_ours",
+        { callbackUrl: "https://openbot.test/settings/connected-accounts/x" },
+      ],
+    ]);
+  });
+
+  test("an app whose only config was made by hand is refused rather than borrowed", async () => {
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [MIXED[0]] }),
+        },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+    );
+
+    const refused = broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl: "https://openbot.test/settings/connected-accounts/x",
+    });
+
+    await expect(refused).rejects.toThrow(/linear/);
+    expect(linked).toEqual([]);
+  });
+
+  test("removing an app drops every config of ours and leaves the hand-made one standing", async () => {
+    const deleted: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              ...MIXED,
+              // The spare from a lost enable race: two administrators both found nothing and both
+              // created. Both are ours, so both go — leaving one behind would leave live grants.
+              {
+                id: "ac_ours_spare",
+                name: "Linear (OpenBot)",
+                status: "ENABLED",
+              },
+            ],
+          }),
+          delete: async (...call: unknown[]) => {
+            deleted.push(call);
+          },
+        },
+      }),
+    );
+
+    await broker.deleteAuthConfig("linear");
+
+    // `revoke_on_delete` on each, because the endpoint soft-deletes and revokes nothing without it
+    // — and this is the one call that reaches an account whose local row drifted away.
+    expect(deleted).toEqual([
+      ["ac_ours", { revoke_on_delete: true }],
+      ["ac_ours_spare", { revoke_on_delete: true }],
+    ]);
+  });
+
+  test("a disabled config of ours stops a second one being created", async () => {
+    const created: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          // Disabled configs are asked for, because this listing is what decides whether to create.
+          // A listing that omitted them would find nothing and create the split it exists to stop.
+          list: async () => ({
+            items: [
+              { id: "ac_ours", name: "Linear (OpenBot)", status: "DISABLED" },
+            ],
+          }),
+          create: async (...call: unknown[]) => {
+            created.push(call);
+          },
+        },
+      }),
+    );
+
+    await broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" });
+
+    expect(created).toEqual([]);
+  });
+
+  test("a disabled config is a refusal rather than a link that cannot work", async () => {
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_ours", name: "Linear (OpenBot)", status: "DISABLED" },
+            ],
+          }),
+        },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+    );
+
+    const refused = broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl: "https://openbot.test/settings/connected-accounts/x",
+    });
+
+    // Sending somebody to consent against a disabled config spends their consent and attaches
+    // nothing, and nothing on the page they are on can fix it.
+    await expect(refused).rejects.toThrow(/disabled/);
+    expect(linked).toEqual([]);
+  });
+
+  test("an app with only somebody else's config still gets one of our own", async () => {
+    const created: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [MIXED[0]] }),
+          create: async (...call: unknown[]) => {
+            created.push(call);
+          },
+        },
+      }),
+    );
+
+    await broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" });
+
+    // Adopting the hand-made one would have this deployment mint connections against scopes it
+    // cannot see and delete an operator's work when the app is removed.
+    expect(created).toEqual([
+      [
+        "linear",
+        { type: "use_composio_managed_auth", name: "Linear (OpenBot)" },
+      ],
+    ]);
+  });
+});
+
+/**
+ * Ending somebody's access, which is the claim this whole surface is here to be able to make.
+ *
+ * THE DELETE DOES NOT REVOKE, and that is the vendor's own description of it: it "soft-deletes a
+ * connected account by marking it as deleted in the database", preserving the record, unless
+ * `revoke_on_delete` is passed. Every path that says it ended somebody's access — a person
+ * disconnecting, an app being removed, a person being offboarded — runs through this method and
+ * wrote `true` into the audit trail while the refresh token at Google was untouched. The assertions
+ * here are therefore on WHAT WENT OUT rather than on what came back: an implementation that dropped
+ * the flag answers every one of them identically.
+ */
+describe("withdrawing one person's grants", () => {
+  test("the delete asks for the upstream credentials to be revoked", async () => {
+    const deleted: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => ({ items: [{ id: "ca_1" }] }),
+          delete: async (...call: unknown[]) => {
+            deleted.push(call);
+          },
+        },
+      }),
+    );
+
+    expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+      true,
+    );
+    expect(deleted).toEqual([["ca_1", { revoke_on_delete: true }]]);
+  });
+
+  test("the listing asks about every state a grant can be hiding in", async () => {
+    const asked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async (query: unknown) => {
+            asked.push(query);
+            return { items: [] };
+          },
+        },
+      }),
+    );
+
+    expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+      false,
+    );
+
+    /*
+     * `accountType` because its default is private accounts only, so a shared account is invisible
+     * to a listing that omits it — and an invisible account is a live grant this answers `false`
+     * about. The statuses because an unfinished consent or a lapsed token is still something a
+     * provider is holding. `REVOKED` is the one left out: it is the only status that says the grant
+     * is already gone, and deleting a tombstone would have this report a withdrawal that never was.
+     */
+    expect(asked).toEqual([
+      {
+        userIds: ["user_1"],
+        toolkitSlugs: ["gmail"],
+        statuses: [
+          "INITIALIZING",
+          "INITIATED",
+          "ACTIVE",
+          "FAILED",
+          "EXPIRED",
+          "INACTIVE",
+        ],
+        accountType: "ALL",
+        limit: LISTING_LIMIT,
+      },
+    ]);
+  });
+
+  test("being connected is a narrower question, and asked as one", async () => {
+    const asked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async (query: unknown) => {
+            asked.push(query);
+            return { items: [{ id: "ca_1" }] };
+          },
+        },
+      }),
+    );
+
+    expect(
+      await broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
+    ).toBe(true);
+
+    // ACTIVE only — an unfinished or expired account must not tell somebody their app is wired up —
+    // but `accountType: "ALL"` all the same, because a shared account is a connected account.
+    expect(asked).toEqual([
+      {
+        userIds: ["user_1"],
+        toolkitSlugs: ["gmail"],
+        statuses: ["ACTIVE"],
+        accountType: "ALL",
+        limit: LISTING_LIMIT,
+      },
+    ]);
+  });
+
+  test("a refusal partway through still asks about the accounts behind it", async () => {
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => ({
+            items: [{ id: "ca_1" }, { id: "ca_2" }, { id: "ca_3" }],
+          }),
+          delete: async (id: string) => {
+            if (id === "ca_2") throw new Error("Composio refused that one.");
+            deleted.push(id);
+          },
+        },
+      }),
+    );
+
+    const refused = broker.revoke({ userId: "user_1", toolkit: "gmail" });
+
+    // The third account is the whole point: a throw at the second used to abandon it, so a grant
+    // nobody ever asked about outlived a call that reported only the failure of a different one.
+    await expect(refused).rejects.toThrow(/2 of this person's 3 accounts/);
+    expect(deleted).toEqual(["ca_1", "ca_3"]);
+  });
+
+  test("a partial withdrawal is a failure rather than a reported disconnection", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => ({ items: [{ id: "ca_1" }, { id: "ca_2" }] }),
+          delete: async (id: string) => {
+            if (id === "ca_2") throw new Error("Composio refused that one.");
+          },
+        },
+      }),
+    );
+
+    /*
+     * NOT A `true`. `store.ts` revokes and only then deletes the `composio_connections` row, which
+     * is the only thing naming which app this person connected; a `true` here deletes that row, the
+     * trail records a disconnection, and the account this call could not end is left live with
+     * nothing pointing at it. The throw leaves the row standing, so pressing disconnect again is a
+     * second attempt with everything the first one had.
+     */
+    await expect(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    ).rejects.toBeInstanceOf(BrokerRefusalError);
+  });
+});
+
+/**
+ * The three refusals this file authors, and the one thing a route has to be able to do with them.
+ *
+ * `routes.ts` answers a thrown broker error by reaching into it for the vendor's own sentence and,
+ * finding none, telling the reader that Composio said nothing about why and that an administrator
+ * should check this deployment's key. That advice is wrong for every sentence below: Composio
+ * answered, this deployment decided, and the remedy is already written down. `brokerSentence` is the
+ * one seam that tells the two apart, so these assert the recognition rather than the wording.
+ */
+describe("refusals a route can tell from an outage", () => {
+  test("an app with no config of ours is recognised as this deployment's own refusal", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({ authConfigs: { list: async () => ({ items: [] }) } }),
+    );
+
+    const error = await broker
+      .authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: "https://openbot.test/settings/connected-accounts/x",
+      })
+      .catch((raised: unknown) => raised);
+
+    expect(brokerSentence(error)).toMatch(/An administrator/);
+  });
+
+  test("a consent with nowhere to send anybody is recognised too", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_ours", name: "Linear (OpenBot)", status: "ENABLED" },
+            ],
+          }),
+        },
+        // An API-key toolkit is connected by typing a secret rather than by visiting a page, so the
+        // vendor answers with no url. Nothing is wrong with the key, and saying so would be a
+        // second wrong answer on top of a first.
+        connectedAccounts: { link: async () => ({ redirectUrl: null }) },
+      }),
+    );
+
+    const error = await broker
+      .authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: "https://openbot.test/settings/connected-accounts/x",
+      })
+      .catch((raised: unknown) => raised);
+
+    expect(brokerSentence(error)).toMatch(/no page to visit/);
+  });
+});
+
+/**
+ * What the catalogue is allowed to be, given that it is cached and then believed.
+ */
+describe("a catalogue that might be a fragment", () => {
+  test("a full page is refused rather than held for ten minutes", async () => {
+    let calls = 0;
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          get: async () => {
+            calls += 1;
+            return Array.from({ length: LISTING_LIMIT }, (_, index) => ({
+              slug: `app_${index}`,
+              name: `App ${index}`,
+              meta: {},
+            }));
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    /*
+     * `LISTING_LIMIT` is the largest page the toolkit endpoint allows and the SDK drops the
+     * response's cursor, so a catalogue of exactly this size and one larger answer identically.
+     * Committed, the fragment would be served for ten minutes to the picker AND to the enable
+     * route, which tells an administrator that a real app "is not an app Composio lists".
+     */
+    await expect(broker.listApps()).rejects.toThrow(/largest page/);
+    // And the refusal is not what gets held: the next caller asks again.
+    await expect(broker.listApps()).rejects.toThrow(/largest page/);
+    expect(calls).toBe(2);
+  });
+
+  test("each caller gets its own rows, so one of them cannot edit the cache", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          get: async () => [
+            {
+              slug: "gmail",
+              name: "Gmail",
+              meta: {
+                description: "Send and read mail.",
+                categories: [{ slug: "productivity", name: "Productivity" }],
+                toolsCount: 63,
+              },
+            },
+          ],
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const first = await broker.listApps();
+    first[0].name = "Not Gmail";
+    first[0].categories.push("Invented");
+    first.length = 0;
+
+    // Nothing does this today, which is exactly why leaving it would be a trap: the first caller
+    // that sorts or trims the rows would be editing what the next nine minutes of callers read as
+    // Composio's answer, and the fault would surface in somebody else's request.
+    const second = await broker.listApps();
+    expect(second).toEqual([
+      {
+        slug: "gmail",
+        name: "Gmail",
+        description: "Send and read mail.",
+        logo: null,
+        categories: ["Productivity"],
+        actionCount: 63,
+      },
+    ]);
   });
 });

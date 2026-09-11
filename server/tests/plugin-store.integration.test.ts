@@ -6353,7 +6353,7 @@ test("disconnecting a brokered connection revokes at the vendor before the row g
     reason: "self",
   });
 
-  expect(outcome).toEqual({ vendorRevoked: true });
+  expect(outcome).toEqual({ vendorRevocationRequested: true });
   expect(rowsWhenRevoked).toEqual(["user_asker"]);
   expect(order).toEqual(["revoke:user_asker"]);
   expect(await store.brokeredConnection(pair)).toBeNull();
@@ -6369,7 +6369,7 @@ test("disconnecting a brokered connection revokes at the vendor before the row g
     reason: "self",
     // What happened, not what was attempted. The broker said it withdrew a grant, so the trail
     // says so; a field that always said true would make the row a worse record than none.
-    vendorRevoked: true,
+    vendorRevocationRequested: true,
   });
 });
 
@@ -6417,7 +6417,7 @@ test("a brokered connection outlives a revoke that failed, and a second attempt 
       by: "user_asker",
       reason: "self",
     }),
-  ).toEqual({ vendorRevoked: true });
+  ).toEqual({ vendorRevocationRequested: true });
   expect(await store.brokeredConnection(pair)).toBeNull();
 });
 
@@ -6425,7 +6425,7 @@ test("a brokered connection outlives a revoke that failed, and a second attempt 
  * A revoke that found nothing to withdraw says so, and the row goes all the same.
  *
  * CRITERION. Where the broker answers `false`, both the outcome and the trail carry
- * `vendorRevoked: false`, and the `composio_connections` row is deleted regardless.
+ * `vendorRevocationRequested: false`, and the `composio_connections` row is deleted regardless.
  *
  * REASON. This is the grant somebody already ended in Composio's own dashboard. The account is
  * gone at the vendor, so the local row is the stale half of a pair that has drifted and deleting
@@ -6434,8 +6434,8 @@ test("a brokered connection outlives a revoke that failed, and a second attempt 
  * somewhere else is a worse record than none, because whoever reads back for who ended it is
  * given the wrong answer in the same words as the right one.
  *
- * THE FALSE IS THE WHOLE TEST. `vendorRevoked` is indistinguishable from a hardcoded `true` until
- * a revoke answers no, and no other test in this file exercises one.
+ * THE FALSE IS THE WHOLE TEST. `vendorRevocationRequested` is indistinguishable from a hardcoded
+ * `true` until a revoke answers no, and no other test in this file exercises one.
  */
 test("a brokered disconnect that withdrew no grant records that it withdrew none", async () => {
   const { broker, order } = brokerSpy({ revoke: async () => false });
@@ -6449,7 +6449,7 @@ test("a brokered disconnect that withdrew no grant records that it withdrew none
       by: "user_asker",
       reason: "self",
     }),
-  ).toEqual({ vendorRevoked: false });
+  ).toEqual({ vendorRevocationRequested: false });
 
   expect(order).toEqual(["revoke:user_asker"]);
   // Gone, because there was nothing at the vendor and the row was therefore the half that had
@@ -6466,7 +6466,7 @@ test("a brokered disconnect that withdrew no grant records that it withdrew none
     server: "gmail",
     owner: "user_asker",
     reason: "self",
-    vendorRevoked: false,
+    vendorRevocationRequested: false,
   });
 });
 
@@ -6507,7 +6507,7 @@ test("a brokered disconnect with nothing to disconnect files nothing in the trai
       by: "user_asker",
       reason: "self",
     }),
-  ).toEqual({ vendorRevoked: false });
+  ).toEqual({ vendorRevocationRequested: false });
 
   expect(order).toEqual(["revoke:user_asker"]);
   expect(await store.brokeredConnection(pair)).toBeNull();
@@ -6524,7 +6524,7 @@ test("a brokered disconnect with nothing to disconnect files nothing in the trai
       by: "user_asker",
       reason: "self",
     }),
-  ).toEqual({ vendorRevoked: true });
+  ).toEqual({ vendorRevocationRequested: true });
 
   const disconnected = auditStore
     .recorded()
@@ -6535,7 +6535,7 @@ test("a brokered disconnect with nothing to disconnect files nothing in the trai
     server: "gmail",
     owner: "user_asker",
     reason: "self",
-    vendorRevoked: true,
+    vendorRevocationRequested: true,
   });
 });
 
@@ -6742,14 +6742,14 @@ test("removing an app revokes everybody, then clears rows, then drops the config
          * is the whole change: the row used to say `false` here whatever happened, which was
          * honest only while the removal left every account live at Composio.
          */
-        vendorRevoked: true,
+        vendorRevocationRequested: true,
       },
       {
         actor: "admin",
         server: "linear",
         owner: "user-b",
         reason: "mcp_server_removed",
-        vendorRevoked: true,
+        vendorRevocationRequested: true,
       },
     ]);
   } finally {
@@ -6882,14 +6882,14 @@ test("removing a person revokes their brokered accounts at the broker", async ()
        * is the whole change: the row used to say `false` here whatever happened, which was
        * honest only while offboarding left every account live at Composio.
        */
-      vendorRevoked: true,
+      vendorRevocationRequested: true,
     },
     {
       actor: "admin",
       server: "linear",
       owner: "user_leaver",
       reason: "person_removed",
-      vendorRevoked: true,
+      vendorRevocationRequested: true,
     },
   ]);
 });
@@ -6897,8 +6897,8 @@ test("removing a person revokes their brokered accounts at the broker", async ()
 /**
  * And where there was no grant left to withdraw, offboarding says so.
  *
- * CRITERION. A broker answering `false` leaves `vendorRevoked: false` in the trail, and the row is
- * deleted and counted just the same.
+ * CRITERION. A broker answering `false` leaves `vendorRevocationRequested: false` in the trail, and
+ * the row is deleted and counted just the same.
  *
  * REASON. The account was already ended in Composio's own dashboard, so the local row is the stale
  * half of a pair that has drifted. What must not happen is the trail claiming this deployment
@@ -6932,7 +6932,7 @@ test("offboarding a brokered account nobody held any more withdraws nothing, and
     server: "gmail",
     owner: "user_leaver",
     reason: "person_removed",
-    vendorRevoked: false,
+    vendorRevocationRequested: false,
   });
 });
 
@@ -6940,7 +6940,7 @@ test("offboarding a brokered account nobody held any more withdraws nothing, and
  * The same false, on the other act that ends a brokered connection.
  *
  * CRITERION. `removeServer` on a brokered row whose broker answers `false` records
- * `vendorRevoked: false`, and still clears the row and drops the config.
+ * `vendorRevocationRequested: false`, and still clears the row and drops the config.
  *
  * REASON. The removal test above pins the `true`, which a literal `true` in the store would pass
  * just as well — and one did, for the whole of this suite, until this test. A field whose only
@@ -6971,7 +6971,7 @@ test("removing an app records the grant it did not withdraw as not withdrawn", a
     server: "gmail",
     owner: "user_asker",
     reason: "mcp_server_removed",
-    vendorRevoked: false,
+    vendorRevocationRequested: false,
   });
 });
 

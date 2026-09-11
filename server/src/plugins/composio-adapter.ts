@@ -1,5 +1,9 @@
 import { Composio } from "@composio/core";
-import type { BrokerApp, ComposioBroker } from "./broker";
+import {
+  type BrokerApp,
+  type ComposioBroker,
+  BrokerRefusalError,
+} from "./broker";
 import {
   type ComposioAction,
   type ComposioActions,
@@ -79,6 +83,44 @@ type VendorToolkit = {
 };
 
 /**
+ * One auth config as the vendor hands it over, which is three fields because all three decide.
+ *
+ * `name` IS THE ONLY PROVENANCE THERE IS. Composio publishes no field saying which client created a
+ * config, and the listing is scoped to the project rather than to this deployment, so a config an
+ * operator made by hand in the dashboard comes back beside the ones made here and is otherwise
+ * identical. The name is the one field this deployment chooses, which is why {@link CONFIG_SUFFIX}
+ * is written into it and why every decision below reads it.
+ *
+ * `status` because a DISABLED config is still a config: it answers the listing, it satisfies the
+ * "does one exist" question, and a connect link minted against it does not work. The two facts have
+ * to be separable or an app with a disabled config reads as an app that is ready.
+ */
+type VendorAuthConfig = {
+  id: string;
+  name: string;
+  status: "ENABLED" | "DISABLED";
+};
+
+/**
+ * The connected-account statuses this file knows how to ask for, as the literals the SDK admits.
+ *
+ * The whole enum is named rather than the two or three in use, because the point of the two lists
+ * below is that they are CHOICES: a reader comparing them can see which statuses each question
+ * leaves out, and a status added by a vendor version shows up here as a name nothing mentions
+ * rather than as an answer that quietly got narrower. Written as literals for the reason the
+ * previous `"ACTIVE"[]` was: the vendor's parameter is an enum and a widened `string[]` does not
+ * satisfy it.
+ */
+type VendorAccountStatus =
+  | "INITIALIZING"
+  | "INITIATED"
+  | "ACTIVE"
+  | "FAILED"
+  | "EXPIRED"
+  | "INACTIVE"
+  | "REVOKED";
+
+/**
  * What this adapter needs of `@composio/core`'s client, written as a shape rather than as a class.
  *
  * A TEST SATISFIES IT WITH AN OBJECT LITERAL, which is the entire argument for it and the reason
@@ -90,6 +132,17 @@ type VendorToolkit = {
  * Every member is written with METHOD syntax deliberately. Method parameters are compared
  * bivariantly, so a real `Composio` — whose signatures carry optional request-options arguments
  * and wider parameter types than the calls here use — satisfies this without a cast.
+ *
+ * THE TWO DELETES ARE NOT `Composio`'s, AND THAT IS THE ONE PLACE THIS SHAPE DIVERGES FROM IT. Both
+ * of the vendor's own wrappers hard-code the request body they send — `this.client.authConfigs
+ * .delete(nanoid, undefined, requestOptions)` and the same line for connected accounts
+ * (`@composio/core` 0.18.1, `src/models/AuthConfigs.ts:303-311` and
+ * `src/models/ConnectedAccounts.ts:532-540`) — so through them the `revoke_on_delete` parameter
+ * cannot be passed at all, and both calls soft-delete while the grant at Google or Slack stands. So
+ * the shape below asks for the underlying client's signature instead, and
+ * {@link createComposioClient} satisfies it from `composio.getClient()`. See
+ * {@link ComposioBroker.revoke} for what that flag is and what its absence made this deployment
+ * claim.
  */
 export type ComposioVendor = {
   tools: {
@@ -117,25 +170,65 @@ export type ComposioVendor = {
     list(query: {
       toolkit: string;
       limit: number;
-    }): Promise<{ items: { id: string; name: string }[] }>;
+      /**
+       * Ask for the disabled ones too, ALWAYS, which is why this is the literal and not a boolean.
+       *
+       * The vendor's listing returns enabled configs unless asked otherwise
+       * (`AuthConfigListParamsSchema.showDisabled`, `@composio/core` 0.18.1,
+       * `src/types/authConfigs.types.ts:124-131`), and a config this listing cannot see is a config
+       * {@link ComposioBroker.ensureAuthConfig} creates a second of — which is the exact split that
+       * method exists to prevent, arriving through the one door it was not watching. Every question
+       * this file asks of the listing is better served by seeing a disabled config and saying so:
+       * creation must not duplicate it, deletion must remove it, and consent must refuse against
+       * it rather than mint a link that cannot work.
+       */
+      showDisabled: true;
+    }): Promise<{ items: VendorAuthConfig[] }>;
     create(
       toolkit: string,
       options: { type: "use_composio_managed_auth"; name: string },
     ): Promise<unknown>;
-    delete(id: string): Promise<unknown>;
+    /**
+     * Delete one auth config, and ask for the upstream credentials on it to be revoked too.
+     *
+     * THE SAME TRAP AS THE ACCOUNT DELETE BELOW, one level up. The endpoint "soft-deletes an
+     * authentication configuration" and revokes "the upstream credentials of every connection using
+     * this auth config" only when the flag is passed (`@composio/client` 0.1.0-alpha.76,
+     * `resources/auth-configs.d.ts:60-72` and `:651-659`), so a delete without it leaves every
+     * grant that was ever made against this config alive at the provider.
+     *
+     * WHICH IS WHY IT IS PASSED HERE EVEN THOUGH THE ACCOUNTS WERE ALREADY ASKED FOR INDIVIDUALLY.
+     * Removing an app revokes each connected person first and drops the config last, and that loop
+     * reaches exactly the people this deployment has a `composio_connections` row for. An account
+     * whose row drifted — cleared by a confirm that Composio answered `false` to, or lost with a
+     * database this deployment restored — is invisible to it and still live at the vendor. This is
+     * the one call that reaches those, and there is nothing on this config that removing the app is
+     * not meant to end.
+     */
+    delete(id: string, params: { revoke_on_delete: true }): Promise<unknown>;
   };
   connectedAccounts: {
     list(query: {
       userIds: string[];
       toolkitSlugs: string[];
       /**
-       * The one status this file ever asks for, spelled as the literal the SDK's enum admits.
-       *
-       * Written as `"ACTIVE"[]` rather than `string[]` because the vendor's parameter is an enum
-       * and a widened array does not satisfy it. The narrowness is worth keeping for its own sake
-       * too: a status this deployment has not thought about cannot be asked for by accident.
+       * Which statuses this particular question is about — see {@link CONNECTED} and
+       * {@link REVOCABLE}, which are the only two answers this file gives.
        */
-      statuses: "ACTIVE"[];
+      statuses: VendorAccountStatus[];
+      /**
+       * Both sharing models, ALWAYS, which is why this is the literal and not the enum.
+       *
+       * OMITTING IT IS NOT "NO OPINION", in exactly the way an omitted limit is not. The parameter
+       * defaults to private accounts only (`ConnectedAccountListParamsSchema.accountType`,
+       * `@composio/core` 0.18.1, `src/types/connectedAccounts.types.ts:286-293`), so a person whose
+       * account for an app is a SHARED one reads as not connected, is told to connect an app they
+       * already have, and — far worse — is invisible to the revoke, which then reports that there
+       * was nothing to withdraw while their grant stands. Neither of the two questions this file
+       * asks has any reason to care how an account is shared: the gate is about whether this person
+       * can act through the app, and the revoke is about ending every account they can act through.
+       */
+      accountType: "ALL";
       limit: number;
     }): Promise<{ items: { id: string }[] }>;
     /**
@@ -166,7 +259,27 @@ export type ComposioVendor = {
       authConfigId: string,
       options: { callbackUrl: string },
     ): Promise<{ redirectUrl?: string | null }>;
-    delete(id: string): Promise<unknown>;
+    /**
+     * Delete one connected account, and ask for the grant behind it to be revoked too.
+     *
+     * WITHOUT THE FLAG THIS CALL DOES NOT REVOKE ANYTHING, and that is the vendor's own description
+     * of it: it "soft-deletes a connected account by marking it as deleted in the database", which
+     * "prevents the account from being used for API calls but preserves the record"
+     * (`@composio/client` 0.1.0-alpha.76, `resources/connected-accounts.d.ts:59-72`). The refresh
+     * token at Google or Slack survives that untouched. Every path in this deployment that claims
+     * to end somebody's access — a person disconnecting, an administrator removing an app, a person
+     * being offboarded — runs through here, so an unflagged delete made all three of those claims
+     * false at once and wrote `true` into the audit trail beside them.
+     *
+     * WHAT THE FLAG BUYS IS A REQUEST AND NOT A RESULT, which is the whole reason
+     * {@link ComposioBroker.revoke}'s answer is named the way it is. The upstream revocation runs as
+     * a background job; the response carries its `revoke_job_id` and the vendor documents that no
+     * generally available endpoint polls it (`:7447-7459`). So the answer is deliberately typed as
+     * `unknown` and read for nothing: there is no field on it this deployment could turn into a
+     * stronger claim than "we asked", and a shape declared here that nothing reads is a shape a
+     * vendor rename can break for no benefit.
+     */
+    delete(id: string, params: { revoke_on_delete: true }): Promise<unknown>;
   };
 };
 
@@ -178,6 +291,63 @@ export type ComposioVendor = {
  * choose, so it is where the provenance goes.
  */
 const CONFIG_SUFFIX = "(OpenBot)";
+
+/**
+ * Whether this deployment made that auth config, which is the question every decision here turns on.
+ *
+ * THE SUFFIX IS WRITTEN FOR EXACTLY THIS AND WAS NOT BEING READ. Both callers used to take the
+ * first row of an unordered listing, and the two consequences are of different sizes. Removing an
+ * app deleted whatever came back first — which can be a config an operator built by hand, with
+ * their own scopes and their own tool restrictions, taking every account on it down with it.
+ * Beginning a connection attached a person to whatever came back first — which can be a
+ * configuration nobody here chose and this deployment cannot see or tighten. And because the order
+ * is the vendor's, the two calls can resolve DIFFERENT rows, so an app could be removed while
+ * people kept connecting against a config the removal left behind.
+ *
+ * MATCHED ON THE END OF THE NAME rather than on the whole of it, because the rest of the name is an
+ * app's title as an administrator saw it at enable time and titles are edited. The suffix is the
+ * part this file writes. Trailing whitespace is tolerated for the same reason it is tolerated
+ * anywhere a human-edited string is compared: a name that picked up a space in a dashboard is the
+ * same config.
+ */
+function madeHere(config: VendorAuthConfig): boolean {
+  return config.name.trimEnd().endsWith(CONFIG_SUFFIX);
+}
+
+/**
+ * The statuses that answer "is this person connected", which is the narrow question of the two.
+ *
+ * ACTIVE ONLY. An `INITIATED` account is somebody who started an authorization and never finished
+ * it, and an `EXPIRED` or `REVOKED` one is a grant that no longer opens anything; counting any of
+ * them as connected tells a person their app is wired up and then fails every call they make with
+ * it.
+ */
+const CONNECTED: VendorAccountStatus[] = ["ACTIVE"];
+
+/**
+ * The statuses that answer "what is there to revoke", which is a deliberately wider question.
+ *
+ * THE TWO QUESTIONS ARE NOT THE SAME ONE, AND TREATING THEM AS ONE LEFT GRANTS STANDING. This used
+ * to be a single ACTIVE listing shared by both, on the argument that "connected" and "there is
+ * something to revoke" are the same fact. They are not. A half-finished consent can already have
+ * been granted at the provider with the callback never delivered; an `EXPIRED` account is an access
+ * token that lapsed and a refresh token that did not; an `INACTIVE` one is a live grant the vendor
+ * has set aside. None of them should tell a person they are connected, and every one of them is
+ * something whose withdrawal is the entire point of pressing disconnect.
+ *
+ * `REVOKED` IS THE ONE STATUS LEFT OUT, and left out on purpose rather than forgotten. It is the
+ * only value that positively says the grant is already gone, so including it would have this
+ * deployment delete a tombstone and then record that it ended somebody's access — the one way the
+ * audit field can be made to lie in the direction nobody would check.
+ */
+const REVOCABLE: VendorAccountStatus[] = [
+  "INITIALIZING",
+  "INITIATED",
+  "ACTIVE",
+  "FAILED",
+  "EXPIRED",
+  "INACTIVE",
+];
 
 /**
  * How long one catalogue answer is served to everybody who asks for it.
@@ -197,6 +367,30 @@ const CONFIG_SUFFIX = "(OpenBot)";
  * exists for.
  */
 const DIRECTORY_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * The held catalogue as a copy nobody else holds, which is what makes handing it out safe.
+ *
+ * WHAT WAS HANDED OUT WAS THE CACHE ITSELF. One array of one set of row objects was returned to
+ * every caller for ten minutes, so a route that sorted the rows in place reordered the catalogue for
+ * everybody, and one that edited a row — a title trimmed for display, a description truncated —
+ * edited what the next caller would read as Composio's answer. Nothing does that today, which is
+ * precisely the problem with leaving it: the first caller that does will have changed a cache it
+ * had no idea it was holding, and the fault will surface in the NEXT request rather than its own.
+ *
+ * `categories` IS COPIED TOO, because a shallow spread of the row would hand the same array on. It
+ * is the one field here that is not a primitive.
+ *
+ * COPIED RATHER THAN FROZEN, which was the other candidate. Freezing would make the sharing safe by
+ * making a mutation throw, but the type says `BrokerApp[]` and a caller is entitled to sort a list
+ * it was given; turning a reasonable caller into a `TypeError` is a worse answer than a few hundred
+ * small objects, which is nothing beside the request this cache exists to avoid.
+ */
+function copyOf(apps: Promise<BrokerApp[]>): Promise<BrokerApp[]> {
+  return apps.then((held) =>
+    held.map((app) => ({ ...app, categories: [...app.categories] })),
+  );
+}
 
 /**
  * Both seams, over one vendor client.
@@ -224,41 +418,82 @@ export function buildComposioClient(
   broker: ComposioBroker;
 } {
   /**
-   * This person's live accounts for this app, which two of the broker's questions are about.
+   * This person's accounts for this app, in whichever states the ASKING question is about.
    *
-   * Shared because {@link ComposioBroker.isConnected} and {@link ComposioBroker.revoke} have to
-   * agree: "connected" and "there is something to revoke" are the same fact, and two listings
-   * written separately drift apart the first time one of them gains a status the other lacks.
-   *
-   * ACTIVE ONLY. An `INITIATED` account is somebody who started an authorization and never
-   * finished it, and an `EXPIRED` or `REVOKED` one is a grant that no longer opens anything;
-   * counting either as connected tells a person their app is wired up and then fails every call
-   * they make with it.
+   * ONE LISTING WITH THE STATUSES AS ITS ARGUMENT, rather than one listing both callers share.
+   * They shared one until it turned out that the shared answer was wrong for one of them: see
+   * {@link CONNECTED} and {@link REVOCABLE} for why "is this person connected" and "what is there
+   * to revoke" are different questions. What they do share is everything a drift between them
+   * would come from — the breadth of `accountType`, the limit, and the fact that both ask about one
+   * person and one app — so the difference between them is exactly the list of statuses and is
+   * visible at both call sites.
    */
-  const activeAccounts = async (userId: string, toolkit: string) => {
+  const accountsFor = async (
+    userId: string,
+    toolkit: string,
+    statuses: VendorAccountStatus[],
+  ) => {
     const answer = await vendor.connectedAccounts.list({
       userIds: [userId],
       toolkitSlugs: [toolkit],
-      statuses: ["ACTIVE"],
+      statuses,
+      accountType: "ALL",
       limit: LISTING_LIMIT,
     });
     return answer.items;
   };
 
   /**
-   * This deployment's auth configs for one app.
+   * The auth configs for one app that THIS DEPLOYMENT made, oldest name first.
    *
-   * EVERYTHING THIS LISTING RETURNS BELONGS TO THIS DEPLOYMENT, which is what makes the two
-   * callers below legitimate. An auth config is scoped to the project the API key belongs to, so
-   * the key is the filter: there is no other tenant's config to be found here and none of ours is
-   * hidden from it.
+   * THE LISTING IS SCOPED TO THE PROJECT AND NOT TO THIS DEPLOYMENT, which is the correction. An
+   * auth config is scoped to the project the API key belongs to — so nothing here is hidden from
+   * this listing, and that was read as "everything it returns is ours". It is not: an operator with
+   * the same project open in Composio's dashboard can create configs for the same app by hand, for
+   * purposes this deployment knows nothing about. {@link madeHere} is the only thing that tells the
+   * two apart, and every caller below is about an object one of them must not touch.
+   *
+   * SORTED SO THAT TWO CALLERS AGREE. The vendor's order is not documented, and the whole failure
+   * being fixed here is two calls resolving different rows; a total order on the id makes the
+   * choice this file makes a stable one, whoever asks and whenever.
    */
-  const authConfigsFor = async (toolkit: string) => {
+  const configsMadeHere = async (toolkit: string) => {
     const answer = await vendor.authConfigs.list({
       toolkit,
       limit: LISTING_LIMIT,
+      showDisabled: true,
     });
-    return answer.items;
+    return answer.items
+      .filter(madeHere)
+      .sort((one, other) => one.id.localeCompare(other.id));
+  };
+
+  /**
+   * Ask for every one of them and answer with what refused, rather than stopping at the first.
+   *
+   * A THROW MID-LOOP ABANDONS GRANTS THAT ARE STILL LIVE. Both callers below are deleting a set of
+   * things that each independently hold somebody's access, and an exception out of the second of
+   * five leaves three untouched and unmentioned — while the caller is told only about the one that
+   * failed, so nothing in the answer says the loop did not finish. Attempting all of them makes the
+   * failure a statement about a set: this many were asked for and this many refused.
+   *
+   * SERIALLY RATHER THAN TOGETHER, for the same reason every other call here goes out one at a
+   * time: the vendor rate-limits, and a person with several accounts is not a reason to open
+   * several connections. The order is the listing's, which is sorted.
+   */
+  const askForEach = async <T>(
+    items: T[],
+    ask: (item: T) => Promise<unknown>,
+  ): Promise<unknown[]> => {
+    const refused: unknown[] = [];
+    for (const item of items) {
+      try {
+        await ask(item);
+      } catch (error) {
+        refused.push(error);
+      }
+    }
+    return refused;
   };
 
   /**
@@ -295,6 +530,33 @@ export function buildComposioClient(
       limit: LISTING_LIMIT,
       sortBy: "usage",
     });
+
+    if (toolkits.length >= LISTING_LIMIT) {
+      /*
+       * A FULL PAGE IS NOT A COMPLETE CATALOGUE, and this deployment cannot find out which it is.
+       * The same refusal `./composio` makes of a full action listing, for the same reason and one
+       * line of vendor code apart.
+       *
+       * `LISTING_LIMIT` is the largest page the toolkit endpoint allows, and while its params do
+       * name a `cursor` (`ToolkitsListParamsSchema`, `@composio/core` 0.18.1,
+       * `src/types/toolkit.types.ts:9-15`) there is nothing to put in it: the SDK's
+       * `ToolKitListResponse` is a bare array (`:53`) and `transformToolkitListResponse` drops the
+       * response's `next_cursor` before any caller sees it. So a catalogue of exactly this many
+       * apps and one with more of them answer identically here, and there is no second request that
+       * could tell them apart.
+       *
+       * COMMITTED AS COMPLETE IT WOULD BE CACHED AS COMPLETE, which is what makes this worse than
+       * one short answer. The fragment is held for ten minutes and served to both callers, so an
+       * administrator searching for an app past the cut is told nothing matched, and the enable
+       * route — which checks a slug against this same directory — tells them a real app "is not an
+       * app Composio lists". Thrown from inside the fetch so the failure is never the thing that
+       * gets held: `listApps` drops an entry whose request rejected.
+       */
+      throw new BrokerRefusalError(
+        `Composio answered with ${toolkits.length} apps, which is the largest page this deployment's @composio/core can ask for, so there may be more that it cannot see. A partial directory is not shown, because an app missing from it reads exactly like an app Composio does not publish.`,
+      );
+    }
+
     return toolkits.map((toolkit) => ({
       slug: toolkit.slug,
       name: toolkit.name,
@@ -424,7 +686,7 @@ export function buildComposioClient(
      */
     async listApps(): Promise<BrokerApp[]> {
       const held = heldDirectory;
-      if (held && now() - held.at < DIRECTORY_TTL_MS) return held.apps;
+      if (held && now() - held.at < DIRECTORY_TTL_MS) return copyOf(held.apps);
 
       /*
        * Stamped when the request goes out rather than when it comes back, so a slow catalogue is
@@ -443,7 +705,7 @@ export function buildComposioClient(
       entry.apps.catch(() => {
         if (heldDirectory === entry) heldDirectory = null;
       });
-      return entry.apps;
+      return copyOf(entry.apps);
     },
 
     async ensureAuthConfig({ toolkit, name }): Promise<void> {
@@ -453,12 +715,29 @@ export function buildComposioClient(
        * another and connecting the next person to that leaves two populations of connections for
        * one app, and removing "the" config later drops half of them.
        *
+       * THE LOOK IS FOR ONE THIS DEPLOYMENT MADE, WHICH IS NARROWER THAN "ANY". It used to be any,
+       * and the two ways that was wrong pull in opposite directions. A disabled config of ours was
+       * invisible to the listing, so this created the very second config it exists to prevent — and
+       * then `authorize` refused, because it looked with the same blind listing and found the app
+       * had no config at all. A config an operator made by hand, meanwhile, satisfied the check and
+       * this created nothing, leaving every later decision here pointed at an object nobody here
+       * chose. Asking for our own answers both: the disabled one counts, and somebody else's does
+       * not.
+       *
+       * WHICH MEANS AN APP CAN END UP WITH TWO CONFIGS, ONE OF THEM SOMEBODY ELSE'S, and that is
+       * the intended outcome rather than a tolerated one. Adopting a hand-made config would have
+       * this deployment mint people's connections against scopes and tool restrictions it cannot
+       * see, and delete it when the app is removed. A config of our own, named, is the thing every
+       * decision in this file can actually reason about.
+       *
        * This is a read followed by a write and therefore not atomic: two administrators pressing
        * enable at the same instant can both find nothing and both create. Composio offers no
        * create-if-absent, so the window is the vendor's rather than this deployment's, and the
-       * cost of losing that race is a spare config rather than a lost connection.
+       * cost of losing that race is a spare config rather than a lost connection — spare rather
+       * than orphaned, because both carry the suffix and `deleteAuthConfig` takes every one of
+       * ours.
        */
-      const existing = await authConfigsFor(toolkit);
+      const existing = await configsMadeHere(toolkit);
       if (existing.length > 0) return;
 
       await vendor.authConfigs.create(toolkit, {
@@ -469,20 +748,41 @@ export function buildComposioClient(
 
     async deleteAuthConfig(toolkit): Promise<void> {
       /*
-       * QUIET WHERE THERE IS NOTHING TO DELETE, because removing an app has to be able to happen
-       * twice. An app can be removed, re-enabled and removed again, two administrators can press
-       * the button together, and an app enabled before this deployment created configs at all has
-       * none to drop. In every one of those the end state is the one that was asked for, so a
-       * throw would report a failure while the caller got exactly what they wanted.
+       * EVERY CONFIG OF OURS, AND NOTHING THAT IS NOT OURS.
        *
-       * ONE CONFIG, NOT ALL OF THEM. {@link ComposioBroker.ensureAuthConfig} creates at most one,
-       * so a second config for the same app was made by hand in Composio's dashboard for some
-       * purpose this deployment knows nothing about, and removing an app here is not a mandate to
-       * delete somebody's dashboard work.
+       * This used to delete whichever row the vendor happened to return first, on the reasoning
+       * that {@link ComposioBroker.ensureAuthConfig} creates at most one, so a second one must be
+       * somebody's dashboard work and must be left alone. The reasoning was right and the code did
+       * the opposite of it: with no test of the name, "the first row" is as likely to BE the
+       * hand-made config — deleting it, and with it every account anybody had connected against it.
+       * Reading the name inverts that. Anything without the suffix is untouched whatever order it
+       * arrives in, and everything with it goes, which is also the only way the spare config from a
+       * lost enable race is ever cleaned up.
+       *
+       * QUIET WHERE THERE IS NOTHING OF OURS TO DELETE, because removing an app has to be able to
+       * happen twice. An app can be removed, re-enabled and removed again, two administrators can
+       * press the button together, and an app enabled before this deployment created configs at all
+       * has none to drop. In every one of those the end state is the one that was asked for, so a
+       * throw would report a failure while the caller got exactly what they wanted.
        */
-      const [config] = await authConfigsFor(toolkit);
-      if (!config) return;
-      await vendor.authConfigs.delete(config.id);
+      const ours = await configsMadeHere(toolkit);
+      const refused = await askForEach(ours, (config) =>
+        vendor.authConfigs.delete(config.id, { revoke_on_delete: true }),
+      );
+      if (refused.length > 0) {
+        /*
+         * LOUD, because the caller is `removeServer` and the thing it is in the middle of is taking
+         * an app away from everybody. A config left standing is a live grant that the removal was
+         * supposed to end, and the app's row is deleted after this returns — so a swallowed failure
+         * here is the one state nothing in this deployment can find again. The count is the whole
+         * message: an operator who can see that one of two configs went knows that pressing remove
+         * again finishes the job rather than repeating it.
+         */
+        throw new BrokerRefusalError(
+          `Composio removed ${ours.length - refused.length} of this deployment's ${ours.length} authorization configs for ${toolkit} and refused the rest, so the app has not been fully withdrawn. Removing it again asks only for what is left.`,
+          { cause: refused[0] },
+        );
+      }
     },
 
     async authorize({
@@ -505,11 +805,39 @@ export function buildComposioClient(
        * dashboard. Neither is something a person pressing Connect can fix, so the sentence names
        * the app and the administrator's step rather than leaving them at a link that would attach
        * their account to a configuration nobody here chose.
+       *
+       * AND "NONE" MEANS NONE OF OURS, which is the correction. The read used to take whichever row
+       * the vendor returned first, so an app whose only config was one an operator built by hand
+       * read as ready and this minted somebody's connection against it — scopes this deployment
+       * cannot see, tool restrictions it cannot read, and an object it must not delete. A
+       * connection is a lasting attachment to whatever config it was made against, so guessing here
+       * is not a guess that can be corrected later.
        */
-      const [config] = await authConfigsFor(toolkit);
-      if (!config) {
-        throw new Error(
+      const ours = await configsMadeHere(toolkit);
+      if (ours.length === 0) {
+        throw new BrokerRefusalError(
           `This deployment has no authorization config at Composio for ${toolkit}, so there is nothing to connect an account against. An administrator removing the app on its Plugins page and adding it again creates one.`,
+        );
+      }
+
+      /*
+       * A DISABLED CONFIG IS NOT A CONFIG TO CONNECT AGAINST, and it is now visible enough to say
+       * so. The listing asks for disabled configs — it has to, or the creation above duplicates one
+       * — which means this is the first read that can meet one. A link minted against it does not
+       * work, so sending a person to the vendor would spend their consent and end with nothing
+       * attached; and nothing they can do from the page they are on changes it, because enabling a
+       * config happens in Composio's dashboard.
+       *
+       * THE FIRST OF SEVERAL, WHICH IS A CHOICE AND NOT AN ACCIDENT. More than one enabled config
+       * of ours means a lost enable race, and both are equally ours and equally valid. What
+       * mattered about the old "first row" was that the order was the vendor's and the next caller
+       * could get a different one; the listing is sorted on the id, so this is the same config for
+       * every person and for the removal that later drops all of them.
+       */
+      const config = ours.find((held) => held.status === "ENABLED");
+      if (!config) {
+        throw new BrokerRefusalError(
+          `Every authorization config this deployment holds at Composio for ${toolkit} is disabled, so a connection begun against one could not complete. An administrator can enable it in Composio's dashboard, or remove the app on its Plugins page and add it again.`,
         );
       }
 
@@ -543,7 +871,7 @@ export function buildComposioClient(
          * anywhere, here or elsewhere: whoever opens it attaches an account to this person's
          * connection, so it is handed to the browser that asked and then forgotten.
          */
-        throw new Error(
+        throw new BrokerRefusalError(
           `Composio began a connection to ${toolkit} but answered with no page to visit, so there is nothing to send this person to. An app that is connected by entering a credential rather than by visiting a page cannot be connected from here.`,
         );
       }
@@ -551,24 +879,58 @@ export function buildComposioClient(
     },
 
     async isConnected({ userId, toolkit }): Promise<boolean> {
-      return (await activeAccounts(userId, toolkit)).length > 0;
+      return (await accountsFor(userId, toolkit, CONNECTED)).length > 0;
     },
 
     async revoke({ userId, toolkit }): Promise<boolean> {
       /*
-       * THE ANSWER IS WHAT HAPPENED, not whether the call threw. `false` here means there was no
-       * grant to withdraw, which is what the audit trail's `vendorRevoked` is for: a reader has to
-       * be able to tell a grant this deployment ended from one that outlives it somewhere else.
+       * THE ANSWER IS WHAT WAS ASKED FOR, not whether the call threw. `false` here means there was
+       * nothing to withdraw, which is what the audit trail's `vendorRevocationRequested` is for: a
+       * reader has to be able to tell an account this deployment acted on from one that outlives it
+       * somewhere else.
        *
-       * EVERY ACCOUNT, not the first. One person can hold more than one account for one app — two
-       * mailboxes, or a stale account beside a fresh one — and each of them is a grant this
-       * deployment's calls could run under. Leaving one behind would report a revocation that did
-       * not revoke.
+       * ASKED FOR, RATHER THAN DONE, AND THE FIELD IS NAMED FOR THAT. The delete carries
+       * `revoke_on_delete`, which is what turns it from a record-keeping soft-delete into an actual
+       * withdrawal — and what it starts is a background job the vendor gives no supported way to
+       * poll. So the account is gone at the broker by the time this returns and nothing here can
+       * call with it again; whether Google has torn up the refresh token happens afterwards. `true`
+       * claims exactly that much. See {@link ComposioVendor} for the two declarations this rests on.
+       *
+       * EVERY ACCOUNT, not the first, and in every state that could still be a grant. One person
+       * can hold more than one account for one app — two mailboxes, or a stale account beside a
+       * fresh one, or a shared account beside their own — and each of them is access this
+       * deployment's calls could run under. See {@link REVOCABLE} for why the listing here is wider
+       * than the one behind `isConnected`.
        */
-      const accounts = await activeAccounts(userId, toolkit);
-      for (const account of accounts) {
-        await vendor.connectedAccounts.delete(account.id);
+      const accounts = await accountsFor(userId, toolkit, REVOCABLE);
+      const refused = await askForEach(accounts, (account) =>
+        vendor.connectedAccounts.delete(account.id, { revoke_on_delete: true }),
+      );
+
+      if (refused.length > 0) {
+        /*
+         * A PARTIAL WITHDRAWAL IS A FAILURE AND NOT A `true`, and the reason is the row this throw
+         * protects. `store.ts` revokes and only then deletes the `composio_connections` row, which
+         * is the only thing in this deployment that names which app this person connected. Answer
+         * `true` here on a partial and that row is deleted, the trail records a disconnection, and
+         * the account this call could not end is left live with nothing pointing at it — the exact
+         * state the store's revoke-before-delete order exists to make impossible. Throwing leaves
+         * the row standing, so pressing disconnect again is a second attempt with everything the
+         * first one had, and the accounts already gone are no longer in the listing, so the retry
+         * converges rather than repeating.
+         *
+         * WHICH IS ALSO WHY IT IS NOT A `true` WITH A GRUMBLE. Nothing was disconnected in the
+         * sense the person asked about: their app still answers. The count is in the sentence
+         * because "some of your accounts were withdrawn" is the one thing a reader cannot work out
+         * for themselves, and the vendor's own error is kept as `cause` for whoever is reading a
+         * log rather than a page.
+         */
+        throw new BrokerRefusalError(
+          `Composio withdrew ${accounts.length - refused.length} of this person's ${accounts.length} accounts for ${toolkit} and refused the rest, so their access to it has not ended. Disconnecting again asks only for the accounts that are left.`,
+          { cause: refused[0] },
+        );
       }
+
       return accounts.length > 0;
     },
   };
@@ -577,27 +939,56 @@ export function buildComposioClient(
 }
 
 /**
- * The one line that turns this deployment's API key into a vendor client.
+ * The lines that turn this deployment's API key into a vendor client.
  *
  * Everything this file decides lives in {@link buildComposioClient}, which is why this function has
- * no body worth testing: it constructs the vendor and hands it over. The key is a parameter here
+ * no decision worth testing: it constructs the vendor and hands it over. The key is a parameter here
  * and a private field of the vendor's client thereafter, and no path out of this module carries it
  * — see the module comment.
+ *
+ * IT IS NO LONGER ONE LINE, AND THE REASON IS THE TWO DELETES. `Composio` used to satisfy
+ * {@link ComposioVendor} whole, passed straight in. It cannot any more: its own `authConfigs.delete`
+ * and `connectedAccounts.delete` send a hard-coded empty body and therefore cannot ask for the
+ * upstream revocation, which is the difference between ending somebody's access and filing it away.
+ * The underlying `@composio/client` takes the parameter, so those two members are satisfied from
+ * `getClient()` and the rest from the SDK's own models. A wrapper per member rather than a spread,
+ * so that the arrow's own type checks against the shape above — a vendor method whose signature
+ * drifted would fail here rather than at the call site.
+ *
+ * NO NEW IMPORT, WHICH IS WHY THE ONE-IMPORT-SITE RULE SURVIVES THIS. `getClient()` is public on the
+ * SDK's own object and the client's types are inferred from it; `@composio/client` is not named
+ * anywhere under `server/src`, so a version bump still has exactly this file to be read against.
  */
 export function createComposioClient(apiKey: string): {
   actions: ComposioActions;
   broker: ComposioBroker;
 } {
-  return buildComposioClient(
-    new Composio({
-      apiKey,
-      // Their default telemetry installs its own interrupt handlers, and this is a self-hosted
-      // product whose operator never opted into a third party's analytics.
-      allowTracking: false,
-      // Both default the other way, so both have to be said. The version check reaches npm for the
-      // SDK's latest release as the client is constructed, and a deployment's boot must not depend
-      // on the vendor's release feed.
-      disableVersionCheck: true,
-    }),
-  );
+  const composio = new Composio({
+    apiKey,
+    // Their default telemetry installs its own interrupt handlers, and this is a self-hosted
+    // product whose operator never opted into a third party's analytics.
+    allowTracking: false,
+    // Both default the other way, so both have to be said. The version check reaches npm for the
+    // SDK's latest release as the client is constructed, and a deployment's boot must not depend
+    // on the vendor's release feed.
+    disableVersionCheck: true,
+  });
+  const client = composio.getClient();
+
+  return buildComposioClient({
+    tools: composio.tools,
+    toolkits: composio.toolkits,
+    authConfigs: {
+      list: (query) => composio.authConfigs.list(query),
+      create: (toolkit, options) =>
+        composio.authConfigs.create(toolkit, options),
+      delete: (id, params) => client.authConfigs.delete(id, params),
+    },
+    connectedAccounts: {
+      list: (query) => composio.connectedAccounts.list(query),
+      link: (userId, authConfigId, options) =>
+        composio.connectedAccounts.link(userId, authConfigId, options),
+      delete: (id, params) => client.connectedAccounts.delete(id, params),
+    },
+  });
 }

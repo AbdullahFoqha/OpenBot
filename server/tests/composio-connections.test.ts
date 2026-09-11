@@ -273,7 +273,7 @@ test("offboarding somebody retires the app they connected, and the next call is 
     // because this store was built with no broker, so there was nobody to revoke at:
     // `retireConnectionsFor` ends the account at Composio on a deployment that has one.
     reason: "person_removed",
-    vendorRevoked: false,
+    vendorRevocationRequested: false,
   });
 });
 
@@ -393,7 +393,7 @@ test("removing the app takes every brokered connection to it", async () => {
     // An administrator took the whole app away and the person did nothing. Distinct from both
     // "they disconnected" and "they were removed", which is what an auditor is trying to tell apart.
     reason: "mcp_server_removed",
-    vendorRevoked: false,
+    vendorRevocationRequested: false,
   });
 });
 

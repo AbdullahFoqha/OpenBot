@@ -62,7 +62,14 @@ export type ComposioBroker = {
    * on the second call would leave a person's existing connections pointing at the first one.
    */
   ensureAuthConfig(config: { toolkit: string; name: string }): Promise<void>;
-  /** Drop this deployment's auth config for the app, which is what removing an app has to do. */
+  /**
+   * Drop this deployment's own auth configs for the app, which is what removing an app has to do.
+   *
+   * ITS OWN, WHICH IS A NARROWER PROMISE THAN "THE APP'S". An auth config lives in an operator's
+   * Composio dashboard beside any they made by hand there, and removing an app from these pages is
+   * not a mandate to delete somebody's dashboard work. An implementation has to be able to tell the
+   * two apart before it deletes anything, and to leave anything it cannot claim.
+   */
   deleteAuthConfig(toolkit: string): Promise<void>;
   /**
    * Begin one person's connection to one app, answering the url they have to visit.
@@ -95,16 +102,56 @@ export type ComposioBroker = {
   /** Whether this person currently has an account attached to this app at the vendor. */
   isConnected(request: { userId: string; toolkit: string }): Promise<boolean>;
   /**
-   * Withdraw this person's grant at the vendor, answering WHAT ACTUALLY HAPPENED.
+   * Ask the vendor to withdraw this person's grant, answering WHAT WAS ACTUALLY ASKED.
    *
-   * True where a grant was withdrawn, false where there was none to withdraw — not "the call did
-   * not throw". The audit trail records that answer as `mcp.account_disconnected`'s
-   * `vendorRevoked`, and the whole value of that field is that a reader can tell a grant this
-   * deployment ended from one that outlives it somewhere else. A boolean that always said true
-   * would make the row a worse record than no row.
+   * True where this deployment found at least one account and asked the vendor to revoke it, false
+   * where there was none to withdraw — not "the call did not throw". The audit trail records that
+   * answer as `mcp.account_disconnected`'s `vendorRevocationRequested`, and the whole value of that
+   * field is that a reader can tell an account this deployment acted on from one that outlives it
+   * somewhere else. A boolean that always said true would make the row a worse record than no row.
+   *
+   * "REQUESTED" IS AS FAR AS ANY IMPLEMENTATION CAN HONESTLY GO, and the name of the field says so
+   * because the first one did not. This boolean used to be called `vendorRevoked` and was written
+   * by an adapter that soft-deleted the account and asked for no revocation at all, so a trail that
+   * said a grant had been withdrawn recorded one that was still live at Google. What a broker can
+   * promise synchronously is that the account is gone at the broker — nothing here can call with it
+   * again — and that the upstream withdrawal was asked for; whether the provider honoured it
+   * happens afterwards, out of sight of the call that asked. A field that claimed the stronger
+   * thing would be the one row in the trail nobody could rely on.
+   *
+   * A PARTIAL ASK IS A FAILURE RATHER THAN A TRUE. One person can hold more than one account for
+   * one app, and an implementation that ended some of them and could not end the rest has not
+   * disconnected anybody: their app still answers. It must throw, so that the row this deployment
+   * holds — the only thing that names which app to try again against — is still standing when they
+   * press disconnect a second time.
    */
   revoke(request: { userId: string; toolkit: string }): Promise<boolean>;
 };
+
+/**
+ * A refusal this deployment authored, whose own message is the whole explanation.
+ *
+ * THE ROUTE CANNOT TELL AN AUTHORED REFUSAL FROM A VENDOR OUTAGE WITHOUT A TYPE, which is the only
+ * reason this class exists. `routes.ts` answers a thrown broker error by reaching into it for the
+ * vendor's own sentence and, finding none, saying what a vendor failure deserves to be told —
+ * "Composio said nothing about why, check the key, check their status". That advice is wrong twice
+ * over for a sentence this deployment wrote itself: Composio was reachable, answered, and the thing
+ * that has to change is here rather than there. Every refusal raised below this line is written for
+ * the person who will read it and names the step that fixes it, so the one correct thing a route
+ * can do with it is pass it through.
+ *
+ * WHICH MAKES THE CLASS A PROMISE ABOUT THE MESSAGE rather than a category of failure. Nothing is
+ * raised as one of these unless its sentence is safe to show anybody who could have made the
+ * request — no url that is a bearer capability, no key, no vendor object — because that is exactly
+ * what raising it asks the route to do. A failure this file cannot explain stays a plain `Error`,
+ * so the route keeps reaching for the vendor's own words instead of inventing better ones.
+ */
+export class BrokerRefusalError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "BrokerRefusalError";
+  }
+}
 
 /**
  * The state a deployment with no Composio key is in, raised rather than returned.
@@ -118,8 +165,14 @@ export type ComposioBroker = {
  *
  * The setting is named in the message because the message is the whole remedy: an operator reading
  * it needs the name of the variable to set, and nothing else about this deployment will tell them.
+ *
+ * A {@link BrokerRefusalError} BECAUSE IT IS THE ORIGINAL ONE. It was the only authored refusal a
+ * route could recognise when this file had one class, and it is a refusal of exactly that kind: a
+ * sentence written here, naming the step that fixes it. Keeping its own name is what lets a caller
+ * ask for this one state in particular — `store.ts` raises it by name, and `routes.ts` sends its
+ * message where no call was made at all.
  */
-export class BrokerUnconfiguredError extends Error {
+export class BrokerUnconfiguredError extends BrokerRefusalError {
   constructor() {
     super(
       "Composio is not configured for this deployment, so nothing was asked. Set COMPOSIO_API_KEY to make the brokered apps available; until it is set, no Composio surface appears anywhere in the product.",
@@ -129,19 +182,19 @@ export class BrokerUnconfiguredError extends Error {
 }
 
 /**
- * The one broker failure worth explaining to a reader, and null for every other one.
+ * The broker failures worth explaining to a reader, and null for every other one.
  *
  * NULL RATHER THAN A FALLBACK SENTENCE, which is the whole reason this is a function instead of an
- * `error.message` read at each call site. The only thing this module can say with certainty about a
- * thrown broker error is that a deployment with no key was asked to do something; a socket that
- * hung up, a 500 from the catalogue and a rate limit are all failures it knows nothing about. A
- * function that answered those with a sentence of its own would be telling an operator to set a
- * setting that is already set, and sending them to their configuration while Composio is down.
+ * `error.message` read at each call site. The only failures whose message this module can vouch for
+ * are the ones raised as a {@link BrokerRefusalError}, which is a promise its subclasses make about
+ * what they say; a socket that hung up, a 500 from the catalogue and a rate limit are all failures
+ * it knows nothing about. A function that answered those with `error.message` would be putting a
+ * vendor's object, and whatever it happens to carry, in front of whoever asked.
  *
- * So the caller chooses what to say about a failure it actually has, and this decides only the one
- * case it can decide. {@link BrokerUnconfiguredError}'s own message is returned rather than a copy,
- * so there is one wording of the remedy and it lives beside the class that raises it.
+ * So the caller chooses what to say about a failure it actually has, and this decides only the
+ * cases it can decide. The raised error's own message is returned rather than a copy, so there is
+ * one wording of each remedy and it lives beside the code that raises it.
  */
 export function brokerSentence(error: unknown): string | null {
-  return error instanceof BrokerUnconfiguredError ? error.message : null;
+  return error instanceof BrokerRefusalError ? error.message : null;
 }
