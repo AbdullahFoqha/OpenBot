@@ -149,6 +149,23 @@ async function failureOf(work: Promise<unknown>): Promise<Error> {
   return raised as Error;
 }
 
+/**
+ * What a failure must never read like: the name of a method that was not there.
+ *
+ * AT MODULE SCOPE BECAUSE IT IS THE SAME QUESTION EVERYWHERE, and it is asked of every refusal this
+ * file added after the shape sweep: a guard that is missing does not answer politely, it reads a
+ * field off `undefined` and hands an administrator a sentence naming a vendor method. A message
+ * matching this is a crash wearing a refusal's place in the code.
+ *
+ * "IS NOT AN OBJECT" IS ANCHORED TO `undefined` AND `null` RATHER THAN LEFT BARE, because the
+ * adapter's own sentence for a malformed input schema says "a thing that is not an object cannot be
+ * shown as one" — the correct refusal, flagged as a crash by a pattern looking for a fragment of
+ * one. The runtime's phrasings are "undefined is not an object (evaluating ...)" and the same with
+ * null, so the anchor keeps every crash this caught and stops it catching an authored sentence.
+ */
+const A_CRASH =
+  /is not a function|(?:undefined|null) is not an object|is not iterable|cannot read propert/i;
+
 describe("the page size this file is written against", () => {
   test("the module's ceiling is still the number every assertion here spells out", () => {
     // The one place the imported constant is read. Changing `LISTING_LIMIT` reddens exactly this
@@ -1832,10 +1849,6 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
     },
   ];
 
-  /** What a failure must never read like: the name of a method that was not there. */
-  const A_CRASH =
-    /is not a function|is not an object|is not iterable|undefined is not|cannot read propert/i;
-
   for (const listing of MALFORMED_LISTINGS) {
     for (const { shape, answer } of listing.answers) {
       test(`${listing.listing} answered with ${shape} is refused in a sentence`, async () => {
@@ -1858,5 +1871,615 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
         expect(probe.sent).toEqual([]);
       });
     }
+  }
+});
+
+/**
+ * A listing that came back at the page ceiling, and what a caller may conclude from it.
+ *
+ * THE TWO LISTINGS HERE CARRY A CURSOR AND THE CATALOGUE DOES NOT, which is why they are answered
+ * differently from the fragment refusal next door. `AuthConfigListParamsSchema` and
+ * `ConnectedAccountListParamsSchema` both name a `cursor` (`@composio/core` 0.18.1,
+ * `src/types/authConfigs.types.ts:124-131` and `src/types/connectedAccounts.types.ts:259-266`),
+ * both models forward it (`src/models/AuthConfigs.ts:95`, `src/models/ConnectedAccounts.ts:118`),
+ * and both transformers fill `nextCursor` in from the response
+ * (`src/utils/transformers/authConfigs.ts:80`, `connectedAccounts.ts:116`). The toolkit listing has
+ * none of that — its response is a bare array with the cursor dropped before any caller sees it —
+ * so there the only honest answer is to refuse, and here it is to go and read the rest.
+ *
+ * WHAT IS ACTUALLY BEING PROTECTED IS `revoke`'s `true`. It means "this person's access has ended",
+ * and `store.ts` writes that into the audit trail and then deletes the one row naming which app they
+ * had connected. One page of their accounts is not the set of their accounts, so the assertions
+ * below are on WHAT WENT OUT — every account, from every page — rather than on what came back: an
+ * implementation that read one page answers `true` just as confidently.
+ */
+describe("a listing that arrived with a cursor still outstanding", () => {
+  /** The statuses the revoke asks about, spelled once for the two queries asserted below. */
+  const REVOCABLE_STATUSES = [
+    "INITIALIZING",
+    "INITIATED",
+    "ACTIVE",
+    "FAILED",
+    "EXPIRED",
+    "INACTIVE",
+  ];
+
+  test("every page of this person's accounts is read, and every account on them withdrawn", async () => {
+    const asked: unknown[] = [];
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async (query: unknown) => {
+            asked.push(query);
+            return (query as { cursor?: string }).cursor === undefined
+              ? { items: [{ id: "ca_1" }], nextCursor: "page_2" }
+              : { items: [{ id: "ca_2" }], nextCursor: null };
+          },
+          delete: async (id: string) => {
+            deleted.push(id);
+          },
+        },
+      }),
+    );
+
+    expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+      true,
+    );
+
+    // `ca_2` is the whole test. It is on the second page, so a reader that stopped at the first
+    // deletes `ca_1`, answers `true`, and leaves a live grant behind an audit row saying this
+    // person's access ended.
+    expect(deleted).toEqual(["ca_1", "ca_2"]);
+    // The first request carries no cursor at all, and the second carries the vendor's own word for
+    // where it left off — which is the half a reader cannot infer from the rows that came back.
+    expect(asked).toEqual([
+      {
+        userIds: ["user_1"],
+        toolkitSlugs: ["gmail"],
+        statuses: REVOCABLE_STATUSES,
+        accountType: "ALL",
+        limit: WHOLE_LISTING,
+      },
+      {
+        userIds: ["user_1"],
+        toolkitSlugs: ["gmail"],
+        statuses: REVOCABLE_STATUSES,
+        accountType: "ALL",
+        limit: WHOLE_LISTING,
+        cursor: "page_2",
+      },
+    ]);
+  });
+
+  test("an account on a later page still decides whether somebody is connected", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async (query: unknown) =>
+            (query as { cursor?: string }).cursor === undefined
+              ? { items: [], nextCursor: "page_2" }
+              : { items: [{ id: "ca_2" }], nextCursor: null },
+        },
+      }),
+    );
+
+    // A first page that is empty with a cursor still outstanding is exactly the shape that reads as
+    // "this person has no account", which then tells them to connect an app they already hold — and
+    // tells the gate in `./access` that they may not act through one they can.
+    expect(
+      await broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
+    ).toBe(true);
+  });
+
+  test("every page of this app's configs is read, so none is left standing", async () => {
+    const asked: unknown[] = [];
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async (query: unknown) => {
+            asked.push(query);
+            return (query as { cursor?: string }).cursor === undefined
+              ? { items: [OURS], nextCursor: "page_2" }
+              : { items: [OURS_SPARE], nextCursor: null };
+          },
+          delete: async (id: string) => {
+            deleted.push(id);
+          },
+        },
+      }),
+    );
+
+    await broker.deleteAuthConfig("linear");
+
+    // The spare from a lost enable race is on page two. Left behind, it is a config the removal was
+    // supposed to drop, holding every grant made against it, with the app's row deleted after this
+    // returns and nothing left in this deployment pointing at it.
+    expect(deleted).toEqual(["ac_ours", "ac_ours_spare"]);
+    expect(asked).toEqual([
+      { toolkit: "linear", limit: WHOLE_LISTING, showDisabled: true },
+      {
+        toolkit: "linear",
+        limit: WHOLE_LISTING,
+        showDisabled: true,
+        cursor: "page_2",
+      },
+    ]);
+  });
+
+  test("a config of ours on a later page is the one a connection is begun against", async () => {
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async (query: unknown) =>
+            (query as { cursor?: string }).cursor === undefined
+              ? { items: [BY_HAND], nextCursor: "page_2" }
+              : { items: [OURS], nextCursor: null },
+        },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+    );
+
+    await broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl: RETURN_URL,
+    });
+
+    // Reading one page here answers "this deployment has no config for linear" and sends an
+    // administrator to remove and re-add an app whose config is sitting on page two.
+    expect(linked).toEqual([
+      ["user_1", "ac_ours", { callbackUrl: RETURN_URL }],
+    ]);
+  });
+
+  test("a cursor that is not a cursor is refused rather than read as the end of the list", async () => {
+    let calls = 0;
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => {
+            calls += 1;
+            return { items: [{ id: "ca_1" }], nextCursor: 42 };
+          },
+          delete: async (id: string) => {
+            deleted.push(id);
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    // Read as absent, a cursor this deployment cannot follow is a truncated page wearing the
+    // clothes of a complete answer — which is the one thing this guard exists to make impossible.
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(deleted).toEqual([]);
+
+    /*
+     * THE REFUSAL HAS TO BE THIS ONE AND NOT THE LOOP GUARD NEXT DOOR, which is what these two
+     * assertions are for and what a mutation run proved they had to be. Coerce the unreadable
+     * cursor to "" and the paging sends a SECOND request carrying it, gets the same page back, and
+     * refuses — with a sentence saying Composio answered the same page twice, which is a complaint
+     * about the vendor for something this deployment did. One request went out, and the sentence
+     * names what arrived where a cursor belongs.
+     */
+    expect(calls).toBe(1);
+    expect(refusal.message).toMatch(/where the cursor to the next page/);
+  });
+
+  test("a cursor that never advances is refused rather than followed for ever", async () => {
+    let calls = 0;
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => {
+            calls += 1;
+            if (calls > 20) throw new Error("The paging did not terminate.");
+            return { items: [{ id: "ca_1" }], nextCursor: "page_2" };
+          },
+          // The delete ANSWERS rather than refusing, which is what makes this test able to fail: a
+          // reader that follows no cursor withdraws `ca_1`, reports a completed disconnection, and
+          // would satisfy any assertion that only asked for a refusal of some kind.
+          delete: async (id: string) => {
+            deleted.push(id);
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    // A vendor answering the same cursor for ever is a hung request rather than a long one, and the
+    // caller here is a person waiting on a page they pressed disconnect from.
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(calls).toBeLessThanOrEqual(3);
+    expect(deleted).toEqual([]);
+  });
+
+  test("a cursor that advances for ever is stopped at a ceiling, and stopping is a refusal", async () => {
+    let calls = 0;
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => {
+            calls += 1;
+            // A cursor that is different every time defeats the same-page guard above, so this is
+            // the one shape only the ceiling catches. The throw is the test's own stop: without a
+            // ceiling in the adapter this listing has no end at all.
+            if (calls > 200) throw new Error("The paging did not terminate.");
+            return { items: [], nextCursor: `page_${calls}` };
+          },
+          delete: async (id: string) => {
+            deleted.push(id);
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    // Stopping is the easy half; the half that matters is that stopping is not answering. A ceiling
+    // that returned the rows it had would be the page ceiling again, further out and harder to see.
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(/pages/);
+    expect(calls).toBeLessThan(200);
+    expect(deleted).toEqual([]);
+  });
+});
+
+/**
+ * The two vendor answers that are single objects, and were therefore never checked.
+ *
+ * NEITHER PRODUCED A COMPILE ERROR AND NEITHER HAD A RED TEST, which is the same fact twice over.
+ * Every other read in the adapter goes through a listing whose element type was widened to what the
+ * wire can send, so an unchecked read of one fails to build; a single object read straight off an
+ * `await` has a declared type that looks settled. It is not: `transform()` is warn-only on both of
+ * these paths as well, so the declaration says what Composio MEANS to send here exactly as it does
+ * everywhere else in this file.
+ */
+describe("a vendor answer that is one object rather than a listing", () => {
+  /** The call `execute` is made with in this section, which is a mismatch test's whole setup. */
+  const GMAIL_CALL = {
+    slug: "GMAIL_FETCH_EMAILS",
+    toolkit: "gmail",
+    userId: "user_1",
+    version: "20260903_00",
+  };
+
+  test("an unreadable resolve is refused as one, and nothing is run", async () => {
+    const ran: unknown[] = [];
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          getRawComposioToolBySlug: async () => null,
+          execute: async (...call: unknown[]) => {
+            ran.push(call);
+            return { successful: true, data: {} };
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(actions.execute(GMAIL_CALL, {}));
+
+    // `resolved.toolkit?.slug` off a null answer is a `TypeError` wearing the vendor's name, and
+    // `./composio` puts whatever comes out of here into an app's `lastError` for an administrator
+    // to read.
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/GMAIL_FETCH_EMAILS/);
+    expect(ran).toEqual([]);
+  });
+
+  test("an app the vendor sent unreadably is not reported as no app at all", async () => {
+    const ran: unknown[] = [];
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          getRawComposioToolBySlug: async () => ({
+            slug: "GMAIL_FETCH_EMAILS",
+            toolkit: "gmail",
+          }),
+          execute: async (...call: unknown[]) => {
+            ran.push(call);
+            return { successful: true, data: {} };
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(actions.execute(GMAIL_CALL, {}));
+
+    /*
+     * THE TWO FACTS ARE NOT THE SAME AND THEIR REMEDIES ARE NOT EITHER. "Composio resolves that
+     * action to no app at all" is a statement about the action, and the sentence carrying it tells
+     * an administrator to refresh the app's tools — right for a slug recorded against a url that
+     * has since changed, and useless for an SDK that has begun answering a different shape. The
+     * toolkit here is PRESENT: it arrived as a bare string where `{ slug }` belongs.
+     */
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).not.toMatch(/no app at all/);
+    expect(ran).toEqual([]);
+  });
+
+  test("a link answered with something other than an object is refused in a sentence", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: { link: async () => null },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: RETURN_URL,
+      }),
+    );
+
+    // A route answers this to a person who has just pressed Connect, so it has to be a refusal this
+    // deployment authored rather than a `TypeError` that reads to them as Composio being down.
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/linear/);
+  });
+
+  test("a redirect that is not a url is refused rather than handed to a browser", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: {
+          link: async () => ({
+            redirectUrl: { href: "https://backend.composio.dev/s/a-link" },
+          }),
+        },
+      }),
+    );
+
+    /*
+     * PRESENT, TRUTHY AND NOT A URL, which is the one shape the `if (!redirectUrl)` guard beside it
+     * cannot see. What is on the other side of that return is a `Location` header and a person's
+     * browser, so `[object Object]` would be a page nobody can visit, reported as the consent
+     * screen they were sent to.
+     */
+    const refusal = await failureOf(
+      broker.authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: RETURN_URL,
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+  });
+});
+
+/**
+ * The field guards, held to the behaviour each was written for.
+ *
+ * EVERY TEST HERE COVERS A GUARD THAT WAS ALREADY IN THE FILE AND HAD NOTHING HOLDING IT. That is
+ * worse than an untested new behaviour rather than better: a guard nothing reddens for is read by
+ * the next person as ceremony over a field the SDK's own types already promise, and deleting it
+ * leaves a green suite. Each one below was therefore checked by removing the guard it covers and
+ * watching this test fail.
+ */
+describe("what a malformed field of a row actually costs", () => {
+  const CATALOGUE_ROWS: { fault: string; row: unknown; names: RegExp }[] = [
+    {
+      fault: "a name that arrived as null",
+      // `?? ""` here is an app in an administrator's picker with nothing written on it, and `gmail`
+      // is a slug rather than a title.
+      row: { slug: "gmail", name: null, meta: {} },
+      names: /name/,
+    },
+    {
+      fault: "a description that is not text",
+      row: { slug: "gmail", name: "Gmail", meta: { description: 12 } },
+      names: /description/,
+    },
+    {
+      fault: "a category with no name",
+      // The categories are the words a person chooses an app by, so a blank one is a filter nobody
+      // can use rather than a cosmetic gap.
+      row: {
+        slug: "gmail",
+        name: "Gmail",
+        meta: { categories: [{ slug: "productivity" }] },
+      },
+      names: /categor/,
+    },
+    {
+      fault: "an action count that arrived as a string",
+      // `Number("63")` is the defect this whole sweep is about: a vendor change turned into a
+      // plausible figure, shown BEFORE anybody enables an app, that nobody would think to question.
+      row: { slug: "gmail", name: "Gmail", meta: { toolsCount: "63" } },
+      names: /count/,
+    },
+  ];
+
+  for (const { fault, row, names } of CATALOGUE_ROWS) {
+    test(`a catalogue row with ${fault} stops the directory`, async () => {
+      const { broker } = buildComposioClient(
+        fakeVendor({ toolkits: { get: async () => [row] } }),
+        () => 1_000_000,
+      );
+
+      const refusal = await failureOf(broker.listApps());
+
+      expect(refusal).toBeInstanceOf(BrokerRefusalError);
+      expect(refusal.message).not.toMatch(A_CRASH);
+      expect(refusal.message).toMatch(names);
+    });
+  }
+
+  const ACTION_ROWS: { fault: string; row: unknown; names: RegExp }[] = [
+    {
+      fault: "a description that is not text",
+      // What a model reads to decide whether to call the action at all.
+      row: { slug: "GMAIL_FETCH_EMAILS", description: 12 },
+      names: /description/,
+    },
+    {
+      fault: "input parameters that are not an object",
+      /*
+       * THE ONE THAT MATTERS MOST. This value goes in front of a model as Composio's own JSON
+       * Schema for the action, and a string of JSON is not a schema. What a model does with a
+       * parameter list it cannot read is invent one, and the call that follows is made with
+       * arguments nobody wrote.
+       */
+      row: { slug: "GMAIL_FETCH_EMAILS", inputParameters: '{"type":"object"}' },
+      names: /schema/,
+    },
+    {
+      fault: "tags that are not all labels",
+      // The tags are the only thing that says whether an action reads or writes.
+      row: { slug: "GMAIL_FETCH_EMAILS", tags: ["readOnlyHint", 7] },
+      names: /tags/,
+    },
+    {
+      fault: "a version that is not text",
+      // The version travels with every call made to the action.
+      row: { slug: "GMAIL_FETCH_EMAILS", version: 20260903 },
+      names: /version/,
+    },
+  ];
+
+  for (const { fault, row, names } of ACTION_ROWS) {
+    test(`an action row with ${fault} stops the listing`, async () => {
+      const { actions } = buildComposioClient(
+        fakeVendor({ tools: { getRawComposioTools: async () => [row] } }),
+      );
+
+      const refusal = await failureOf(
+        actions.listActions("gmail", { limit: WHOLE_LISTING }),
+      );
+
+      expect(refusal.message).not.toMatch(A_CRASH);
+      expect(refusal.message).toMatch(names);
+      expect(refusal.message).toMatch(/GMAIL_FETCH_EMAILS/);
+    });
+  }
+
+  test("a nameless config stops the removal rather than being left standing", async () => {
+    const deleted: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [OURS, { id: "ac_nameless", status: "ENABLED" }],
+          }),
+          delete: async (...call: unknown[]) => {
+            deleted.push(call);
+          },
+        },
+      }),
+    );
+
+    /*
+     * WITHOUT THE GUARD THIS IS A REPORTED SUCCESS. A name read as "" fails the suffix test, so the
+     * row is sorted into somebody else's dashboard work and left standing — and `deleteAuthConfig`
+     * returns quietly, after which `removeServer` deletes the app's row. The config and every grant
+     * made against it outlive the removal with nothing in this deployment naming them.
+     */
+    const refusal = await failureOf(broker.deleteAuthConfig("linear"));
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(/name/);
+    // Not even the row that WAS readable: a listing this deployment cannot sort is not a listing to
+    // act on half of, because a half-done removal reported as done is the state being avoided.
+    expect(deleted).toEqual([]);
+  });
+
+  test("a config with no id stops the removal, and no delete is sent", async () => {
+    const deleted: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [{ name: "Linear (OpenBot)", status: "ENABLED" }],
+          }),
+          delete: async (...call: unknown[]) => {
+            deleted.push(call);
+          },
+        },
+      }),
+    );
+
+    /*
+     * A DELETE WITHOUT AN ID IS A REQUEST COMPOSIO IS FREE TO READ AS ANYTHING, answered however it
+     * likes, after which this deployment records that the app was withdrawn. The assertion is on
+     * what went out rather than on what came back for exactly that reason.
+     */
+    const refusal = await failureOf(broker.deleteAuthConfig("linear"));
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(/id/);
+    expect(deleted).toEqual([]);
+  });
+
+  const UNSETTLED: { fault: string; status: unknown }[] = [
+    { fault: "a status this deployment has never heard of", status: "PENDING" },
+    { fault: "no status at all", status: undefined },
+  ];
+
+  for (const { fault, status } of UNSETTLED) {
+    test(`a config of ours with ${fault} refuses in its own words`, async () => {
+      const linked: unknown[] = [];
+      const { broker } = buildComposioClient(
+        fakeVendor({
+          authConfigs: {
+            list: async () => ({
+              items: [{ id: "ac_ours", name: "Linear (OpenBot)", status }],
+            }),
+          },
+          connectedAccounts: {
+            link: async (...call: unknown[]) => {
+              linked.push(call);
+              return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+            },
+          },
+        }),
+      );
+
+      const refusal = await failureOf(
+        broker.authorize({
+          userId: "user_1",
+          toolkit: "linear",
+          returnUrl: RETURN_URL,
+        }),
+      );
+
+      /*
+       * NEITHER OF THE OTHER TWO REMEDIES, which is the whole of what this asserts. Telling an
+       * operator the config is disabled sends them to a dashboard to enable something that may
+       * already be enabled, and leaves them with a page insisting on a fact they can see is false;
+       * telling them there is no config sends them to remove and re-add an app whose config is
+       * sitting right there. The state is UNKNOWN, and only a sentence saying so is honest.
+       */
+      expect(refusal).toBeInstanceOf(BrokerRefusalError);
+      expect(refusal.message).not.toMatch(DISABLED_REMEDY);
+      expect(refusal.message).not.toMatch(NO_CONFIG_REMEDY);
+      // And still a refusal: consent spent against a config this deployment cannot show is enabled
+      // attaches nothing, and cannot be spent again without sending the person round a second time.
+      expect(linked).toEqual([]);
+    });
   }
 });
