@@ -679,12 +679,41 @@ export async function listTools(connection: {
  * already made about the string was thrown away at the last line. What comes out is read by a person
  * off an admin page, put in front of a model, and measured by {@link cap}, and in the third of those
  * the padding is counted against somebody's context window.
+ *
+ * AND IT IS LOOKED FOR AT BOTH DEPTHS THE VENDOR THROWS IT AT, which is the half that made this
+ * function blind on five of this transport's calls. `cause.error.error.message` is the sentence
+ * inside a wrapper — `ComposioToolExecutionError` keeps the API error as its `cause` — but
+ * `@composio/core` 0.18.1 wraps only some of what it does. The auth-config and connected-account
+ * listings and the raw tool listing all `await this.client.*` with no try around them
+ * (`src/models/AuthConfigs.ts`, `src/models/ConnectedAccounts.ts`, `src/models/Tools.ts:552-555`),
+ * and `./composio-adapter` calls both raw deletes on the client itself — so what those five throw
+ * is `@composio/client`'s own `APIError`, which hangs the response body on `.error` and sets no
+ * `cause` at all (`@composio/client` 0.1.0-alpha.76, `src/core/error.ts:9-24`). The sentence is one
+ * level shallower there, and reaching past it cost the reader the vendor's own words on every one.
+ *
+ * WHAT IT COST THEM INSTEAD IS THE WHOLE REPLY. That class builds its own `message` as
+ * `${"${status}"} ${"${JSON.stringify(body)}"}` wherever the body has no top-level `message`
+ * (`src/core/error.ts:26-44`), and Composio's body puts its sentence at `error.message` — so the
+ * fallback to the thrown message handed `lastError`, the audit row and a model's context a status
+ * code followed by the entire response. See {@link VENDOR_RESPONSE_DUMP}, which refuses it.
+ *
+ * THE JUDGEMENT BELOW APPLIES AT BOTH DEPTHS, because that is why it lives in this function at all.
+ * A second place to read the field would otherwise be a second way past the check on the vendor's
+ * placeholder, on the blank string and on a `message` that is not a string — which is exactly the
+ * bypass this function was written to close.
  */
 export function vendorSentence(error: unknown): string | null {
-  const cause = (error as { cause?: unknown } | null | undefined)?.cause;
-  const outer = (cause as { error?: unknown } | null | undefined)?.error;
-  const inner = (outer as { error?: unknown } | null | undefined)?.error;
-  const message = (inner as { message?: unknown } | null | undefined)?.message;
+  const thrown = schemaNode(error);
+  for (const carrier of [thrown, schemaNode(thrown?.cause)]) {
+    const body = schemaNode(carrier?.error);
+    const sentence = sentenceOf(schemaNode(body?.error)?.message);
+    if (sentence !== null) return sentence;
+  }
+  return null;
+}
+
+/** One candidate field, judged the one way every depth is judged. See {@link vendorSentence}. */
+function sentenceOf(message: unknown): string | null {
   const sentence = typeof message === "string" ? message.trim() : "";
   return sentence === "" || VENDOR_PLACEHOLDER.test(sentence) ? null : sentence;
 }
@@ -697,6 +726,40 @@ export function vendorSentence(error: unknown): string | null {
  * punctuation after it has not been stable across vendor versions.
  */
 export const VENDOR_PLACEHOLDER = /^error executing the tool\b/i;
+
+/**
+ * The client's other non-sentence: a status code with the whole reply stringified behind it.
+ *
+ * `APIError` builds its `message` from the body's own `message` where there is one and otherwise
+ * from `JSON.stringify(body)` (`@composio/client` 0.1.0-alpha.76, `src/core/error.ts:26-44`), and
+ * Composio's bodies put their sentence at `error.message` instead — so the second branch is the
+ * common one, and it is a response dump rather than an explanation. Handed on as the fallback it
+ * put a trace id and a validation payload on an admin page, in `store.ts`'s audit row and in a
+ * model's context, which is the one thing {@link vendorSentence} exists to keep out of all three.
+ *
+ * REFUSED ON THE SAME GROUNDS THE PLACEHOLDER IS, and no wider. What is matched is a three-digit
+ * status followed by the opening of a JSON document, because that is the shape the client builds
+ * and nothing a person would write; "404 status code (no body)" and a body whose own `message` came
+ * through — "400 Invalid auth config id" — are both sentences, and both still pass.
+ */
+export const VENDOR_RESPONSE_DUMP = /^\d{3} [[{]/;
+
+/**
+ * The message a failure was THROWN with, where that is worth showing, and null where it is not.
+ *
+ * Its own function because both callers ask the identical question and one of them used to ask it
+ * differently: a guard that grew a third refusal on one path and not the other would put the
+ * vendor's response dump in front of a model or an operator depending on which door they arrived
+ * through, which is the divergence `callTool`'s catch already had to be corrected for once.
+ */
+function thrownSentence(error: unknown): string | null {
+  const thrown = error instanceof Error ? error.message.trim() : "";
+  return thrown === "" ||
+    VENDOR_PLACEHOLDER.test(thrown) ||
+    VENDOR_RESPONSE_DUMP.test(thrown)
+    ? null
+    : thrown;
+}
 
 /**
  * What to say when the vendor reported a failure and said nothing about it.
@@ -758,17 +821,34 @@ function isSchemaMismatch(error: unknown): boolean {
  * half this function was missing. "Error executing the tool X" names only the thing the reader
  * asked for; on this path they asked to refresh an app, so it is the one fact they already had.
  * Falling through to the app's name at least tells them which row went wrong.
+ *
+ * AND A SENTENCE THIS DEPLOYMENT AUTHORED BEATS ANYTHING THE VENDOR SAID, which is the half it was
+ * missing after that. This function consulted `brokerSentence` nowhere at all, and it is the rule
+ * `routes.ts` follows (`brokerRefusal`, `:89-91`) and the rule {@link callTool}'s own catch was
+ * corrected to. `./composio-adapter`'s `askVendor` wraps the raw tool listing exactly as it wraps
+ * the execute, so a {@link BrokerRefusalError} arrives on this path as readily as on that one —
+ * and the class is the promise that makes preferring it safe: `./broker` raises one only where the
+ * sentence names the step that fixes the condition and is safe to show anybody who could have
+ * asked. A failure it cannot explain stays a plain `Error` and falls through to the vendor's own
+ * words below, exactly as before.
+ *
+ * WHAT IT WAS LOSING TO IS A READ ONE LEVEL SHALLOW, the same way `callTool`'s was. `vendorRefusal`
+ * authors only where {@link vendorSentence} of the ORIGINAL error was null, so the vendor keeps the
+ * last word wherever it had one; asking the same question of the WRAPPER reaches through its
+ * `cause` to the original and lands somewhere the adapter never judged. A remedy written for the
+ * exact condition was being replaced by whatever happened to sit there.
  */
 function listingSentence(toolkit: string, error: unknown): string {
+  const authored = brokerSentence(error);
+  if (authored !== null) return authored;
+
   if (isSchemaMismatch(error)) {
     return `Composio's action list for ${toolkit} did not match the shape this deployment's @composio/core accepts, so the list was not refreshed and the tools already held are untouched. That is a vendor change rather than a setting: upgrading the package is the fix.`;
   }
-  const thrown = error instanceof Error ? error.message.trim() : "";
   return (
     vendorSentence(error) ??
-    (thrown === "" || VENDOR_PLACEHOLDER.test(thrown)
-      ? `Composio did not answer with an action list for ${toolkit}.`
-      : thrown)
+    thrownSentence(error) ??
+    `Composio did not answer with an action list for ${toolkit}.`
   );
 }
 
@@ -1115,12 +1195,8 @@ export async function callTool(
       );
     }
     // The vendor's own sentence when there is one, because a generic message costs a diagnosis.
-    const thrown = error instanceof Error ? error.message.trim() : "";
     return failure(
-      vendorSentence(error) ??
-        (thrown === "" || VENDOR_PLACEHOLDER.test(thrown)
-          ? unexplained(toolName)
-          : thrown),
+      vendorSentence(error) ?? thrownSentence(error) ?? unexplained(toolName),
     );
   }
 
