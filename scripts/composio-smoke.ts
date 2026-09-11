@@ -18,17 +18,32 @@
  * of `server/src/plugins/composio-adapter.ts` — and nothing here reaches past it.
  *
  * THE KEY IS NEVER PRINTED. It is read once, handed to {@link createComposioClient}, and after that
- * every line this script writes goes through {@link say}, which redacts it. That is belt and braces
- * on purpose: the adapter promises not to quote the key, but a vendor exception is a foreign object
- * and "this SDK does not put the key in an error" is not a promise this file is in a position to
- * make on the SDK's behalf. Which is why no vendor call below is awaited bare — an unhandled
- * rejection is printed by the runtime rather than by this file, and that is the one way out past
- * {@link say}. {@link ask} is what closes it.
+ * every line this script writes goes through {@link redact}, which takes it back out. That is belt
+ * and braces on purpose: the adapter promises not to quote the key, but a vendor exception is a
+ * foreign object and "this SDK does not put the key in an error" is not a promise this file is in a
+ * position to make on the SDK's behalf. Which is why no vendor call below is awaited bare — an
+ * unhandled rejection is printed by the runtime rather than by this file, and that is the one way
+ * out past the redactor. {@link ask} is what closes it.
+ *
+ * WHICH STREAM A LINE GOES TO IS DECIDED BY THE EXIT CODE IT EXPLAINS, and that is the whole rule:
+ *
+ *     A line that explains a non-zero exit is written to STDERR. Every other line is written to
+ *     STDOUT.
+ *
+ * So `smoke > report.txt` keeps a report of what this key can see, and every reason the command
+ * failed is still on the terminal beside it. {@link say} is stdout and {@link stop} is stderr, and
+ * because {@link stop} exits, no line can be on the wrong one by accident. The rule decides the last
+ * pair too: an action that ran and failed puts its own outcome and its log id on stderr, because
+ * those two lines are the whole explanation of the 1 this command exits with. The usage and the
+ * missing-key refusal are the same rule reached before there is a key to redact, which is why they
+ * are the only two that write to the stream directly.
  */
 import {
   type ComposioResult,
   effectOf,
   LISTING_LIMIT,
+  unexplained,
+  VENDOR_PLACEHOLDER,
   vendorSentence,
 } from "../server/src/plugins/composio";
 import { createComposioClient } from "../server/src/plugins/composio-adapter";
@@ -66,6 +81,12 @@ const given = userFlag === -1 ? undefined : args[userFlag + 1];
 const user = given?.startsWith("--") ? undefined : given;
 const call = args.includes("--call");
 
+/*
+ * The two refusals below are the file's stream rule reached before there is a key to redact, which
+ * is the only reason they write to stderr themselves instead of through {@link stop}. Both explain
+ * a non-zero exit, so both belong there; neither can be carrying a credential, because one is a
+ * constant and the other is only reached when the variable is empty.
+ */
 if (!user) {
   console.error(
     "Usage: COMPOSIO_API_KEY=... bun run composio:smoke -- --user <id> [--call]\n\n" +
@@ -84,7 +105,7 @@ if (!configured) {
   process.exit(1);
 }
 /*
- * Rebound so that {@link say}, which is a closure and therefore outside the narrowing above, holds
+ * Rebound so that {@link redact}, which is a closure and therefore outside the narrowing above, holds
  * a `string` by declaration rather than by a cast. A cast would be the wrong tool twice over: it
  * asserts what the refusal above already proved, and this is the one variable in the file where
  * silencing the type checker is least welcome.
@@ -99,17 +120,39 @@ const key: string = configured;
  * mismatch. Applied to the vendor's words as well as to this file's own: the only lines that carry
  * text nobody here wrote are the failure lines, which are exactly the ones worth guarding.
  */
+function redact(line: string): string {
+  return line.split(key).join("<COMPOSIO_API_KEY>");
+}
+
+/** A finding: something this key can see. Stdout, per the rule at the top of this file. */
 function say(line: string): void {
-  console.info(line.split(key).join("<COMPOSIO_API_KEY>"));
+  console.info(redact(line));
 }
 
 /**
- * What a thrown failure is allowed to contribute to the output.
+ * The last line of a run that is ending unhappily, on stderr, with the code it is ending with.
+ *
+ * ONE FUNCTION SO THE RULE CANNOT DRIFT. The stream and the exit used to be chosen separately at
+ * every place a run can stop, and they disagreed: the usage and the missing key wrote to stderr and
+ * every other stopping point wrote to stdout, with nothing written down anywhere saying which the
+ * next one should pick. Tying the two together makes the rule at the top of this file true by
+ * construction rather than by everybody remembering it.
+ *
+ * `never` so the type checker knows the run is over here, which is what lets the callers below stop
+ * without a redundant `return` that would read as though the line were only advisory.
+ */
+function stop(line: string, code: number): never {
+  console.error(redact(line));
+  process.exit(code);
+}
+
+/**
+ * One failure, as the line this script prints about it.
  *
  * The MESSAGE, never the object. A caught value from an SDK carries a request, a config and
  * whatever else the vendor attached to it, and `console.error(error)` prints all of it — which is
  * the path by which a key ends up in a terminal and in whatever captured it. So the shape is
- * discarded here and the one human sentence is kept, and even that goes out through {@link say}.
+ * discarded here and the one human sentence is kept, and even that goes out through {@link redact}.
  *
  * WHICH MESSAGE, THOUGH, IS NOT THE OUTER ONE. `error.message` on a Composio throw is "Error
  * executing the tool GMAIL_GET_PROFILE" — the placeholder `./composio` documents as the sentence
@@ -120,14 +163,24 @@ function say(line: string): void {
  * takes that sentence and nothing else, and it is imported rather than rewritten here so that a
  * vendor changing the nesting breaks one place.
  *
- * The thrown message stays as the fallback, because a failure that is not a Composio throw at all —
- * DNS, a proxy, a TLS refusal — carries its whole diagnosis there.
+ * AND THE PLACEHOLDER IS REFUSED HERE TOO, which is the half this file was missing. The fallback
+ * used to be `error.message` unconditionally — so on the one path where the placeholder is what
+ * `error.message` holds, a docblock saying the sentence is never worth passing on sat directly
+ * above the code that passed it on. {@link VENDOR_PLACEHOLDER} and {@link unexplained} are the same
+ * two the transport uses at the same fork, imported rather than re-spelled so this file cannot
+ * drift from `callTool`'s wording about a failure Composio declined to explain.
+ *
+ * The thrown message is still the fallback where it says anything at all, because a failure that is
+ * not a Composio throw — DNS, a proxy, a TLS refusal — carries its whole diagnosis there.
  */
-function sentence(error: unknown): string {
-  return (
-    vendorSentence(error) ??
-    (error instanceof Error ? error.message : String(error))
-  );
+function failed(subject: string, error: unknown): string {
+  const vendor = vendorSentence(error);
+  if (vendor !== null) return `${subject} failed: ${vendor}`;
+  const thrown =
+    error instanceof Error ? error.message.trim() : String(error).trim();
+  return thrown === "" || VENDOR_PLACEHOLDER.test(thrown)
+    ? unexplained(subject)
+    : `${subject} failed: ${thrown}`;
 }
 
 /**
@@ -147,8 +200,7 @@ async function ask<T>(attempt: string, read: () => Promise<T>): Promise<T> {
   try {
     return await read();
   } catch (error) {
-    say(`${attempt} failed: ${sentence(error)}`);
-    process.exit(1);
+    stop(failed(attempt, error), 1);
   }
 }
 
@@ -158,28 +210,38 @@ const apps = await ask("Listing the apps this key can see", () =>
   broker.listApps(),
 );
 const app = apps.find((candidate) => candidate.slug === APP);
+/*
+ * THE TRUNCATED CATALOGUE IS NOT CHECKED FOR HERE, BECAUSE IT CANNOT ARRIVE HERE.
+ *
+ * There used to be a branch below reporting that the catalogue had come back full at
+ * {@link LISTING_LIMIT}, and it could never run: `broker.listApps` refuses that answer at its own
+ * ceiling and throws, for the reason written down beside the throw — at the ceiling a whole
+ * catalogue and a cut-off one are the same array, so a partial directory is not shown at all. So
+ * every value of `apps` that reaches this line is shorter than the limit, and the one thing the
+ * branch promised to report was the one thing it could never see.
+ *
+ * WHICH DOES NOT LOSE THE REPORT, and that is why the branch went rather than the refusal being
+ * worked around. The refusal's own sentence says the catalogue came back at the largest page this
+ * deployment can ask for, and {@link ask} prints it: a run against a truncated catalogue stops on
+ * that sentence instead of continuing under a warning. It is the stronger of the two, because the
+ * branch would have gone on to report "gmail was not among them" about a listing it had just said
+ * it could not trust.
+ *
+ * The action listing further down keeps its own full-page check, which is NOT the same case:
+ * `actions.listActions` is a pass-through with no ceiling refusal in it, so there a full page
+ * really can arrive and really does need saying.
+ */
 say(`Composio listed ${apps.length} apps for this key.`);
-if (apps.length >= LISTING_LIMIT) {
-  /*
-   * Said because at the ceiling a whole catalogue and a cut-off one are the same array, and no
-   * second request can tell them apart — see {@link LISTING_LIMIT}, which is the largest page this
-   * SDK can express. So a full page is reported as a full page rather than as the catalogue, and an
-   * app missing from it may be past the cut rather than absent from the account.
-   */
-  say(
-    `That is the whole page Composio will answer with (${LISTING_LIMIT}), so the catalogue came back full and anything missing below may be past the cut rather than absent.`,
-  );
-}
 if (!app) {
   /*
    * Stated rather than shrugged at. A catalogue that does not contain Gmail is a key pointed at
    * something other than what this script assumes, and reporting "0 actions" for it would read as
    * an empty app rather than as a listing that never included it.
    */
-  say(
+  stop(
     `${APP} was not among them, so the action count and the connection below are about an app this key cannot see.`,
+    1,
   );
-  process.exit(1);
 }
 say(`${app.name} publishes ${app.actionCount} actions.`);
 
@@ -199,10 +261,10 @@ if (!call) {
 }
 
 if (!connected) {
-  say(
+  stop(
     `--call was passed, but there is no connection to call through, so nothing was sent. Connect ${APP} for ${user} first.`,
+    1,
   );
-  process.exit(1);
 }
 
 /*
@@ -228,10 +290,10 @@ say(
 );
 const action = listed.find((candidate) => candidate.slug === READ_ACTION);
 if (!action) {
-  say(
+  stop(
     `Composio does not list ${READ_ACTION} for ${APP}, so nothing was called. Pick another read-only action rather than calling one of the writes.`,
+    1,
   );
-  process.exit(1);
 }
 const { effect, destructive } = effectOf(action.tags);
 if (effect !== "read" || destructive) {
@@ -240,16 +302,16 @@ if (effect !== "read" || destructive) {
    * unlabelled as a write, so this also covers the case where Composio stops publishing labels
    * altogether — which would otherwise turn a smoke test into an unreviewed write.
    */
-  say(
+  stop(
     `Composio no longer marks ${READ_ACTION} as read-only, so nothing was called. This script only ever runs a read.`,
+    1,
   );
-  process.exit(1);
 }
 if (!action.version) {
-  say(
+  stop(
     `Composio listed ${READ_ACTION} with no version, so no versioned call could be made and nothing was sent.`,
+    1,
   );
-  process.exit(1);
 }
 
 let result: ComposioResult;
@@ -269,19 +331,31 @@ try {
     {},
   );
 } catch (error) {
-  say(`${READ_ACTION} threw: ${sentence(error)}`);
-  process.exit(1);
+  stop(failed(READ_ACTION, error), 1);
 }
 
 /*
  * A resolution is not a success. Composio reports most failures by answering with `successful:
  * false` rather than by throwing, and a smoke test that only watched for exceptions would report a
  * working key on top of a call that failed.
+ *
+ * THE REPORTED SENTENCE GOES THROUGH THE SAME TWO GUARDS A THROWN ONE DOES. `result.error` is the
+ * vendor's field and it carries the vendor's placeholder as readily as an exception message does —
+ * `callTool` refuses it there for exactly this reason — so "failed: Error executing the tool
+ * GMAIL_GET_PROFILE" is a line this script could otherwise print while its own docblock says that
+ * sentence is never worth passing on. {@link unexplained} is what is said instead, which is the
+ * wording the product uses for the same silence.
  */
-say(
-  result.successful
-    ? `${READ_ACTION} succeeded.`
-    : `${READ_ACTION} failed: ${result.error ?? "Composio said so without saying why."}`,
-);
-say(`Log id: ${result.logId ?? "none was returned."}`);
-process.exit(result.successful ? 0 : 1);
+const reported = result.error?.trim() ?? "";
+const outcome = result.successful
+  ? `${READ_ACTION} succeeded.`
+  : reported === "" || VENDOR_PLACEHOLDER.test(reported)
+    ? unexplained(READ_ACTION)
+    : `${READ_ACTION} failed: ${reported}`;
+const log = `Log id: ${result.logId ?? "none was returned."}`;
+
+/* The rule at the top of this file: these two lines are the whole explanation of a non-zero exit. */
+if (!result.successful) stop(`${outcome}\n${log}`, 1);
+say(outcome);
+say(log);
+process.exit(0);

@@ -3,9 +3,22 @@
   // `scripts` too: the migration runner and the culler entrypoint ship in the image, so they are
   // product code that happens to live outside `src`.
   //
+  // `../scripts/composio-smoke.ts` FOR THE SAME REASON, one directory further out. It ships in the
+  // image — the Dockerfile copies that one file and no other — it is what `docs/plugins/composio.md`
+  // tells an operator to run when Composio misbehaves, and it imports `src/plugins/composio*`
+  // directly, so it is this workspace's code that happens to live at the repository root. Nothing
+  // else covered it: the root `scripts/` directory is in no workspace, and `bun run typecheck` is
+  // `bun run --filter '*' typecheck`, which matches workspaces only and never the root manifest.
+  //
+  // THE FILE AND NOT THE DIRECTORY, which is the line the Dockerfile already draws. The rest of
+  // `../scripts` is the laptop's, and two of those are global scripts with no import or export at
+  // all, so they share one scope and redeclare each other's variables the moment a project takes
+  // them in. Named individually the way `app/tsconfig.json` names the two `shared` files it reaches
+  // for.
+  //
   // `tests` is NOT here yet, and that is a known gap rather than a decision: the suite has never been
   // type-checked and turning it on surfaces a few hundred years of accumulated `any`. It is what let
   // a test pass an options object where a connection string belongs and hear nothing back. Its own
   // change, because it is a sweep and not a fix.
-  "include": ["src", "scripts"]
+  "include": ["src", "scripts", "../scripts/composio-smoke.ts"]
 }

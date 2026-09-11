@@ -8,12 +8,18 @@ consents to Composio, and Composio holds what comes back. A Bot with a brokered 
 reaches the app **as the person asking**, the same as every other per-person connector here, so two
 people asking the same question get the answers their own accounts can see.
 
-Setting it up takes two people, and neither can do the other's half:
+Setting it up takes three hands, and none of them can do another's:
 
-| Who              | Does                                              | Where                          |
-| ---------------- | ------------------------------------------------- | ------------------------------ |
-| An administrator | Sets one key, enables an app, grants its actions  | `/admin/plugins/composio`      |
-| Each person      | Connects their own account to that app            | `/settings/connected-accounts` |
+| Who              | Does                                   | Where                                                            |
+| ---------------- | -------------------------------------- | ---------------------------------------------------------------- |
+| Whoever deploys  | Sets `COMPOSIO_API_KEY`                | The deployment's environment. There is no screen for it           |
+| An administrator | Enables an app                         | `/admin/plugins/composio`                                         |
+| An administrator | Grants its actions to a Bot            | `/admin/plugins/composio-<slug>`, then that page's per-Bot screen |
+| Each person      | Connects their own account to that app | `/settings/connected-accounts`                                    |
+
+The key is the row that is easiest to misread, so it is stated twice: it is an environment variable
+and nothing else. No administrator, however permissioned, can turn Composio on from a page, and
+`/admin/plugins/composio` is where a key that is already set gets used rather than where one is set.
 
 There is deliberately no endpoint for an administrator to connect an account on somebody's behalf.
 
@@ -25,18 +31,51 @@ Composio keeps people apart by a user id sent with every call, so one person's c
 reachable from another's.
 
 Nothing validates the key at startup. There is no shape to check it against and no call worth making
-at boot to find out, so the first real request is what says whether it works.
+at boot to find out, so the first real request is what says whether it works. `composio:smoke` below
+is how an operator asks that question deliberately rather than by watching somebody else fail.
 
 Unset is a supported, fully described state rather than a degraded one: it is what every deployment
-is today. With no key, the only Composio surface anywhere in the product is one line where the app
-directory would be, saying that adding a Composio key enables a catalogue of tools and naming
-`COMPOSIO_API_KEY` as the setting to set. It names the setting rather than hiding the feature, so
-somebody who has heard of Composio can find out what it wants. There is no directory to browse, no
-picker, and no brokered app on anybody's connected-accounts page.
+is today. What is on screen with no key is exactly one row, on `/admin/plugins` under the **More
+apps** heading, titled *Composio* and reading *Add your Composio key to enable a catalogue of tools.
+Set COMPOSIO_API_KEY on this deployment.* It has no chevron and it is not a link, because there is
+nowhere to go until the key is set. It names the setting rather than hiding the feature, so an
+administrator who has heard of Composio can find out what it wants — and because the heading above
+it stays too, the handful of reviewed connectors does not read as the whole story.
+
+That row is the whole of it. There is no directory to browse, no picker, no brokered app on
+anybody's connected-accounts page, and no Composio tool for a Bot to call.
 
 An app enabled while a key was set and then left without one keeps its row and its grants. Its page
 says the key is missing, and its calls refuse with a sentence saying the same — distinguished, as
 everywhere else here, from "the app advertises nothing".
+
+### Asking what this key can see
+
+```
+COMPOSIO_API_KEY=... bun run composio:smoke -- --user <id> [--call]
+```
+
+`scripts/composio-smoke.ts` is the one command to run when Composio misbehaves and nothing on screen
+says why. It ships inside the container image, so it is run where the key is — in the deployment,
+not on a laptop — and it answers the question no page can: whether *this* key opens *this* project. A
+key with no project behind it, a project with no authorization config for the app, and a person who
+never finished the consent page all leave a product that looks configured and answers nothing, and
+this is what tells the three apart.
+
+It is all reads. It mints no connect link and starts no session, because a link is a bearer
+capability and a diagnostic that printed one would leave somebody's mailbox in a terminal scrollback.
+The key is never printed either: every line goes out through a redactor, including the vendor's own
+sentences, which are the only lines carrying text nobody here wrote. `--user` takes the id this
+deployment sends Composio as the person a call is for — the same id `composio_connections` records.
+`--call` additionally runs one read-only action, `GMAIL_GET_PROFILE`, and only after checking
+Composio's own behaviour label at call time rather than trusting the name.
+
+**Which stream a line goes to is decided by the exit code it explains.** A line that explains a
+non-zero exit is written to stderr; every other line is written to stdout. So `… > report.txt` keeps
+a report of what the key can see while every reason the command failed is still on the terminal
+beside it — and an action that ran and failed puts its outcome and its log id on stderr, because
+those two lines are the whole explanation of the `1` it exits with. The exit codes are `0` for a run
+that finished, `1` for a run that stopped, and `2` for a missing `--user`.
 
 ## What an administrator does
 
