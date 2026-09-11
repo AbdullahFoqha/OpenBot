@@ -37,6 +37,7 @@ import {
   type ServerAccess,
   ServerUnresolvableError,
 } from "./access";
+import { BrokerUnconfiguredError, type ComposioBroker } from "./broker";
 import {
   type CatalogueEntry,
   catalogueEntry,
@@ -45,7 +46,7 @@ import {
   resolveServerUrl,
   serverCredentialKind,
 } from "./catalogue";
-import { VERSION_ARG } from "./composio";
+import { toolkitOf, VERSION_ARG } from "./composio";
 import { inspectToolArguments } from "./content-governance";
 import { type ListedTool, McpServerError } from "./mcp";
 import { registerDynamicClient } from "./oauth";
@@ -873,6 +874,17 @@ export type PluginStoreOptions = {
     registrationUrl: string;
     redirectUri: string;
   }) => Promise<OAuthClient | null>;
+  /**
+   * Composio the broker, absent on a deployment that has not configured one.
+   *
+   * OPTIONAL BECAUSE ITS ABSENCE IS A STATE RATHER THAN A MISCONFIGURATION. An unset
+   * `COMPOSIO_API_KEY` is the documented default and the whole brokered surface is meant to be
+   * missing where it is unset, so the store is constructible without one and every path that needs
+   * one says so by raising {@link BrokerUnconfiguredError}. A required field would make every
+   * caller that never enables an app — the routes, the tests above — invent a broker to get a
+   * store.
+   */
+  broker?: ComposioBroker;
   /** Where the vendor sends people back; needed to (re)register a dynamic client. */
   redirectUri?: string;
 };
@@ -888,6 +900,9 @@ export function createPluginStore(options: PluginStoreOptions) {
   const exchangeRefreshToken =
     options.exchangeRefreshToken ?? exchangeRefreshTokenOverHttp;
   const registerClient = options.registerClient ?? registerDynamicClient;
+  // No default, unlike the seams above: there is no real implementation in this tree to fall back
+  // to, and a deployment with no Composio key is supposed to have no broker. See `./broker`.
+  const broker = options.broker;
 
   /*
    * One exchange at a time per (server, person). A rotating vendor invalidates the refresh
@@ -2236,6 +2251,116 @@ export function createPluginStore(options: PluginStoreOptions) {
         (server) => server.id === input.id,
       );
       if (!added) throw new CatalogueEntryUnknownError(input.id);
+      return added;
+    },
+
+    /**
+     * Enable one app of the broker's catalogue, which is a third way for a server to arrive.
+     *
+     * NO URL IS TAKEN FROM A CALLER, WHICH IS WHY THERE IS NO HOST RULE HERE. `addCustomServer`
+     * guards the address because the address is what an administrator typed and what a credential
+     * would then be spent at; this one composes `composio://<slug>` itself, and a brokered row is
+     * never dialled at a host at all — the transport reads the app off that url and asks Composio,
+     * over the deployment's own key. So the only thing left to check about the url is that it says
+     * what this call meant, and {@link toolkitOf} is what checks it: the slug goes in, the url comes
+     * back out through the very function `accessFor` will read it with, and a slug those two
+     * disagree about is refused rather than stored. A pattern written here instead would be a second
+     * opinion about the shape of an app name, and the reading that decides which app a call runs
+     * against is the one that has to be satisfied.
+     *
+     * THE AUTH CONFIG COMES BEFORE THE ROW, in that order and not the other. An auth config is what
+     * a person's connection is then created against, so a row written first is an app an
+     * administrator can see on the page, grant to a Bot and press Connect on, with nothing at the
+     * vendor for any of it to attach to. Asking first is also what makes a failure leave nothing
+     * behind: the broker throws, this call throws, and no row, no action and no audit entry claims
+     * an app was enabled. {@link ComposioBroker.ensureAuthConfig} is idempotent precisely so that
+     * enabling an app twice — two administrators, or a retried request — is allowed to do this.
+     *
+     * THE ID IS PREFIXED AND THE URL IS NOT. `composio-linear` is what prefixes tool names and what
+     * a grant and a policy rule are written against, so it must not land on a curated entry's key —
+     * which `accessFor` refuses outright as a row claiming to be two servers at once — nor on one of
+     * the ids the integration suite reserves for its own fixtures: `gmail`, `notion`, `bot_helper`.
+     * The prefix puts every brokered row out of reach of all of them. WHICH APP THE ROW IS still
+     * comes off the url and only off the url, because that is where `accessFor` and the brokered
+     * gate behind it both read it from; the id names the row and never the app, and nothing may
+     * start reading one as the other.
+     */
+    async addBrokeredApp(input: {
+      slug: string;
+      title: string;
+      by: string;
+    }): Promise<ServerRecord> {
+      // Before anything at all. A deployment with no key has no catalogue for this app to have been
+      // chosen from, so there is nothing here to half-do and nothing to say but the setting.
+      if (!broker) throw new BrokerUnconfiguredError();
+
+      const url = `composio://${input.slug}`;
+      if (toolkitOf(url) !== input.slug) {
+        throw new CustomServerRefusedError(
+          `${input.slug} is not a name a Composio app can have. An app is named in letters, numbers, underscores and hyphens, because that name is read back out of this row's url to decide which app a call is against.`,
+        );
+      }
+
+      await broker.ensureAuthConfig({ toolkit: input.slug, name: input.title });
+
+      const id = `composio-${input.slug}`;
+      await database
+        .insert(mcpServers)
+        .values({
+          id,
+          title: input.title,
+          // The broker, whoever publishes the app behind it. `vendor` is what the first-party rule
+          // is checked against, and Composio is who this deployment is actually talking to.
+          vendor: "Composio",
+          url,
+          provenance: "composio",
+          // Nothing for the vault to hold. A brokered call runs as the person asking, on their own
+          // connection at the vendor, which is a `composio_connections` row rather than a secret.
+          credentialId: null,
+          addedBy: input.by,
+        })
+        .onConflictDoUpdate({
+          target: mcpServers.id,
+          set: {
+            title: input.title,
+            url,
+            addedBy: input.by,
+            updatedAt: new Date(),
+            /*
+             * `credential_id` is neither written here nor cleared here.
+             *
+             * Every row this method creates has none and no path in this module attaches one, so
+             * there is nothing for an enable to set. Clearing it anyway would matter in the single
+             * case it could apply — a pointer that arrived by hand edit or restore — because
+             * `removeServer` retires a server's secret by reading it off this column, and a null
+             * written over it leaves that secret live with nothing left to name it.
+             */
+          },
+        });
+
+      await recordAuditEvent(auditStore, {
+        eventType: "configuration.changed",
+        targetType: "mcp_server",
+        targetId: id,
+        payload: {
+          actor: input.by,
+          change: "mcp_server_added",
+          server: id,
+          url,
+          // Named for the same reason the custom path names its own: "who enabled an app whose
+          // actions nobody reviewed" is a question somebody will ask, and the answer should not
+          // require knowing how ids were spelled in a past build.
+          provenance: "composio",
+        },
+      });
+
+      // Refreshed now for the reason the paths above are: the page that enabled the app can show
+      // what it offers, and a broker that will not list it says so here rather than at first use.
+      await this.refreshTools(id);
+      const added = (await this.listServers()).find(
+        (server) => server.id === id,
+      );
+      if (!added) throw new CatalogueEntryUnknownError(id);
       return added;
     },
 

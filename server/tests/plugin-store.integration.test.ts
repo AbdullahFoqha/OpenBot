@@ -37,6 +37,7 @@ import {
   CatalogueTransportUnroutableError,
   ServerRowAmbiguousError,
 } from "../src/plugins/access";
+import type { ComposioBroker } from "../src/plugins/broker";
 import type { CatalogueEntry } from "../src/plugins/catalogue";
 import { catalogueEntry } from "../src/plugins/catalogue";
 import {
@@ -3813,8 +3814,11 @@ async function freshDatabase(): Promise<Database> {
  * NO `callVendor`. Whose account a call runs as and which transport a row resolves to are the
  * properties under test, and both are decided on the way to the vendor — so the real path has to
  * run, and the vendor is stubbed further out at {@link useComposioClient}.
+ *
+ * `options` is spread over the defaults rather than read field by field, so a test that needs one
+ * more seam — a broker, today — adds it at the call and nothing here has to learn its name.
  */
-async function freshStore() {
+async function freshStore(options: { broker?: ComposioBroker } = {}) {
   const database = await freshDatabase();
   const persisting = createAuditStore(database);
   const events: Parameters<typeof persisting.insert>[0][] = [];
@@ -3832,6 +3836,7 @@ async function freshStore() {
     credentials: credentialsStub,
     encryptionKey: "x".repeat(44),
     policy: () => policy,
+    ...options,
   });
 
   return { store, database, auditStore };
@@ -5880,4 +5885,129 @@ test("an audit write that fails is not recorded as the vendor misbehaving", asyn
     .where(eq(mcpServers.id, "gmail"));
 
   expect(row?.lastError).toBeNull();
+});
+
+/**
+ * The moment a brokered app starts existing, which is an auth config before it is a row.
+ *
+ * The id and the url are different strings on purpose, and both are asserted. `composio-linear` is
+ * what a grant and a policy rule are written against, and it carries a prefix so it cannot land on
+ * a curated entry's slug or on one of the ids the fixtures above reserve; `composio://linear` is
+ * what `accessFor` reads the app off, and that is the field the transport and the connection gate
+ * both settle the app from. A test that asserted only one of them would pass on an implementation
+ * that made them equal, which is the arrangement those two rules exist to keep apart.
+ *
+ * THE BROKER IS ASKED FIRST AND EXACTLY ONCE. First because a row whose auth config does not exist
+ * is an app an administrator can see and nobody can connect to; once because `ensureAuthConfig` is
+ * idempotent at the vendor and a second call here would be this deployment leaning on that.
+ *
+ * `composio-linear` is cleaned up in a `finally` rather than by {@link freshDatabase}, which knows
+ * only the ids the guard at the top of this file cleared. The row is checked absent before the add
+ * for the same reason every delete in this file is guarded: the id is spelled the way production
+ * spells it, so a row already at it would be somebody's app rather than this test's.
+ */
+test("enabling an app writes a brokered row, and asks for its auth config first", async () => {
+  const asked: { toolkit: string; name: string }[] = [];
+  const rowsWhenAsked: string[] = [];
+  const unasked = (what: string) => async (): Promise<never> => {
+    throw new Error(`enabling an app asked the broker to ${what}`);
+  };
+  const broker: ComposioBroker = {
+    listApps: unasked("list the catalogue"),
+    ensureAuthConfig: async (config) => {
+      asked.push(config);
+      /*
+       * What the table held at the moment the broker was asked, which is how "first" is asserted
+       * rather than assumed. Counting the calls says nothing about the order, and the order is the
+       * whole property: an implementation that wrote the row and then asked would leave an app on
+       * the page that nobody can connect to whenever this call fails.
+       */
+      const rows = await database
+        .select({ id: mcpServers.id })
+        .from(mcpServers)
+        .where(eq(mcpServers.id, "composio-linear"));
+      rowsWhenAsked.push(...rows.map((row) => row.id));
+    },
+    deleteAuthConfig: unasked("delete an auth config"),
+    authorize: unasked("begin somebody's connection"),
+    isConnected: unasked("check somebody's connection"),
+    revoke: unasked("withdraw somebody's grant"),
+  };
+
+  const { store, database, auditStore } = await freshStore({ broker });
+  useComposioClient({
+    listActions: async () => [
+      {
+        slug: "LINEAR_CREATE_ISSUE",
+        description: "Create an issue.",
+        inputParameters: { type: "object", properties: {} },
+        tags: ["createHint"],
+        version: "20260903_00",
+      },
+    ],
+    execute: async () => vendorAnswered(),
+  });
+
+  const [present] = await database
+    .select({ id: mcpServers.id })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, "composio-linear"));
+  if (present) {
+    throw new Error(
+      "a row at 'composio-linear' was already here, so it is not this test's to write over",
+    );
+  }
+
+  try {
+    const record = await store.addBrokeredApp({
+      slug: "linear",
+      title: "Linear",
+      by: "admin@example.com",
+    });
+
+    expect(record.id).toBe("composio-linear");
+    expect(record.url).toBe("composio://linear");
+    expect(record.provenance).toBe("composio");
+    // No credential of its own, and none to come: a brokered row is reached as the person asking,
+    // on their connection at the vendor, so there is nothing on this row for a vault to hold.
+    expect(record.hasCredential).toBe(false);
+
+    expect(asked).toEqual([{ toolkit: "linear", name: "Linear" }]);
+    expect(rowsWhenAsked).toEqual([]);
+
+    const changes = auditStore
+      .recorded()
+      .filter((event) => event.eventType === "configuration.changed");
+    expect(changes).toHaveLength(1);
+    expect(changes[0]?.payload).toMatchObject({
+      change: "mcp_server_added",
+      provenance: "composio",
+    });
+  } finally {
+    await database
+      .delete(mcpTools)
+      .where(eq(mcpTools.serverId, "composio-linear"));
+    await database
+      .delete(mcpServers)
+      .where(eq(mcpServers.id, "composio-linear"));
+  }
+});
+
+/**
+ * The same call on a deployment that has no Composio key, which is the documented default.
+ *
+ * The refusal names the setting because the name is the whole remedy, and nothing else about a
+ * deployment with no broker will tell an administrator what to set. Asserted on the message rather
+ * than the class so that the sentence an operator actually reads is what this test is about.
+ */
+test("enabling an app with no broker says which setting is missing", async () => {
+  const { store } = await freshStore();
+
+  await expect(
+    store.addBrokeredApp({
+      slug: "linear",
+      title: "Linear",
+      by: "admin@example.com",
+    }),
+  ).rejects.toThrow("COMPOSIO_API_KEY");
 });
