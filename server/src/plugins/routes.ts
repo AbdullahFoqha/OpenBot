@@ -6,6 +6,7 @@ import { requireAdmin } from "../auth/guards";
 import {
   type BrokerApp,
   BrokerUnconfiguredError,
+  brokerReturnUrl,
   brokerSentence,
   type ComposioBroker,
 } from "./broker";
@@ -801,10 +802,17 @@ export function createPluginRoutes(
         ({ redirectUrl } = await composio.broker.authorize({
           userId: context.var.actor.id,
           toolkit,
-          returnUrl: connectedAccountsUrlFor(
-            connect.appUrl,
-            { serverId },
-            returnTo,
+          /*
+           * THE REFUSAL ABOVE CHECKS THAT A SETTING IS SET; THIS CHECKS THAT IT IS AN ADDRESS.
+           * `appUrl` is an environment string — `OPENBOT_APP_URL`, or the first `TRUSTED_ORIGINS`
+           * entry — and nothing between there and Composio has ever looked at it, so
+           * `openbot.example.com` with the scheme left off builds a callback that is not a
+           * callback. That failure lands after somebody has consented, on the vendor's page, where
+           * this deployment cannot tell them anything; the guard moves it to before the link is
+           * minted, where the sentence reaches an operator who can set the variable.
+           */
+          returnUrl: brokerReturnUrl(
+            connectedAccountsUrlFor(connect.appUrl, { serverId }, returnTo),
           ),
         }));
       } catch (error) {
