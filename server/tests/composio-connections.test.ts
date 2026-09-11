@@ -29,8 +29,13 @@ import { TEST_POOL } from "./support/database";
  * whole of the permission, it points at no vault secret, and it references neither `users` nor
  * `mcp_servers`. Nothing therefore cascades it away, which is deliberate — the row has to outlive
  * the person so offboarding can still find it — and it means an explicit retirement is the ONLY
- * thing that can ever end one. This file is about the two acts that must perform that retirement
- * and about the trail they leave.
+ * thing that can ever end one. Three store methods perform that retirement: `retireConnectionsFor`
+ * when somebody is offboarded, `removeServer` when the app itself is taken away, and
+ * `disconnectBrokered` when a person ends their own account. This file is about the two an
+ * administrator performs on somebody else's behalf, and about the trail those two leave;
+ * `disconnectBrokered` has its own coverage in `plugin-store.integration.test.ts`, which is why the
+ * two here are described throughout as the two ACTS AN ADMINISTRATOR PERFORMS and never as all the
+ * ways a connection can end.
  *
  * WHY THIS FILE OWNS ITS IDS OUTRIGHT, AND SO NEEDS NO REFUSE-TO-RUN GUARD.
  * `plugin-store.integration.test.ts` inserts at `gmail`, `notion` and `bot_helper` and refuses to
@@ -71,6 +76,26 @@ const leaverId = `user_leaver_${suite}`;
  * spells them the same — which is exactly why a defect that only shows when they differ survived.
  */
 const renamedId = `renamed-${suite}`;
+/**
+ * A SECOND app the same person connected, which is what makes an offboarding's answer per-app.
+ *
+ * Spelled as an extension of {@link toolkit} rather than as an independent name, so that `toolkit`
+ * sorts before it under every collation a database might be running: one string is a strict prefix
+ * of the other, and no locale reorders that pair. The offboarding path reads its apps
+ * `order by toolkit`, and an assertion about that order is worth nothing if the order it expects is
+ * itself a guess about the server's locale.
+ */
+const secondToolkit = `${toolkit}-more`;
+/** Every app this run owns, which is the scope of every read and every delete below. */
+const ownedToolkits = [toolkit, secondToolkit];
+/**
+ * An app this file does NOT own, standing in for another run's fixture — or another file's.
+ *
+ * It carries this run's suffix so it cannot collide with a real row, and it is deliberately absent
+ * from {@link ownedToolkits} so {@link clean} cannot reach it. Its whole purpose is to be the row
+ * that a sweep keyed on `user_id` alone would take by mistake.
+ */
+const foreignToolkit = `foreign-${suite}`;
 const admin = "admin@openbot.local";
 
 const policy: ActionPolicy = { mode: "enforce", deny: [], allow: ["true"] };
@@ -84,10 +109,12 @@ const policy: ActionPolicy = { mode: "enforce", deny: [], allow: ["true"] };
  * any of these means this file has started exercising something it does not claim to, and a silent
  * stub would hide that.
  *
- * Typed as the interface rather than left to inference, so a method added to the vault fails here
- * instead of at the assignment further down. This file is not covered by `tsc` today — `tests` is
- * outside `server/tsconfig.json`'s `include` — which is exactly why the shape is stated rather than
- * assumed.
+ * Typed as the interface rather than left to inference, so the shape being stood in for is stated
+ * where a reader meets it instead of being inferred from the methods below. That annotation is
+ * documentation TODAY AND NOT A CHECK: `tests` is outside `server/tsconfig.json`'s `include`, so
+ * `tsc` never reads this file and a method added to the vault goes unremarked here — nothing in
+ * this directory would fail, and neither would the assignment further down. It is written anyway so
+ * that the day that directory is type-checked, this is already right.
  */
 const credentialsStub: CredentialSecretReader & CredentialStore = {
   readSecret: async () => {
@@ -119,6 +146,23 @@ const credentialsStub: CredentialSecretReader & CredentialStore = {
  * Recorded ALONGSIDE the real insert rather than instead of it: the payloads are what these tests
  * assert about, and a store whose audit insert never touched the database would not be exercising
  * the one it has.
+ *
+ * AND THOSE ROWS OUTLIVE THE RUN, WHICH {@link clean} CANNOT CHANGE. Every other table this file
+ * touches is swept on the way out; `audit_events` is not, and the omission is the database's rule
+ * rather than an oversight here. The trail is append-only, enforced by a trigger rather than by the
+ * application (`0007_audit_retention_window.sql`): a plain `delete` raises "Audit events are
+ * append-only", and the one exemption — a session that sets `openbot.audit_retention_days` to a
+ * positive whole number — still refuses any row younger than that many days. The rows this file
+ * writes are seconds old at the moment it would sweep them, so NO setting makes them deletable;
+ * `3650` is refused for the same reason `1` is. A cleanup here would be a statement that always
+ * throws.
+ *
+ * What that leaves is bounded rather than unbounded. Every row this file writes is keyed on an id
+ * carrying this run's suffix — `targetId` is {@link toolkit}, {@link secondToolkit},
+ * {@link renamedId} or {@link ref} on every one of them — so they are findable, they belong to no
+ * other run, and the retention sweep removes them on its ordinary schedule once they age past the
+ * deployment's window. That is the same treatment every audit row in the product gets, and the
+ * guarantee that forbids the shortcut is the one the product sells.
  */
 const events: Parameters<ReturnType<typeof createAuditStore>["insert"]>[0][] =
   [];
@@ -133,15 +177,15 @@ const auditStore = {
 /**
  * Every connection row THIS RUN owns, as `<app>/<person or "">`, in a fixed order.
  *
- * SCOPED TO THE APP AND ORDERED, both load-bearing. {@link toolkit} carries this run's suffix, so
- * this reads nothing another run inserted — which matters most for the anonymous actor, whose half
- * of the key names nobody and is therefore the one pair another run legitimately holds too. A read
- * filtered on the person alone would take in every app's anonymous row at once, and a run that died
- * before its cleanup would leave one standing that no cleanup here can reach: these tests run
- * against the shared development database, so that row would redden this file for everybody until
- * somebody edited the database by hand. The ordering is the same argument one step down — Postgres
- * promises none without one, so an unordered read of two rows is compared against whichever order
- * the plan happened to produce.
+ * SCOPED TO THIS RUN'S APPS AND ORDERED, both load-bearing. Every name in {@link ownedToolkits}
+ * carries this run's suffix, so this reads nothing another run inserted — which matters most for
+ * the anonymous actor, whose half of the key names nobody and is therefore the one pair another run
+ * legitimately holds too. A read filtered on the person alone would take in every app's anonymous
+ * row at once, and a run that died before its cleanup would leave one standing that no cleanup here
+ * can reach: these tests run against the shared development database, so that row would redden this
+ * file for everybody until somebody edited the database by hand. The ordering is the same argument
+ * one step down — Postgres promises none without one, so an unordered read of several rows is
+ * compared against whichever order the plan happened to produce.
  */
 async function connectionsHeld(): Promise<string[]> {
   const rows = await database
@@ -150,8 +194,8 @@ async function connectionsHeld(): Promise<string[]> {
       userId: composioConnections.userId,
     })
     .from(composioConnections)
-    .where(eq(composioConnections.toolkit, toolkit))
-    .orderBy(asc(composioConnections.userId));
+    .where(inArray(composioConnections.toolkit, ownedToolkits))
+    .orderBy(asc(composioConnections.toolkit), asc(composioConnections.userId));
   return rows.map((row) => `${row.toolkit}/${row.userId}`);
 }
 
@@ -203,6 +247,18 @@ function asksMade(): string[] {
 let vendorFinds: (request: { userId: string; toolkit: string }) => boolean =
   () => true;
 
+/**
+ * Whether the vendor REFUSES TO ANSWER AT ALL, which is a different event from answering "none".
+ *
+ * `false` from {@link ComposioBroker.revoke} is a fact the vendor asserts — it looked and there was
+ * no account — and a retirement may finish on it. A throw asserts nothing: the account may be alive
+ * and untouched. The two must therefore end the act differently, and a seam that could only vary
+ * the boolean could never say so. Separate from {@link vendorFinds} for exactly that reason: one
+ * knob spelling both would read as though a refusal were a shade of "no".
+ */
+let vendorRefuses: (request: { userId: string; toolkit: string }) => boolean =
+  () => false;
+
 const broker: ComposioBroker = {
   listApps: unasked("list the catalogue"),
   ensureAuthConfig: unasked("create an auth config"),
@@ -215,6 +271,13 @@ const broker: ComposioBroker = {
       ask: `revoke:${request.toolkit}/${request.userId}`,
       held: await connectionsHeld(),
     });
+    // Recorded before it throws, so a refusal is still an ask that was made: the assertions about a
+    // refused act are about what reached the vendor before it stopped, and what did not.
+    if (vendorRefuses(request)) {
+      throw new Error(
+        `the vendor would not withdraw ${request.toolkit}/${request.userId}`,
+      );
+    }
     return vendorFinds(request);
   },
   deleteAuthConfig: async (forToolkit) => {
@@ -271,8 +334,33 @@ async function clean() {
     .where(inArray(mcpServers.id, [toolkit, renamedId]));
   await database
     .delete(composioConnections)
-    .where(eq(composioConnections.toolkit, toolkit));
+    .where(inArray(composioConnections.toolkit, ownedToolkits));
   await database.delete(users).where(inArray(users.id, [askerId, leaverId]));
+}
+
+/**
+ * The stand-in for somebody else's fixture, taken back by hand.
+ *
+ * Deliberately NOT part of {@link clean}, because a test below asserts that `clean` leaves this row
+ * standing: folding it in would make that assertion agree with itself. Run beside `clean` from
+ * `beforeEach` and `afterAll` instead, so the row cannot outlive the run even if the test that
+ * inserts it dies partway — the same shared database that makes the row worth protecting makes a
+ * leaked one everybody's problem.
+ */
+async function cleanForeign() {
+  await database
+    .delete(composioConnections)
+    .where(eq(composioConnections.toolkit, foreignToolkit));
+}
+
+/** Which of this run's app rows the deployment still holds, so "the app survived" is an assertion. */
+async function appsHeld(): Promise<string[]> {
+  const rows = await database
+    .select({ id: mcpServers.id })
+    .from(mcpServers)
+    .where(inArray(mcpServers.id, [toolkit, renamedId]))
+    .orderBy(asc(mcpServers.id));
+  return rows.map((row) => row.id);
 }
 
 /** The app's row and its one granted action. Separated from the Bot, so a re-add can reuse the Bot. */
@@ -313,23 +401,30 @@ async function seedApp(options: { connect?: boolean } = {}) {
 /**
  * Which of THIS RUN'S apps this deployment still believes somebody has connected.
  *
- * Narrowed to {@link toolkit} and ordered for the reason {@link connectionsHeld} gives, which is
- * the same reason and matters for the same row: the anonymous actor. `notNull` admits the empty
- * string, so `(toolkit, "")` is a legal pair and every run of this file inserts one — and the only
- * half of it that is this run's is the app. Asking what `""` has connected across the whole table
- * therefore reads every other run's anonymous row too, including one left behind by a run that was
+ * Narrowed to named apps and ordered for the reason {@link connectionsHeld} gives, which is the
+ * same reason and matters for the same row: the anonymous actor. `notNull` admits the empty string,
+ * so `(toolkit, "")` is a legal pair and every run of this file inserts one — and the only half of
+ * it that is this run's is the app. Asking what `""` has connected across the whole table therefore
+ * reads every other run's anonymous row too, including one left behind by a run that was
  * interrupted before its cleanup; against the shared development database that row is permanent,
  * unreachable by the cleanup here, and reddens this file for everybody until the database is edited
- * by hand. Narrowing to this run's app is what makes the assertion about this run.
+ * by hand. Narrowing to named apps is what makes the assertion about this run.
+ *
+ * `within` DEFAULTS TO THIS RUN'S OWN APPS and is passed explicitly only to ask about
+ * {@link foreignToolkit} — the one row this file holds that it deliberately does not own, and
+ * therefore the one it has to be able to ask about separately.
  */
-async function connectedToolkitsFor(userId: string): Promise<string[]> {
+async function connectedToolkitsFor(
+  userId: string,
+  within: string[] = ownedToolkits,
+): Promise<string[]> {
   const rows = await database
     .select({ toolkit: composioConnections.toolkit })
     .from(composioConnections)
     .where(
       and(
         eq(composioConnections.userId, userId),
-        eq(composioConnections.toolkit, toolkit),
+        inArray(composioConnections.toolkit, within),
       ),
     )
     .orderBy(asc(composioConnections.toolkit));
@@ -344,18 +439,23 @@ function recordedOfType(eventType: string) {
 // one nothing to trip over.
 beforeEach(async () => {
   await clean();
+  await cleanForeign();
   events.length = 0;
   reached.length = 0;
   asks.length = 0;
   // The vendor finding an account is the ordinary case — somebody connected, so there is a grant to
   // withdraw. The one test about the answer itself says otherwise for itself.
   vendorFinds = () => true;
+  // And answering at all is the ordinary case too. A vendor that will not answer is the subject of
+  // its own two tests and of nothing else.
+  vendorRefuses = () => false;
 });
 
 afterEach(() => useComposioClient(null));
 
 afterAll(async () => {
   await clean();
+  await cleanForeign();
 });
 
 /**
@@ -463,6 +563,110 @@ test("retiring the same person twice retires nothing the second time", async () 
 });
 
 /**
+ * A REFUSAL AT THE VENDOR MUST NOT BECOME A RETIREMENT HERE.
+ *
+ * CRITERION. When the broker will not withdraw the grant, `retireConnectionsFor` fails, the row
+ * stands, the gate still passes, and nothing is written to the trail.
+ *
+ * REASON. The row is the only thing in this deployment naming which app this person connected. A
+ * retirement that swallowed the refusal would delete it and report success, and what is left is the
+ * worst state the design admits: a live grant on a departed person's mailbox that no operation here
+ * can reach any more, under an administrator who has been told their access was removed. Dead and
+ * reachable beats live and unreachable, so the failure has to be loud and the row has to survive it.
+ * Repeating the act is the recovery, and repeating it is only possible while the row is there.
+ *
+ * THE GATE IS ASKED AFTERWARDS, not merely the table. "The row exists" and "the row still works"
+ * come apart if a retirement ever clears part of the state before failing, and it is the second
+ * that describes the person's access.
+ */
+test("an offboarding the vendor refuses leaves the connection standing", async () => {
+  await seedApp();
+  vendorRefuses = () => true;
+
+  await expect(store.retireConnectionsFor(askerId, admin)).rejects.toThrow(
+    /would not withdraw/i,
+  );
+
+  // The ask was made and the answer never came, which is the state the row has to survive.
+  expect(asksMade()).toEqual([`revoke:${toolkit}/${askerId}`]);
+  expect(await connectedToolkitsFor(askerId)).toEqual([toolkit]);
+  // No trail row either: `mcp.account_disconnected` says an account ended, and none did.
+  expect(recordedOfType("mcp.account_disconnected")).toHaveLength(0);
+
+  useAnsweringClient();
+  await store.callTool({ ref, args: {}, botId, actorId: askerId });
+  expect(reached).toEqual([actionName]);
+});
+
+/**
+ * THE OFFBOARDING TRAIL CARRIES THE VENDOR'S ANSWER PER APP, AND IN A FIXED ORDER.
+ *
+ * CRITERION. One act, two of this person's apps, the vendor finding an account for one and none for
+ * the other: each row's `vendorRevocationRequested` is the answer about ITS app, and both the asks
+ * and the rows come out in `toolkit` order.
+ *
+ * REASON. This is the same criterion `removeServer` already has a two-person fixture for, on the
+ * other act that ends a brokered connection — and the two paths are separate code with separate
+ * maps, so a fixture on one says nothing about the other. Until now this one was only ever run with
+ * a single connection, which a hardcoded `true` satisfies exactly as well as a passed-through
+ * answer; the field then reads as evidence about every row while describing none of them, which is
+ * what it was renamed away from.
+ *
+ * TWO APPS RATHER THAN TWO PEOPLE, because an offboarding is one person by definition. The map this
+ * path keeps is keyed on the app for the same reason, so the app is where a constant would show.
+ *
+ * INSERTED IN THE WRONG ORDER DELIBERATELY. The expected order is the sorted one, and a read with no
+ * `order by` most often hands back what was inserted — so a fixture inserted in sorted order agrees
+ * with an unordered read by accident and the ordering assertion proves nothing. Inserting the later
+ * name first is what makes the sort the only thing that could have produced the expected answer.
+ */
+test("an offboarding carries the vendor's answer per app, in a fixed order", async () => {
+  await seedApp({ connect: false });
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: secondToolkit, userId: askerId });
+  await database
+    .insert(composioConnections)
+    .values({ toolkit, userId: askerId });
+  vendorFinds = ({ toolkit: asked }) => asked === toolkit;
+
+  expect((await store.retireConnectionsFor(askerId, admin)).retired).toBe(2);
+
+  expect(asksMade()).toEqual([
+    `revoke:${toolkit}/${askerId}`,
+    `revoke:${secondToolkit}/${askerId}`,
+  ]);
+  // Both asks made while both rows still stood: the apps are read off the rows, so a delete between
+  // the two would leave the second revoke with nothing to name.
+  const bothHeld = [`${toolkit}/${askerId}`, `${secondToolkit}/${askerId}`];
+  expect(asks[0].held).toEqual(bothHeld);
+  expect(asks[1].held).toEqual(bothHeld);
+  expect(await connectedToolkitsFor(askerId)).toEqual([]);
+
+  const disconnected = recordedOfType("mcp.account_disconnected");
+  expect(disconnected).toHaveLength(2);
+  // Compared in order rather than as a set, because the order is half the criterion. Not sorted
+  // here either: sorting the answer before comparing it is how an ordering assertion stops being one.
+  expect(
+    disconnected
+      .map(
+        (event) =>
+          event.payload as {
+            server: string;
+            vendorRevocationRequested: boolean;
+          },
+      )
+      .map(({ server, vendorRevocationRequested }) => ({
+        server,
+        vendorRevocationRequested,
+      })),
+  ).toEqual([
+    { server: toolkit, vendorRevocationRequested: true },
+    { server: secondToolkit, vendorRevocationRequested: false },
+  ]);
+});
+
+/**
  * THE ANONYMOUS ACTOR OWNS NOTHING, and `notNull` does not exclude the empty string, so a row at
  * `(toolkit, "")` is legal. Retiring "nobody" must not be what deletes it — that would be an
  * unattributed offboarding reaching a row it cannot possibly own.
@@ -488,23 +692,41 @@ test("retiring nobody retires nothing and leaves the anonymous row alone", async
 /**
  * The fixture above is taken back by the same sweep every other row here is, and by nothing wider.
  *
- * CRITERION. After the sweep, this run holds no `composio_connections` row at all — the one at the
- * anonymous actor included, which none of the person ids that sweep names would reach.
+ * CRITERION. Two halves, and the second is the one that has teeth. After the sweep this run holds
+ * no `composio_connections` row at all — the one at the anonymous actor included, which none of the
+ * person ids that sweep names would reach — AND an anonymous row belonging to somebody else is
+ * still standing.
  *
  * REASON. Brokered connections are removed here by toolkit, so the anonymous row is already
  * covered and needs no second, broader delete to reach it. Asserted rather than read off the code,
  * because the tempting spelling for "take the anonymous row too" is `user_id = ''`, which is every
- * app at once: the sweep that lands on another file's fixture. A test that reddens the moment this
- * file needs a wider delete is what keeps that spelling out.
+ * app at once: the sweep that lands on another file's fixture.
+ *
+ * WHY THE SECOND HALF IS NOT OPTIONAL. "This run's rows are gone" is satisfied just as well by the
+ * wider delete as by the narrow one — a `user_id = ''` sweep takes this run's anonymous row too,
+ * and every assertion about absence goes on passing while the defect it forbids is present. Only a
+ * row the correct sweep must LEAVE BEHIND can tell the two deletes apart, so {@link foreignToolkit}
+ * stands in for one: a row this file inserted, deliberately outside {@link ownedToolkits}, at the
+ * pair another run legitimately holds. It is cleaned up by {@link cleanForeign} rather than by the
+ * sweep under test, for the reason given there.
  */
 test("the sweep takes this run's anonymous row without reaching by actor", async () => {
   await seedApp({ connect: false });
   await database.insert(composioConnections).values({ toolkit, userId: "" });
+  // Somebody else's anonymous row, at an app this file's sweep does not name.
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: foreignToolkit, userId: "" });
   expect(await connectedToolkitsFor("")).toEqual([toolkit]);
 
   await clean();
 
   expect(await connectionsHeld()).toEqual([]);
+  // And the row that was never this sweep's to take is exactly where it was. This is the assertion
+  // a delete keyed on `user_id = ''` fails, and the only one here that it fails.
+  expect(await connectedToolkitsFor("", [foreignToolkit])).toEqual([
+    foreignToolkit,
+  ]);
 });
 
 /**
@@ -551,6 +773,63 @@ test("removing the app takes every brokered connection to it", async () => {
     // And the vendor's own answer about this person's account, passed through.
     vendorRevocationRequested: true,
   });
+});
+
+/**
+ * THE SAME REFUSAL, ON THE OTHER ACT, WHERE MORE IS AT STAKE.
+ *
+ * CRITERION. When the broker will not withdraw a grant, `removeServer` fails, the connection rows
+ * stand, the auth config is not dropped, and the app's own row is still there.
+ *
+ * REASON. The app row is the load-bearing extra. The toolkit is readable in exactly one place — the
+ * slug in `mcp_servers.url` — so an app deleted with its connections still standing is a set of live
+ * grants that nothing in this deployment can name, let alone end. A removal that swallowed the
+ * refusal would do precisely that and report the connector gone. Failing with everything in place
+ * costs a repeat of an administrative act nobody minds repeating.
+ *
+ * AND THE CONFIG STAYS, which is the ordering argument from the other side. The auth config is
+ * dropped last because a live account whose config has already been deleted is access nothing left
+ * here can end; a refusal partway through must not reach that step either.
+ */
+test("an app removal the vendor refuses leaves the app and its connections standing", async () => {
+  await seedApp();
+  vendorRefuses = () => true;
+
+  await expect(store.removeServer(toolkit, admin)).rejects.toThrow(
+    /would not withdraw/i,
+  );
+
+  // The revoke was attempted; nothing after it ran. Asserted as the whole list, because what makes
+  // this pass is as much the `deleteAuthConfig:` that is absent as the `revoke:` that is present.
+  expect(asksMade()).toEqual([`revoke:${toolkit}/${askerId}`]);
+  expect(await connectedToolkitsFor(askerId)).toEqual([toolkit]);
+  expect(recordedOfType("mcp.account_disconnected")).toHaveLength(0);
+  expect(await appsHeld()).toEqual([toolkit]);
+});
+
+/**
+ * REMOVING AN APP NOBODY EVER CONNECTED.
+ *
+ * CRITERION. No revoke reaches the vendor, and the auth config is dropped all the same.
+ *
+ * REASON. The two halves fail in opposite directions and neither had a test. A revoke sent with
+ * nobody to name would be this deployment asking Composio about a person who never connected — the
+ * same defect the anonymous-actor tests forbid on the other act, reached from the other end. And
+ * skipping the vendor entirely because the connection table happened to be empty would strand the
+ * auth config: it is a shape this deployment created at Composio when the app was added, it belongs
+ * to the app and not to anybody's account, and this is the only act that takes it. An app added and
+ * removed without a single person connecting is an ordinary sequence — a trial, a mistake, a
+ * rename — so the config it leaves behind is the ordinary case and not the rare one.
+ */
+test("removing an app nobody connected asks about nobody and still drops the config", async () => {
+  await seedApp({ connect: false });
+
+  await store.removeServer(toolkit, admin);
+
+  expect(asksMade()).toEqual([`deleteAuthConfig:${toolkit}`]);
+  // Nobody's account ended, so nothing claims one did.
+  expect(recordedOfType("mcp.account_disconnected")).toHaveLength(0);
+  expect(await appsHeld()).toEqual([]);
 });
 
 /**
@@ -740,13 +1019,15 @@ test("an unattributed run is recorded as unattributed rather than as a blank", a
 
   const failed = recordedOfType("mcp.call_failed");
   expect(failed).toHaveLength(1);
+  // Both fields, exactly. `reachedAs` is "unattributed" and so by that very assertion is not
+  // "deployment": this call did not go out on a shared credential, it did not go out at all, and
+  // saying the deployment reached the app would assert an attribution that never happened. A
+  // separate `not.toBe("deployment")` below this would be that same claim restated more weakly,
+  // green for every wrong value but one.
   expect(failed[0].payload).toMatchObject({
     actor: "unattributed",
     reachedAs: "unattributed",
   });
-  // Not "deployment" either: this call did not go out on a shared credential, it did not go out at
-  // all, and saying the deployment reached the app would assert an attribution that never happened.
-  expect(failed[0].payload.reachedAs).not.toBe("deployment");
 });
 
 /**
