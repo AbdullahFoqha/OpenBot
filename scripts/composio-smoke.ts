@@ -3,10 +3,26 @@
  *
  * `server/tests/composio-live.test.ts` asks what the vendor does; this asks what THIS KEY can see.
  * They are different questions and only the second one is about an operator's own account: a key
- * with no project behind it, a project with no auth config for the app, or a person who never
- * finished the consent page all produce a product that looks configured and answers nothing. So
- * everything below is a read, and every read is one an operator would otherwise make by clicking
- * around Composio's dashboard and guessing which of the three it was.
+ * with no project behind it, a project that cannot see the app, or a person who never finished the
+ * consent page all produce a product that looks configured and answers nothing. So everything below
+ * is a read, and every read is one an operator would otherwise make by clicking around Composio's
+ * dashboard.
+ *
+ * IT SEPARATES TWO STATES AND NOT THREE, WHICH IS A CORRECTION TO WHAT THIS DOCBLOCK USED TO CLAIM.
+ * The promise was that a key with no project, an app with no authorization config, and an unfinished
+ * consent were told apart. Two of those are: the catalogue read answers for the KEY, and the
+ * connection read answers for the PERSON. The third was never delivered — nothing here reads an auth
+ * config, so an app this deployment has no config for and a person who never consented both print
+ * the same "no live connection" line, and the line now names both rather than asserting the second.
+ *
+ * IT IS NOT READ BECAUSE THERE IS NOTHING HERE TO READ IT WITH, AND THAT IS THE HONEST REASON.
+ * `server/src/plugins/broker.ts` gives this script `ensureAuthConfig` and `deleteAuthConfig`, both of
+ * which WRITE, and no listing at all; a diagnostic that called the first would create the very object
+ * it was asked whether anybody had created, and a read-only diagnostic may not do that. Making the
+ * distinction real therefore means a new read on that seam and in its adapter — a change to
+ * `server/src`, not to this file, and one nobody should infer from a docblock. Until it exists, an
+ * operator separates the two on the app's page under `/admin/plugins`, which is where enabling an app
+ * creates the config.
  *
  *     COMPOSIO_API_KEY=... bun run composio:smoke -- --user <id> [--call]
  *
@@ -21,9 +37,12 @@
  * every line this script writes goes through {@link redact}, which takes it back out. That is belt
  * and braces on purpose: the adapter promises not to quote the key, but a vendor exception is a
  * foreign object and "this SDK does not put the key in an error" is not a promise this file is in a
- * position to make on the SDK's behalf. Which is why no vendor call below is awaited bare — an
- * unhandled rejection is printed by the runtime rather than by this file, and that is the one way
- * out past the redactor. {@link ask} is what closes it.
+ * position to make on the SDK's behalf. Which is why NO vendor call below is made bare — an
+ * unhandled rejection, or a synchronous throw nothing caught, is printed by the runtime rather than
+ * by this file, and that is the one way out past the redactor. {@link ask} closes it for the reads,
+ * which are awaited, and {@link build} closes it for the client constructor, which is not: it was
+ * the single call still outside the guarantee, and "every vendor call except one" is not a promise
+ * worth making.
  *
  * WHICH STREAM A LINE GOES TO IS DECIDED BY THE EXIT CODE IT EXPLAINS, and that is the whole rule:
  *
@@ -166,21 +185,54 @@ function stop(line: string, code: number): never {
  * AND THE PLACEHOLDER IS REFUSED HERE TOO, which is the half this file was missing. The fallback
  * used to be `error.message` unconditionally — so on the one path where the placeholder is what
  * `error.message` holds, a docblock saying the sentence is never worth passing on sat directly
- * above the code that passed it on. {@link VENDOR_PLACEHOLDER} and {@link unexplained} are the same
- * two the transport uses at the same fork, imported rather than re-spelled so this file cannot
- * drift from `callTool`'s wording about a failure Composio declined to explain.
+ * above the code that passed it on. {@link VENDOR_PLACEHOLDER} is the same guard the transport uses
+ * at the same fork, imported rather than re-spelled so this file cannot drift from `callTool`'s
+ * reading of a failure Composio declined to explain.
+ *
+ * WHAT TO SAY IN THAT SILENCE IS THE CALLER'S TO DECIDE, WHICH IS WHY IT IS A PARAMETER. It used to
+ * be {@link unexplained} for everybody, and that function's sentence is about a person's connection
+ * — correct for the one caller that hands it an action's name, wrong for every caller that hands it
+ * a step. A single fallback could only be right for one of the two, so the fork that already exists
+ * at the call sites decides it: {@link ask} passes {@link unexplainedRead} and the action call
+ * passes {@link unexplained}. Named rather than inlined so each sentence keeps a docblock saying who
+ * it is for.
  *
  * The thrown message is still the fallback where it says anything at all, because a failure that is
  * not a Composio throw — DNS, a proxy, a TLS refusal — carries its whole diagnosis there.
  */
-function failed(subject: string, error: unknown): string {
+function failed(
+  subject: string,
+  error: unknown,
+  silence: (subject: string) => string,
+): string {
   const vendor = vendorSentence(error);
   if (vendor !== null) return `${subject} failed: ${vendor}`;
   const thrown =
     error instanceof Error ? error.message.trim() : String(error).trim();
   return thrown === "" || VENDOR_PLACEHOLDER.test(thrown)
-    ? unexplained(subject)
+    ? silence(subject)
     : `${subject} failed: ${thrown}`;
+}
+
+/**
+ * What to say when one of this script's READS failed and Composio explained nothing.
+ *
+ * NOT {@link unexplained}, AND THAT IS THE CORRECTION. That sentence ends "Check that this app is
+ * still connected on its Plugins page", which is the right advice for what it was written for — a
+ * named ACTION that failed, where a lapsed connection is the likeliest cause by a wide margin and
+ * the reader fixes it in two clicks. Every {@link ask} below was handing it a STEP instead, so
+ * "Listing the apps this key can see" and "Listing gmail's actions" both answered with advice about
+ * one person's connection. A catalogue that will not list and a key Composio has stopped accepting
+ * are faults in the deployment, and the person whose connection that sentence sends the reader to
+ * inspect is the one party who cannot do anything about either.
+ *
+ * SO IT NAMES THE TWO THINGS ACTUALLY IN QUESTION AT THIS STAGE, in the order worth checking: the
+ * key this deployment sent, then Composio itself. By the time any read here runs, nothing about
+ * anybody's connection has been established or is implicated — the catalogue read does not involve a
+ * person at all.
+ */
+function unexplainedRead(step: string): string {
+  return `${step} failed and Composio did not say why. At this stage that is a fault in the key this deployment sent or at Composio, and not in anybody's connection: check COMPOSIO_API_KEY on this deployment, then Composio's status page.`;
 }
 
 /**
@@ -200,11 +252,46 @@ async function ask<T>(attempt: string, read: () => Promise<T>): Promise<T> {
   try {
     return await read();
   } catch (error) {
-    stop(failed(attempt, error), 1);
+    stop(failed(attempt, error, unexplainedRead), 1);
   }
 }
 
-const { actions, broker } = createComposioClient(key);
+/**
+ * {@link ask} for something that is not awaited, which at present is exactly one call.
+ *
+ * THE CLIENT CONSTRUCTOR WAS THE ONE VENDOR CALL OUTSIDE THE REDACTOR. Everything else in this file
+ * goes through {@link ask}, whose whole purpose is that no thrown vendor object is printed by the
+ * runtime instead of by this file — and `createComposioClient` sat bare above it, so a throw there
+ * went straight past the guarantee this file's own docblock makes about never printing the key.
+ * `ask` could not cover it because `ask` awaits and this does not, so the shape is repeated
+ * synchronously rather than the call being made to look asynchronous.
+ *
+ * WHAT IT CAN ACTUALLY THROW WAS CHECKED BEFORE THIS WAS ADDED, AND THE ANSWER IS "ONE THING, NOT
+ * REACHABLE FROM HERE". `new Composio(...)` validates nothing but the key: `getSDKConfig` raises
+ * `ComposioNoAPIKeyError` when the key is empty after falling back to the environment and the user
+ * config file, and everything after that is object construction (`@composio/core` 0.18.1,
+ * `src/composio.ts`). The refusal above means this file never hands it an empty one, and that error's
+ * message quotes no key even when it is raised. A malformed `COMPOSIO_BASE_URL` does NOT throw here
+ * either — it is carried to the first request and fails there, inside {@link ask} already.
+ *
+ * SO THIS IS BELT AND BRACES, AND DELIBERATELY SO. The file's guarantee is that the key cannot reach
+ * a terminal, and the docblock at the top says why it will not rest that guarantee on the SDK's
+ * behaviour: a vendor exception is a foreign object, the constructor runs their telemetry
+ * instrumentation and their provider's constructor, and the audit above is true of 0.18.1 rather
+ * than of the next version. A guard that costs four lines makes the promise structural instead of
+ * something a reader has to re-derive from the vendor's source every bump.
+ */
+function build<T>(attempt: string, make: () => T): T {
+  try {
+    return make();
+  } catch (error) {
+    stop(failed(attempt, error, unexplainedRead), 1);
+  }
+}
+
+const { actions, broker } = build("Opening Composio with this key", () =>
+  createComposioClient(key),
+);
 
 const apps = await ask("Listing the apps this key can see", () =>
   broker.listApps(),
@@ -249,10 +336,19 @@ const connected = await ask(
   `Asking whether ${user} has a ${APP} connection`,
   () => broker.isConnected({ userId: user, toolkit: APP }),
 );
+/*
+ * BOTH STATES ARE NAMED BECAUSE THIS READ CANNOT TELL THEM APART. `isConnected` is a count of this
+ * person's ACTIVE accounts for the app, so it answers `false` for somebody who never consented and
+ * equally for an app this deployment has no authorization config for — in the second case there is
+ * nothing for a consent to have been made against, and nobody could have connected even if they
+ * tried. Sending the reader to the person in that case is sending them to the one party who cannot
+ * fix it. See the docblock at the top for why the config is not read here and what reading it would
+ * take.
+ */
 say(
   connected
     ? `${user} has a live ${APP} connection.`
-    : `${user} has no live ${APP} connection. They connect one in their own browser, from the app's page in the product; nothing here can do it for them.`,
+    : `${user} has no live ${APP} connection, and this script cannot say which of two reasons it is. Either no administrator has enabled ${APP} on this deployment, so there is no authorization config for anybody to connect against — check the app's page under /admin/plugins — or the app is enabled and ${user} never finished the consent page, which they do in their own browser; nothing here can do it for them.`,
 );
 
 if (!call) {
@@ -331,7 +427,12 @@ try {
     {},
   );
 } catch (error) {
-  stop(failed(READ_ACTION, error), 1);
+  /*
+   * {@link unexplained} rather than {@link unexplainedRead}, and this is the one call site it was
+   * written for: the subject is an action's name, and a connection that lapsed between the listing
+   * above and this call really is the likeliest reason a run that got this far fails here.
+   */
+  stop(failed(READ_ACTION, error, unexplained), 1);
 }
 
 /*

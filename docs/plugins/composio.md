@@ -59,8 +59,18 @@ COMPOSIO_API_KEY=... bun run composio:smoke -- --user <id> [--call]
 says why. It ships inside the container image, so it is run where the key is — in the deployment,
 not on a laptop — and it answers the question no page can: whether *this* key opens *this* project. A
 key with no project behind it, a project with no authorization config for the app, and a person who
-never finished the consent page all leave a product that looks configured and answers nothing, and
-this is what tells the three apart.
+never finished the consent page all leave a product that looks configured and answers nothing.
+
+**It separates the key from the person, which is two of those three and not all of them.** The
+catalogue read answers for the key: a key Composio rejects, and a project whose catalogue does not
+carry the app, both stop the run with the vendor's own sentence. The connection read answers for the
+person. What it does not separate is the authorization config — an app no administrator has enabled
+here has no config for anybody to connect against, so it reads exactly like a person who never
+finished consenting, and the no-connection line says so rather than blaming the person. Check the
+app's page under `/admin/plugins` to tell those two apart; enabling an app is what creates the
+config. Making the script itself distinguish them would need a read-only auth-config listing on the
+broker seam, which does not exist yet — the seam has `ensureAuthConfig` and `deleteAuthConfig`, both
+of which write, and a read-only diagnostic must not create the object it was asked to look for.
 
 It is all reads. It mints no connect link and starts no session, because a link is a bearer
 capability and a diagnostic that printed one would leave somebody's mailbox in a terminal scrollback.
