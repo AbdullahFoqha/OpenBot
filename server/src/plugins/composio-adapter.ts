@@ -104,20 +104,29 @@ type VendorTool = {
  * anything in them and a union would be another guess. `unknown` is the type that forces the
  * reader to say what it does with a value it has not checked, which is the whole point.
  *
- * `slug` IS AS WIDE AS `name` NOW, AND FOR THE SAME REASON. It was left narrow while the other
- * fields were widened, on no argument that distinguishes it: `ToolKitItemSchema` spells it required
- * and the warn-only `transform()` above copies it across whatever it turns out to be, exactly as it
- * does the name. A slug is the only name this deployment has for an app — it is what enabling one
- * records and what every later call names — so the one it must not quietly become is `undefined`
- * read as a string. {@link appOf} has refused that since the sweep; the declaration says so now.
+ * `slug` IS AS WIDE AS `name`, AND FOR THE SAME REASON. `ToolKitItemSchema` spells it required and
+ * the warn-only `transform()` above copies it across whatever it turns out to be, exactly as it does
+ * the name. A slug is the only name this deployment has for an app — it is what enabling one records
+ * and what every later call names — so the one it must not quietly become is `undefined` read as a
+ * string. {@link appOf} refuses that.
+ *
+ * EVERY WIRE-VALUED FIELD IS `unknown` AND EVERY STRUCTURAL ONE IS NOT, which is the split the whole
+ * file now turns on. `meta`, its `categories` array and each entry in it are built by
+ * `transformToolkitListResponse` itself (`src/utils/transformers/toolkits.ts:21-34`) — it reads
+ * `item.meta.categories` and maps each category into `{ slug, name }` — so a row with no meta, a
+ * `categories` that is not a list, and a category that is not an object all fail INSIDE that
+ * function and reach nothing here. Those three are guarantees. What the same lines copy across
+ * verbatim — the name, the slug, the description, the logo, each category's name and the count — is
+ * worth exactly what the wire is worth, so all of it is `unknown` or nullable and {@link appOf}
+ * says what it does with each.
  */
 type VendorToolkit = {
-  slug?: string | null;
-  name?: string | null;
+  slug?: unknown;
+  name?: unknown;
   meta: {
     description?: unknown;
-    logo?: string | null;
-    categories?: { name?: string | null }[];
+    logo?: unknown;
+    categories?: { name?: unknown }[];
     toolsCount?: unknown;
   };
 };
@@ -144,16 +153,21 @@ type VendorToolkit = {
  * enum does not contain reaches the choice of config to connect against — where "not ENABLED" and
  * "disabled" are different facts and only one of them is worth telling an operator.
  *
- * `id` IS NOW DECLARED THE SAME WAY, AND THE GUARD IT WAS WAITING FOR IS WRITTEN. It was left narrow
- * on the argument that widening belongs beside the check rather than ahead of one; {@link configOf}
- * makes that check, so the declaration no longer claims more than the wire promises. It is the one
- * of the three whose absence sends a request: a delete named with `undefined` asks Composio to
- * remove whatever it cares to, and this deployment then records that the app was withdrawn.
+ * `id` IS DECLARED THE SAME WAY, AND THE GUARD IT WAS WAITING FOR IS WRITTEN. {@link configOf} makes
+ * that check, so the declaration no longer claims more than the wire promises. It is the one of the
+ * three whose absence sends a request: a delete named with `undefined` asks Composio to remove
+ * whatever it cares to, and this deployment then records that the app was withdrawn.
+ *
+ * THE ROW BEING AN OBJECT AT ALL IS THE ONE THING THAT IS NOT IN DOUBT.
+ * `transformAuthConfigRetrieveResponse` reads `authConfig.toolkit.logo` while building every row
+ * (`@composio/core` 0.18.1, `src/utils/transformers/authConfigs.ts:41`), so a row that is not an
+ * object raises a `TypeError` inside the vendor's own code and never arrives. All three fields
+ * below are `unknown` for the opposite reason: the same function copies them across verbatim.
  */
 type VendorAuthConfig = {
-  id?: string | null;
-  name?: string | null;
-  status?: string;
+  id?: unknown;
+  name?: unknown;
+  status?: unknown;
 };
 
 /**
@@ -176,20 +190,32 @@ type VendorAccountStatus =
   | "REVOKED";
 
 /*
- * WHY EVERY LISTING BELOW IS READ OUT OF `unknown` AND NOT OUT OF THE TYPES ABOVE.
+ * WHERE THE LINE BETWEEN "READ AT ITS TYPE" AND "READ OUT OF `unknown`" IS DRAWN, AND WHY IT MOVED.
  *
- * The declarations on {@link ComposioVendor} say what the SDK MEANS to send, and each row type says
- * at length why that is not the same as what arrives: `transform()` validates with `safeParse`,
- * logs a warning where it fails, and returns the unvalidated object anyway (`@composio/core`
- * 0.18.1, `src/utils/transform.ts:26-36`). So the declarations are kept — they are the contract a
- * version bump is read against, and they are what makes an unchecked read fail to compile — and the
- * value itself is checked here before any field is taken off it.
+ * Everything below used to be read out of `unknown` — containers and fields alike — on one argument:
+ * `transform()` validates with `safeParse`, logs a warning where it fails, and returns the
+ * unvalidated object anyway (`@composio/core` 0.18.1, `src/utils/transform.ts:26-36`), so a
+ * TypeScript declaration over a wire value is an assertion and not a check.
  *
- * REFUSING RATHER THAN FILLING IN, WHICH IS THE WHOLE OF THE ARGUMENT. A `?? ""`, a `String(x)` or
- * a cast does not make a malformed answer safe; it converts a fault this deployment could have
- * reported into an answer it gives wrongly, and the wrong answers are not small ones — an app with
- * no name in an administrator's picker, an action with no slug put in front of a model, and the one
- * that was actually happening: a delete sent with `undefined` where an account id belongs,
+ * THAT ARGUMENT IS TRUE OF THE FIELDS AND FALSE OF THE SHAPES AROUND THEM, which a round of running
+ * the SDK against malformed answers established rather than reasoned about. `transform()` returns
+ * whatever its TRANSFORMER built, and every one of these transformers builds its result by
+ * dereferencing the raw answer — `response.items.map(...)`, `item.meta.categories`,
+ * `authConfig.toolkit.logo`, `response.auth_config.id`. So the containers and the rows inside them
+ * are the vendor's own construction and cannot arrive malformed; only the values copied ACROSS
+ * those lines can, and those are exactly the fields declared `unknown` above. Guards were written
+ * for both halves, and the ones covering the shapes were branches no answer could reach, standing
+ * where the next reader would take them for what was keeping them safe.
+ *
+ * WHAT KEEPS THEM SAFE IS `askVendor`. A shape the SDK could not read raises inside the SDK, and
+ * the `TypeError` row in {@link vendorRefusal} turns that into a sentence — one guard, at the layer
+ * where the fault actually surfaces, covering every shape rather than the four somebody listed.
+ *
+ * REFUSING RATHER THAN FILLING IN, WHICH IS THE WHOLE OF THE ARGUMENT FOR THE FIELDS. A `?? ""`, a
+ * `String(x)` or a cast does not make a malformed answer safe; it converts a fault this deployment
+ * could have reported into an answer it gives wrongly, and the wrong answers are not small ones —
+ * an app with no name in an administrator's picker, an action with no slug put in front of a model,
+ * and the one that was actually happening: a delete sent with `undefined` where an account id belongs,
  * answered by Composio however it likes, after which the audit trail records that a person's access
  * was withdrawn and nothing had been. Every reader below therefore answers null on anything it
  * cannot read, and every caller turns that null into a sentence naming what Composio sent.
@@ -242,32 +268,32 @@ function named(value: unknown): string {
   return text === "" ? sent(value) : `"${text}"`;
 }
 
-/**
- * One listing row as its fields, and a type predicate so that nothing below needs a cast.
+/*
+ * THE CONTAINER OF A LISTING IS THE ONE THING BELOW THAT IS NOT READ OUT OF `unknown`, AND THE
+ * REASON IS THAT THE SDK PROVES IT.
  *
- * Arrays are excluded deliberately. `typeof [] === "object"` and every field read off one answers
- * `undefined`, so a listing of lists would otherwise arrive here as a listing of rows that are
- * missing every field — which is a worse sentence for the same fault.
- */
-function hasFields(row: unknown): row is Record<string, unknown> {
-  return typeof row === "object" && row !== null && !Array.isArray(row);
-}
-
-/**
- * The rows inside an envelope the vendor answers with, or null where it answered something else.
+ * There used to be a `hasFields` predicate and an `itemsOf` reader here, and every listing passed
+ * its answer through them before touching a field — on the argument the row types give at length,
+ * that a TypeScript interface over a wire value is an assertion rather than a check. That argument
+ * is correct about the FIELDS and wrong about the CONTAINER, which running `@composio/core` 0.18.1
+ * settles rather than reasons about. Every list transformer dereferences the answer before
+ * returning it: `response.items.map(...)` in `transformAuthConfigListResponse`
+ * (`src/utils/transformers/authConfigs.ts:79`), in `transformConnectedAccountListResponse`
+ * (`connectedAccounts.ts:113`) and in `getRawComposioTools` (`models/Tools.ts:561`), and
+ * `item.meta.categories` inside the catalogue's own map (`toolkits.ts:27`). So a container of the
+ * wrong shape — null, a bare list where an envelope belongs, an `items` that is a string — dies
+ * inside the vendor's code and NEVER arrives here. Each of those guards was therefore a branch no
+ * input could reach, sitting where the next reader would take it for the thing keeping them safe.
  *
- * THE TWO CONTAINER SHAPES ARE NOT INTERCHANGEABLE AND COMPOSIO USES BOTH. Toolkits and tools come
- * back as bare arrays; auth configs and connected accounts come back as `{ items, nextCursor }`. So
- * one where the other belongs is a vendor change rather than a quirk to absorb — and it is the
- * change that hides best, because `[].items` is `undefined` rather than an error and a bare list
- * where an envelope belongs therefore used to read as an envelope with nothing in it: no configs to
- * connect against, no accounts to withdraw, and a confident answer either way.
+ * WHAT KEEPS THEM SAFE IS ONE LAYER DOWN NOW. The vendor's crash is a bare `TypeError`, and
+ * {@link vendorRefusal} translates it into a sentence naming what did not happen and the one act
+ * that changes it — which catches every malformed container, including the shapes nobody here
+ * thought to enumerate.
+ *
+ * SO THE DECLARATIONS BELOW ARE READ AT THEIR TYPES, and each one says which vendor line makes it
+ * true. The fields inside them stay `unknown`, because the warn-only `transform()` really does copy
+ * those across whatever they turn out to be.
  */
-function itemsOf(answer: unknown): unknown[] | null {
-  if (!hasFields(answer)) return null;
-  const items = answer.items;
-  return Array.isArray(items) ? items : null;
-}
 
 /**
  * One field as the non-empty string it has to be, or null where the vendor sent anything else.
@@ -278,13 +304,6 @@ function itemsOf(answer: unknown): unknown[] | null {
  */
 function textOf(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value : null;
-}
-
-/** Whether a field is the list of strings it is declared to be, all the way through. */
-function isTextList(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) && value.every((entry) => typeof entry === "string")
-  );
 }
 
 /**
@@ -344,24 +363,30 @@ type Listing = {
  * {@link everyRowOf}'s callers spread for: a `cursor: undefined` would reach the vendor's `parse`
  * as a key, and an explicit undefined is not something this file needs to make the SDK have an
  * opinion about.
+ *
+ * THERE WAS A FOURTH REFUSAL AND IT IS GONE, which is worth saying because it was the one that read
+ * as the most important. It stood at the top of the loop for a page that is not an envelope at all,
+ * and no answer could reach it: both transformers begin `response.items.map(...)`
+ * (`src/utils/transformers/authConfigs.ts:79`, `connectedAccounts.ts:113`), so a null, a bare list
+ * and an `items` that is not one all raise a `TypeError` inside the vendor's own code. That is now
+ * answered where it happens — see the `TypeError` row in {@link vendorRefusal} — which is both a
+ * sentence the old branch could never have produced and a check that covers shapes nobody here
+ * enumerated. What is left below are the three faults the vendor CAN hand over, all of them about
+ * the cursor, because the cursor is the one field these transformers copy off the wire unchecked.
  */
-async function everyRowOf(
+async function everyRowOf<Row>(
   listing: Listing,
-  page: (cursor: string | undefined) => Promise<unknown>,
-): Promise<unknown[]> {
-  const rows: unknown[] = [];
+  page: (
+    cursor: string | undefined,
+  ) => Promise<{ items: Row[]; nextCursor?: unknown }>,
+): Promise<Row[]> {
+  const rows: Row[] = [];
   const followed = new Set<string>();
   let cursor: string | undefined;
 
   for (;;) {
-    const answered: unknown = await page(cursor);
-    const items = itemsOf(answered);
-    if (items === null) {
-      throw new BrokerRefusalError(
-        `Composio answered ${listing.noun} with ${sent(answered)} where a list of them belongs, so ${listing.consequence}. ${VENDOR_SHAPE_REMEDY}`,
-      );
-    }
-    rows.push(...items);
+    const answered = await page(cursor);
+    rows.push(...answered.items);
 
     /*
      * ABSENT AND NULL BOTH MEAN THE END, and they are the two the vendor actually sends: the
@@ -371,7 +396,7 @@ async function everyRowOf(
      * exists to prevent — one page treated as the whole answer, by a reader that had been told
      * otherwise in a way it did not understand.
      */
-    const next = hasFields(answered) ? answered.nextCursor : undefined;
+    const next = answered.nextCursor;
     if (next === undefined || next === null) return rows;
 
     const follow = textOf(next);
@@ -416,14 +441,18 @@ async function everyRowOf(
  * screen, exactly as it did before. What is refused is the other thing: a field that is PRESENT and
  * is not what it is declared to be. A count that arrived as the string "63" is not a count, and
  * `Number(x)` over it would turn a vendor change into a plausible figure nobody would question.
+ *
+ * WHAT IS NOT CHECKED IS THE ROW'S SHAPE, AND THAT IS THE SDK RATHER THAN AN OVERSIGHT. Two
+ * refusals used to open this function — one for a row that is not an object, one for a row with no
+ * meta — and neither could be reached: `transformToolkitListResponse` reads `item.meta.categories`
+ * while building each row (`@composio/core` 0.18.1, `src/utils/transformers/toolkits.ts:27`), and
+ * `Toolkits.getToolkits` wraps the whole thing in a try that rethrows everything as
+ * `ComposioToolkitFetchError` (`src/models/Toolkits.ts:70-82`). So a catalogue this deployment
+ * cannot read never becomes a row here at all; it becomes that vendor class, whose bare "Failed to
+ * fetch toolkits" and whose key-or-status-page remedy are what the route's default already says.
  */
-function appOf(row: unknown, position: number): BrokerApp {
+function appOf(row: VendorToolkit, position: number): BrokerApp {
   const at = `row ${position + 1} of Composio's app catalogue`;
-  if (!hasFields(row)) {
-    throw new BrokerRefusalError(
-      `Composio sent ${sent(row)} as ${at}, where an app belongs, so the directory was not shown. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
 
   const slug = textOf(row.slug);
   if (slug === null) {
@@ -439,12 +468,14 @@ function appOf(row: unknown, position: number): BrokerApp {
     );
   }
 
+  /*
+   * `meta` IS TAKEN AS AN OBJECT RATHER THAN CHECKED FOR ONE, and the reason is one line of vendor
+   * code: `transformToolkitListResponse` reads `item.meta.categories` while it builds this row
+   * (`@composio/core` 0.18.1, `src/utils/transformers/toolkits.ts:27`), so a row whose meta is
+   * absent or null raises there and is answered as the vendor-shape fault it is. The refusal that
+   * used to stand here could not be reached by any answer Composio can send.
+   */
   const meta = row.meta;
-  if (!hasFields(meta)) {
-    throw new BrokerRefusalError(
-      `Composio sent ${sent(meta)} where ${slug}'s meta belongs, which is where its description, logo, categories and action count all live. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
 
   const description = meta.description ?? "";
   if (typeof description !== "string") {
@@ -460,17 +491,19 @@ function appOf(row: unknown, position: number): BrokerApp {
     );
   }
 
-  const published = meta.categories ?? [];
-  if (!Array.isArray(published)) {
-    throw new BrokerRefusalError(
-      `Composio sent ${sent(meta.categories)} where ${slug}'s categories belong. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
-  const categories = published.map((entry: unknown, index: number) => {
-    const label = hasFields(entry) ? textOf(entry.name) : null;
+  /*
+   * THE LIST AND EACH ENTRY IN IT ARE THE TRANSFORMER'S OWN CONSTRUCTION, so neither is checked and
+   * both used to be. `item.meta.categories?.map(category => ({ slug: category.id, name:
+   * category.name }))` is what fills this field (`src/utils/transformers/toolkits.ts:27-30`): a
+   * `categories` that is not a list has no `.map` and dies there, a category that is null throws on
+   * `.id`, and everything that survives is an object this file did not have to hope for. What the
+   * line copies verbatim is the NAME, which is why that is the one thing still read.
+   */
+  const categories = (meta.categories ?? []).map((entry, index) => {
+    const label = textOf(entry.name);
     if (label === null) {
       throw new BrokerRefusalError(
-        `Composio sent ${sent(hasFields(entry) ? entry.name : entry)} where the name of ${slug}'s category ${index + 1} belongs. The catalogue shows an app's categories as the words a person chooses by, so a category with no name is a blank one of those. ${VENDOR_SHAPE_REMEDY}`,
+        `Composio sent ${sent(entry.name)} where the name of ${slug}'s category ${index + 1} belongs. The catalogue shows an app's categories as the words a person chooses by, so a category with no name is a blank one of those. ${VENDOR_SHAPE_REMEDY}`,
       );
     }
     return label;
@@ -513,16 +546,11 @@ type CheckedAuthConfig = {
  * anybody had connected against it.
  */
 function configOf(
-  row: unknown,
+  row: VendorAuthConfig,
   position: number,
   toolkit: string,
 ): CheckedAuthConfig {
   const at = `row ${position + 1} of Composio's authorization configs for ${toolkit}`;
-  if (!hasFields(row)) {
-    throw new BrokerRefusalError(
-      `Composio sent ${sent(row)} as ${at}, where a config belongs. This listing is what decides whether a config is created, connected against or deleted, so a row it cannot read is not a row it may pass over. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
 
   const id = textOf(row.id);
   if (id === null) {
@@ -542,59 +570,91 @@ function configOf(
 }
 
 /**
- * One connected-account row checked down to the only field anything here reads.
+ * This person's accounts split into the ones a withdrawal can name and the ones it cannot.
  *
- * THIS IS THE MOST LOAD-BEARING OF THESE READERS AND THE ONE WHOSE ABSENCE WAS DOING REAL DAMAGE.
+ * THE ID IS THE WHOLE OF WHAT A WITHDRAWAL NAMES, which is why it is read at all.
  * {@link ComposioBroker.revoke} deletes by id and then answers `true`, and `store.ts` writes that
  * answer into the audit trail as this person's access having been withdrawn before deleting the one
- * row in this deployment that names which app they had connected. An id-less account reaching the
+ * row in this deployment naming which app they had connected. An id-less account reaching the
  * delete is a request to withdraw `undefined` — which the vendor is free to read as anything at all
  * — followed by a `true`, a trail entry, and a live grant with nothing left pointing at it.
+ *
+ * PARTITIONED RATHER THAN THROWN, AND THAT IS THE CORRECTION. This reader used to refuse, and the
+ * caller mapped EVERY row through it before sending a single delete — so one row whose id Composio
+ * omitted threw ahead of the first withdrawal, and the next attempt met the same row and threw in
+ * the same place. A person with three grants and one unreadable row could not withdraw any of them,
+ * ever, while being told to try again. That replaced a false success with a permanent block, which
+ * is the same defect pointing the other way.
+ *
+ * WHAT A PERSON IS OWED IS BOTH HALVES: every grant this deployment CAN name withdrawn, and a
+ * sentence counting the ones it cannot. The second half is not a thing they can retry — the row
+ * will be unreadable next time too — so the refusal names the dashboard rather than the button
+ * they just pressed.
+ *
+ * A ROW THAT IS NOT AN OBJECT IS NOT A CASE HERE, and that is the SDK's doing rather than an
+ * omission. `transformConnectedAccountResponse` reads `response.auth_config.id` while building
+ * every row (`@composio/core` 0.18.1, `src/utils/transformers/connectedAccounts.ts:60`), so a
+ * non-object row raises a `TypeError` inside the vendor's own code and never reaches this function
+ * — see the `TypeError` row in {@link vendorRefusal}, which is where that answer is now given.
  */
-function accountIdOf(row: unknown, position: number, toolkit: string): string {
-  const at = `row ${position + 1} of Composio's ${toolkit} accounts for this person`;
-  if (!hasFields(row)) {
-    throw new BrokerRefusalError(
-      `Composio sent ${sent(row)} as ${at}, where an account belongs. Whether this person is connected and what there is to withdraw are both read off this listing, so a row it cannot read is answered with neither. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
+function withdrawableAccounts(
+  rows: { id?: unknown }[],
+  toolkit: string,
+): { ids: string[]; nameless: BrokerRefusalError[] } {
+  const ids: string[] = [];
+  const nameless: BrokerRefusalError[] = [];
 
-  const id = textOf(row.id);
-  if (id === null) {
-    throw new BrokerRefusalError(
-      `Composio sent ${sent(row.id)} where the id of ${at} belongs, and the id is the whole of what a withdrawal names. Nothing was sent, because a delete without one is a request this deployment cannot describe, after which the audit trail would record that this person's access had ended while their grant stood. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
+  rows.forEach((row, position) => {
+    const id = textOf(row.id);
+    if (id === null) {
+      nameless.push(
+        new BrokerRefusalError(
+          `Composio sent ${sent(row.id)} where the id of row ${position + 1} of its ${toolkit} accounts for this person belongs, and the id is the whole of what a withdrawal names. Nothing was sent for that account, because a delete without one is a request this deployment cannot describe, after which the audit trail would record that this person's access had ended while their grant stood. ${VENDOR_SHAPE_REMEDY}`,
+        ),
+      );
+      return;
+    }
+    ids.push(id);
+  });
 
-  return id;
+  return { ids, nameless };
 }
 
 /**
- * One tool row checked into the action this deployment holds, or a refusal saying why not.
+ * One tool row as the action this deployment holds, with the one check the SDK's schema leaves open.
  *
- * CHECKED DESPITE {@link VendorTool}'s ARGUMENT THAT THIS ONE ROW IS VALIDATED. That argument is
- * sound about the SDK — `transformToolCases` ends in a throwing `ToolSchema.parse` rather than the
- * warn-only `transform()` everything else here goes through — and it is an argument about the
- * vendor's code rather than about this deployment's. A schema is one version away from being
- * relaxed, and the difference in cost between the two sides is not close: the check is a few
- * comparisons per action, and what it stands between is `inputParameters` going in front of a model
- * as the vendor's own schema when it is not a schema at all.
+ * THIS IS THE ONE ROW HERE THAT THE VENDOR REALLY DOES VALIDATE, AND THE FILE USED TO CHECK IT
+ * TWICE. `transformToolCases` ends in `ToolSchema.parse(...)` — a THROWING parse rather than the
+ * warn-only `transform()` every other listing goes through (`@composio/core` 0.18.1,
+ * `src/models/Tools.ts:193`) — and both calls this file makes run through it (`:561` for the
+ * listing, `:719` for the single tool). So a tool whose description is a number, whose
+ * `inputParameters` is a string of JSON, whose tags are not all labels, whose version is a number,
+ * or which is not an object at all, does not arrive as a malformed row: it arrives as a `ZodError`,
+ * which `./composio`'s `isSchemaMismatch` already recognises and answers with the same package
+ * remedy. Five refusals stood here for those five shapes and not one of them could be reached.
+ *
+ * THE SCHEMA IS PREFERRED RATHER THAN COPIED, which is what deleting them means. Re-running
+ * `ToolSchema` here would be the same parse a second time and could no more fail than the branches
+ * it replaced; what makes the schema worth resting on is that the SDK enforces it, and
+ * {@link VendorTool} is that enforcement written down as the type this function takes.
+ *
+ * WHAT THE SCHEMA DOES NOT SETTLE IS THE ONE CHECK LEFT. `slug: z.string()` is satisfied by the
+ * empty string, and an action's slug is not a label: it becomes `mcp_tools.name`, which is NOT NULL
+ * and half that table's primary key, it is what a grant points at, and it is what a later call
+ * sends back to Composio. An empty one is a row that cannot be written and a call that names
+ * nothing, so it is refused here — the only shape of this row a passing `ToolSchema.parse` still
+ * admits.
  *
  * A PLAIN `Error` RATHER THAN A `BrokerRefusalError`, because this listing's failures are not
  * answered to a route. `./composio` records them in an app's `lastError` for an administrator to
  * read on its Plugins page, and `listingSentence` passes an authored message through untouched.
  */
 function actionOf(
-  row: unknown,
+  row: VendorTool,
   position: number,
   toolkit: string,
 ): ComposioAction {
   const at = `row ${position + 1} of Composio's action list for ${toolkit}`;
-  if (!hasFields(row)) {
-    throw new Error(
-      `Composio sent ${sent(row)} as ${at}, where an action belongs, so the list was not refreshed and the tools already held are untouched. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
 
   const slug = textOf(row.slug);
   if (slug === null) {
@@ -603,35 +663,17 @@ function actionOf(
     );
   }
 
-  const description = row.description;
-  if (description !== undefined && typeof description !== "string") {
-    throw new Error(
-      `Composio sent ${sent(description)} where ${slug}'s description belongs, and that description is what a model reads to decide whether to call it. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
-
-  const inputParameters = row.inputParameters;
-  if (inputParameters !== undefined && !hasFields(inputParameters)) {
-    throw new Error(
-      `Composio sent ${sent(inputParameters)} where ${slug}'s input schema belongs. That value is put in front of a model as Composio's own JSON Schema for the action, so a thing that is not an object cannot be shown as one. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
-
-  const tags = row.tags;
-  if (tags !== undefined && !isTextList(tags)) {
-    throw new Error(
-      `Composio sent ${sent(tags)} where ${slug}'s tags belong, and this deployment reads those to decide whether an action only reads or also writes. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
-
-  const version = row.version;
-  if (version !== undefined && typeof version !== "string") {
-    throw new Error(
-      `Composio sent ${sent(version)} where ${slug}'s version belongs, and the version travels with every call made to the action. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
-
-  return { slug, description, inputParameters, tags, version };
+  /*
+   * Mapped field by field rather than spread, so what crosses the seam is the four things
+   * `./composio` documents and not whatever else the vendor's tool object happens to carry.
+   */
+  return {
+    slug,
+    description: row.description,
+    inputParameters: row.inputParameters,
+    tags: row.tags,
+    version: row.version,
+  };
 }
 
 /**
@@ -826,6 +868,39 @@ function vendorRefusal(
         `Composio refuses a call whose toolkit version is "latest", and that is the version travelling with this one, so ${outcome}. A dated version is recorded when an app's actions are listed, so refreshing ${app}'s tools on its Plugins page replaces "latest" with a version Composio will accept.`,
       );
 
+    /*
+     * AN ANSWER THE VENDOR'S OWN PACKAGE COULD NOT READ, WHICH IS THE ROW THE FILE HAD BACKWARDS.
+     *
+     * This used to be classified as a bug of this deployment's — see the note now on
+     * {@link askForEach} — on the premise that a `TypeError` is what a program's own mistake looks
+     * like and never something Composio can reply. Running `@composio/core` 0.18.1 falsifies that
+     * outright. Its list transformers dereference the answer before returning it, so a malformed
+     * reply dies inside the vendor's code and arrives here as a bare `TypeError`:
+     * `response.items.map(transformAuthConfigRetrieveResponse)` off a bare list or an `items` that
+     * is a string (`src/utils/transformers/authConfigs.ts:79`), `authConfig.toolkit.logo` off a row
+     * that is not an object (`:41`), and the same two shapes at
+     * `src/utils/transformers/connectedAccounts.ts:113` and `:60` and at `src/models/Tools.ts:561`.
+     * Five vendor answers, five `TypeError`s, none of them this deployment's doing.
+     *
+     * IT IS TRANSLATED HERE BECAUSE HERE IS WHERE IT SURFACES. {@link askVendor} wraps the
+     * `await vendor.*` and nothing else, so a throw reaching this function came out of the vendor's
+     * code by construction rather than by inspection — which is exactly the distinction the guards
+     * this replaces were trying to make one layer too late, in readers the SDK never let them reach.
+     *
+     * WHAT THE READER IS TOLD IS DELIBERATELY NOT A THING TO TRY. Nobody holding an admin page can
+     * correct the shape of a reply, and "try again" would be advice to repeat a request that will
+     * be answered identically; the one act that changes anything is a package upgrade, and the two
+     * things the route's default sends an operator to check are both already proven fine — the
+     * request went out and Composio replied to it. The crash itself is carried as `cause` and never
+     * quoted: a sentence that reads like a stack trace is what every refusal here exists not to be.
+     */
+    case "TypeError": {
+      const about = call.app === null ? "" : ` for ${call.app}`;
+      return refusal(
+        `Composio's answer${about} was a shape this deployment's @composio/core could not read, so ${outcome}. The failure was raised inside the vendor's own package as it read the reply, so the request went out and Composio answered it: neither the key nor anything on this deployment's pages is what to check. ${VENDOR_SHAPE_REMEDY}`,
+      );
+    }
+
     default:
       return null;
   }
@@ -856,29 +931,6 @@ async function askVendor<T>(
     if (refusal !== null) throw refusal;
     throw error;
   }
-}
-
-/**
- * Whether a thrown failure is this deployment's own bug rather than anybody's answer to a request.
- *
- * ONLY A PROGRAM PRODUCES THESE. A `TypeError`, a `ReferenceError` and a `RangeError` are what a
- * mistake in this file or in the SDK looks like — a field read off `undefined`, a name that is not
- * there — and none of them is a thing Composio can reply. The distinction matters in exactly one
- * place, {@link buildComposioClient}'s delete loop, whose whole job is to keep going after a
- * refusal: a loop that absorbs a bug of ours reports it as "Composio refused the rest" and tells an
- * operator to press the button again about a fault that will do the same thing every time.
- *
- * NAMED AS A SMALL CLOSED LIST RATHER THAN GUESSED AT, because the cost of the two mistakes is not
- * symmetric. A vendor error wrongly treated as our bug escapes the loop early and is reported as
- * itself, which is loud and recoverable; our bug wrongly treated as a vendor refusal is swallowed
- * into a count and a retry instruction, which is the state that hides.
- */
-function isOurFault(error: unknown): boolean {
-  return (
-    error instanceof TypeError ||
-    error instanceof ReferenceError ||
-    error instanceof RangeError
-  );
 }
 
 /**
@@ -984,6 +1036,11 @@ export type ComposioVendor = {
       /**
        * The vendor's own word for "there is another page", which was being discarded at this type.
        *
+       * `unknown` RATHER THAN `string | null`, because the transformer writes `response.next_cursor
+       * ?? null` (`src/utils/transformers/authConfigs.ts:80`) and that is the wire's value with no
+       * check on it — a numeric cursor reaches {@link everyRowOf} exactly as Composio sent it, which
+       * is the one shape that could be read as the end of a listing that has not ended.
+       *
        * `AuthConfigListResponseSchema` carries it (`@composio/core` 0.18.1,
        * `src/types/authConfigs.types.ts:129-133`) and
        * `transformAuthConfigListResponse` fills it in from `next_cursor` on every answer
@@ -993,7 +1050,7 @@ export type ComposioVendor = {
        * follows it until the vendor stops offering one — so a listing at {@link LISTING_LIMIT} is
        * no longer a fragment this file can mistake for the whole answer.
        */
-      nextCursor?: string | null;
+      nextCursor?: unknown;
     }>;
     create(
       toolkit: string,
@@ -1059,9 +1116,13 @@ export type ComposioVendor = {
        * renames (`@composio/core` 0.18.1, `src/utils/transformers/connectedAccounts.ts:52-66`), so
        * `id` arrives exactly as Composio sent it inside the same warn-only `transform()` as
        * everything else here. An account with no id is the one shape the revoke below cannot act
-       * on, and it is the shape nothing was checking for.
+       * on, and {@link withdrawableAccounts} is what says so about it.
+       *
+       * THE ROW ITSELF IS AN OBJECT BY CONSTRUCTION, which is why only the field is in doubt. The
+       * same function reads `response.auth_config.id` (`:60`) on its way to building each row, so a
+       * row that is not an object raises inside the vendor's code and never reaches this listing.
        */
-      items: { id?: string | null }[];
+      items: { id?: unknown }[];
       /**
        * The same truncation signal as the auth-config listing above, from the same vendor schema.
        *
@@ -1072,7 +1133,7 @@ export type ComposioVendor = {
        * person's access has ended", and it used to have seen only one page of the accounts it
        * would have to end. {@link everyRowOf} follows it until there is none left.
        */
-      nextCursor?: string | null;
+      nextCursor?: unknown;
     }>;
     /**
      * Mint one person's connect link against one auth config, with the page to come back to.
@@ -1101,7 +1162,7 @@ export type ComposioVendor = {
       userId: string,
       authConfigId: string,
       options: { callbackUrl: string },
-    ): Promise<{ redirectUrl?: string | null }>;
+    ): Promise<{ redirectUrl?: unknown }>;
     /**
      * Delete one connected account, and ask for the grant behind it to be revoked too.
      *
@@ -1282,14 +1343,19 @@ export function buildComposioClient(
     userId: string,
     toolkit: string,
     statuses: VendorAccountStatus[],
-  ): Promise<string[]> => {
+  ): Promise<{ id?: unknown }[]> => {
     /*
-     * EVERY PAGE, AND THE SHAPE OF EACH ONE CHECKED HERE RATHER THAN AT EITHER CALLER, so that the
-     * two questions cannot drift on either. `isConnected` answers a boolean and `revoke` deletes by
-     * id, and both a truncated listing and an unreadable one are the wrong answer to both for the
-     * same reason — `false` claims somebody has no account for an app when nobody looked at all of
-     * them, and a delete without an id claims a withdrawal that never went out. The ids are all
-     * either caller takes, so this hands back ids and nothing else.
+     * EVERY PAGE, READ HERE RATHER THAN AT EITHER CALLER, so that the two questions cannot drift on
+     * the one thing they do share. A truncated listing is the wrong answer to both of them for the
+     * same reason: `false` claims somebody has no account for an app when nobody looked at all of
+     * them, and a withdrawal that saw one page ends fewer grants than it reports.
+     *
+     * THE ROWS GO BACK AS ROWS, WHICH IS NARROWER THAN WHAT THIS USED TO HAND OVER. It read every
+     * id here, and the two callers do not want the same thing: `isConnected` is a COUNT — the id is
+     * nothing it reads — so taking ids on its behalf turned an account Composio described without
+     * one into a thrown refusal against a person who is, in fact, connected. Reading the ids is the
+     * withdrawal's business, and it is done there, where a row that cannot be named is something to
+     * report alongside the grants that were ended rather than something to stop them.
      */
     const rows = await everyRowOf(
       {
@@ -1314,7 +1380,7 @@ export function buildComposioClient(
             }),
         ),
     );
-    return rows.map((row, position) => accountIdOf(row, position, toolkit));
+    return rows;
   };
 
   /**
@@ -1395,12 +1461,19 @@ export function buildComposioClient(
    * collected them and both callers then read `refused[0]`, so the second and third reason existed
    * for the length of one expression and were then dropped.
    *
-   * AND A BUG OF OURS IS NOT A REFUSAL BY COMPOSIO, which is the other half. The catch used to take
-   * everything, so a `TypeError` out of this file's own code arrived in the same list as a vendor's
-   * 502 and came back to a person as "Composio refused the rest, press disconnect again" — advice
-   * about a fault that will do exactly the same thing the second time, wearing the vendor's name.
-   * {@link isOurFault} names the three classes only a program produces, and one of those comes
-   * straight back out of the loop as itself.
+   * EVERY FAILURE IS A REFUSAL HERE, AND THE CLASSIFICATION THAT USED TO SIT IN THIS LOOP HAS MOVED
+   * ONE LAYER DOWN. There was an `isOurFault` test in the catch that re-threw a `TypeError`, a
+   * `ReferenceError` or a `RangeError` rather than counting it, on the premise that those are what
+   * a program's own mistake looks like and are never "a thing Composio can reply". The premise is
+   * false — see the `TypeError` row in {@link vendorRefusal} for the five vendor shapes that raise
+   * exactly that from inside `@composio/core`'s own transformers — so its effect was inverted: a
+   * vendor fault escaped the loop as a bug of ours, abandoning every account after it unasked, and
+   * the person was handed a crash instead of a sentence.
+   *
+   * IT MOVED RATHER THAN BEING RETUNED because this loop cannot make the distinction and
+   * {@link askVendor} can. Every `ask` below is one `await vendor.*` wrapped by that function, so
+   * whether a fault came from inside the vendor's code is a fact about the call stack there, where
+   * here it could only ever have been guessed at from an error class.
    */
   const askForEach = async <T>(
     items: T[],
@@ -1411,7 +1484,6 @@ export function buildComposioClient(
       try {
         await ask(item);
       } catch (error) {
-        if (isOurFault(error)) throw error;
         refused.push(error);
       }
     }
@@ -1448,24 +1520,21 @@ export function buildComposioClient(
    * catalogue is this deployment's own job, over the rows below.
    */
   const fetchDirectory = async (): Promise<BrokerApp[]> => {
-    const answered: unknown = await askVendor(
+    /*
+     * TAKEN AS THE LIST IT IS DECLARED TO BE, which is the one answer in this file whose container
+     * the vendor settles TWICE OVER. `Toolkits.getToolkits` returns
+     * `transformToolkitListResponse(result)`, whose body is `response.items.map(...)` — so it is an
+     * array or it threw — and the whole method sits inside a try that rethrows anything at all as
+     * `ComposioToolkitFetchError` (`@composio/core` 0.18.1, `src/models/Toolkits.ts:70-82`). A
+     * container refusal used to stand here for a null or an envelope; neither can arrive, and a
+     * malformed catalogue reaches a reader as that vendor class, whose own message is the bare
+     * "Failed to fetch toolkits" and whose remedy genuinely is the key or the status page — which
+     * is why {@link vendorRefusal} deliberately leaves it to the route's default answer.
+     */
+    const toolkits = await askVendor(
       { outcome: "the app catalogue was not read", app: null },
       () => vendor.toolkits.get({ limit: LISTING_LIMIT, sortBy: "usage" }),
     );
-
-    /*
-     * THE CONTAINER IS SETTLED BEFORE ITS LENGTH IS MEASURED, which is why this sits above the
-     * truncation guard rather than beside the row checks below. `null.length` and `{}.length` are a
-     * crash and an `undefined` respectively, and the second of those is the worse one: it compares
-     * false against the ceiling, sails past the guard, and reaches a `.map` that throws a sentence
-     * naming a vendor method instead of naming the fault.
-     */
-    const toolkits = Array.isArray(answered) ? answered : null;
-    if (toolkits === null) {
-      throw new BrokerRefusalError(
-        `Composio answered the app catalogue with ${sent(answered)} where a list of apps belongs, so there was no directory to show. ${VENDOR_SHAPE_REMEDY}`,
-      );
-    }
 
     if (toolkits.length >= LISTING_LIMIT) {
       /*
@@ -1519,8 +1588,15 @@ export function buildComposioClient(
        * The caller's page is passed through rather than defaulted here, because the seam made
        * `page` required precisely so that no layer could quietly supply one. See the module
        * comment on what an omitted limit does beyond truncating.
+       *
+       * AND THE ANSWER IS TAKEN AS THE LIST IT IS DECLARED TO BE, for the reason the catalogue
+       * above is. `getRawComposioTools` answers `[]` where the client returned nothing and
+       * otherwise returns `tools.items.map(tool => this.transformToolCases(tool))`
+       * (`@composio/core` 0.18.1, `src/models/Tools.ts:557-561`), so it is an array or the `.map`
+       * threw — and the refusal that used to stand here for a non-array was a branch the SDK made
+       * unreachable.
        */
-      const answered: unknown = await askVendor(
+      const tools = await askVendor(
         {
           outcome: `${toolkit}'s action list was not refreshed and the tools already held are untouched`,
           app: toolkit,
@@ -1532,19 +1608,6 @@ export function buildComposioClient(
           }),
       );
 
-      const tools = Array.isArray(answered) ? answered : null;
-      if (tools === null) {
-        throw new Error(
-          `Composio answered ${toolkit}'s action list with ${sent(answered)} where a list of actions belongs, so the list was not refreshed and the tools already held are untouched. ${VENDOR_SHAPE_REMEDY}`,
-        );
-      }
-
-      /*
-       * Mapped field by field rather than spread, so what crosses the seam is the four things
-       * `./composio` documents and not whatever else the vendor's tool object happens to carry.
-       * `inputParameters` in particular goes straight in front of a model — which is also why
-       * {@link actionOf} checks it rather than passing it on as whatever arrived.
-       */
       return tools.map((row, position) => actionOf(row, position, toolkit));
     },
 
@@ -1561,17 +1624,16 @@ export function buildComposioClient(
        * `tools.execute` resolves the same tool again internally, so this is a second request
        * rather than a saved one. It buys the one thing a single request cannot: a mismatch that is
        * refused before anything runs, rather than discovered in an audit row afterwards.
+       *
+       * AND IT IS TAKEN AT ITS DECLARED TYPE, WHICH IS THE ONE ANSWER IN THIS FILE MOST SAFE TO DO
+       * THAT WITH. `getRawComposioToolBySlug` ends in `this.transformToolCases(tool)` (`@composio/core`
+       * 0.18.1, `src/models/Tools.ts:719`), whose last act is `ToolSchema.parse(...)` — a throwing
+       * parse — so what resolves here is an object satisfying that schema or a `ZodError` that
+       * `./composio` recognises and answers with a package remedy. An answer that is not an object,
+       * and a `toolkit` that is present and not an object, both die at that parse; two refusals
+       * stood here for exactly those and neither could be reached.
        */
-      /*
-       * READ OUT OF `unknown`, LIKE EVERY LISTING, AND FOR THE REASON THE LISTINGS GIVE. This is
-       * one of the two answers in this file that is a single object rather than a page of them,
-       * and that is the whole of why it went unchecked for as long as it did: a row type widened to
-       * what the wire can send makes an unchecked read fail to build, and an object read straight
-       * off an `await` has a declared type that looks settled. It is not — `transformToolCases`'
-       * throwing parse is an argument about the SDK's code rather than about this deployment's, and
-       * the same one {@link actionOf} declines to rest on.
-       */
-      const resolved: unknown = await askVendor(
+      const resolved = await askVendor(
         {
           outcome: `${call.slug} was not resolved and nothing was run`,
           app: call.toolkit,
@@ -1581,28 +1643,23 @@ export function buildComposioClient(
             version: call.version,
           }),
       );
-      if (!hasFields(resolved)) {
-        throw new Error(
-          `Composio answered ${sent(resolved)} where the ${call.slug} action belongs, so nothing was run: this deployment cannot show that the call it was about to make is for ${call.toolkit} rather than for some other app. ${VENDOR_SHAPE_REMEDY}`,
-        );
-      }
 
       /*
        * AN UNREADABLE APP IS NOT THE SAME FACT AS NO APP, AND THEIR REMEDIES DIFFER. The mismatch
        * refusal below ends by telling an administrator to refresh this app's tools, which is right
        * for a slug recorded against a url that has since changed and useless for an SDK that has
-       * begun answering a different shape. So a `toolkit` that is present and not an object, or
-       * whose slug is not a usable name, is refused as what it is rather than folded into "no app
-       * at all" — where it would arrive wearing a remedy that cannot work.
+       * begun answering a different shape. So a toolkit whose slug is not a usable name is refused
+       * as what it is rather than folded into "no app at all", where it would arrive wearing a
+       * remedy that cannot work.
+       *
+       * AND IT IS STILL READ, DESPITE `ToolkitSchema` SPELLING THE SLUG REQUIRED, for the reason
+       * {@link actionOf} reads the action's own: `z.string()` is satisfied by the empty string, so
+       * a passing parse still admits an app with no name — which would compare unequal to every
+       * toolkit and refuse this call as a mismatch with nothing on the other side of the sentence.
        */
       const answeredApp = resolved.toolkit;
       let ran: string | undefined;
       if (answeredApp !== undefined) {
-        if (!hasFields(answeredApp)) {
-          throw new Error(
-            `Composio sent ${sent(answeredApp)} where the app ${call.slug} belongs to should be, so nothing was run: this deployment cannot show that the call is for ${call.toolkit}. ${VENDOR_SHAPE_REMEDY}`,
-          );
-        }
         const named = textOf(answeredApp.slug);
         if (named === null) {
           throw new Error(
@@ -1892,8 +1949,18 @@ export function buildComposioClient(
        * track of. `toolkits.authorize` passed `allowMultiple: true` unconditionally — the SDK
        * calls it a "magic function" for exactly that — which is the opposite of what this
        * deployment wants.
+       *
+       * THE ANSWER IS AN OBJECT BY CONSTRUCTION AND ITS ONE FIELD IS NOT. `link` builds what it
+       * returns with `createConnectionRequest(client, response.connected_account_id, INITIATED,
+       * response.redirect_url)` inside a try that turns anything thrown into
+       * `ComposioFailedToCreateConnectedAccountLink` (`@composio/core` 0.18.1,
+       * `src/models/ConnectedAccounts.ts:420-453`), and that builder assembles a literal
+       * (`src/models/ConnectionRequest.ts:39-43`). So a refusal for "Composio answered something
+       * that is not an object" could not be reached — the vendor either hands over its own object
+       * or raises a class {@link vendorRefusal} already translates. What the builder copies across
+       * untouched is the url, which is why that is the field still read.
        */
-      const request: unknown = await askVendor(
+      const request = await askVendor(
         {
           outcome: `this person's connection to ${toolkit} was not begun`,
           app: toolkit,
@@ -1903,17 +1970,6 @@ export function buildComposioClient(
             callbackUrl: returnUrl,
           }),
       );
-      /*
-       * THE OTHER SINGLE OBJECT, AND THE ONE WITH A PERSON WAITING ON IT. Read out of `unknown` for
-       * the reason the resolve in `execute` is: nothing about this answer is validated any harder
-       * than a listing row, and a field read off a null answer is a `TypeError` that reaches
-       * somebody who has just pressed Connect as though Composio were down.
-       */
-      if (!hasFields(request)) {
-        throw new BrokerRefusalError(
-          `Composio answered ${sent(request)} where the connection it was asked to begin to ${toolkit} belongs, so there is nothing to send this person to — and whether anything was begun at Composio is not something this deployment can tell from that. ${VENDOR_SHAPE_REMEDY}`,
-        );
-      }
 
       const redirectUrl = request.redirectUrl;
       /*
@@ -1948,6 +2004,12 @@ export function buildComposioClient(
     },
 
     async isConnected({ userId, toolkit }): Promise<boolean> {
+      /*
+       * A COUNT, AND NOTHING IS READ OFF A ROW TO REACH IT. An ACTIVE account Composio described
+       * without an id is still an ACTIVE account: this person can act through the app, which is the
+       * whole of what this gate asks. Reading the id here used to turn that into a refusal, so a
+       * field this question never looks at decided its answer.
+       */
       return (await accountsFor(userId, toolkit, CONNECTED)).length > 0;
     },
 
@@ -1972,7 +2034,14 @@ export function buildComposioClient(
        * than the one behind `isConnected`.
        */
       const accounts = await accountsFor(userId, toolkit, REVOCABLE);
-      const refused = await askForEach(accounts, (id) =>
+      /*
+       * THE READABLE ONES GO FIRST AND THE UNREADABLE ONES ARE REPORTED AFTERWARDS. Reading the ids
+       * of all of them before sending any delete is what made one unnameable row a permanent block
+       * on a person's disconnect — see {@link withdrawableAccounts}. Partitioning puts the withdrawal
+       * back in front of the report, which is the order a person's grants actually need.
+       */
+      const { ids, nameless } = withdrawableAccounts(accounts, toolkit);
+      const refused = await askForEach(ids, (id) =>
         askVendor(
           {
             outcome: `one of this person's ${toolkit} accounts was not withdrawn`,
@@ -1982,7 +2051,7 @@ export function buildComposioClient(
         ),
       );
 
-      if (refused.length > 0) {
+      if (refused.length > 0 || nameless.length > 0) {
         /*
          * A PARTIAL WITHDRAWAL IS A FAILURE AND NOT A `true`, and the reason is the row this throw
          * protects. `store.ts` revokes and only then deletes the `composio_connections` row, which
@@ -2000,10 +2069,19 @@ export function buildComposioClient(
          * for themselves, and EVERY refusal the loop met is kept as `cause` for whoever is reading
          * a log rather than a page — see {@link everyRefusal} for why all of them rather than the
          * first, which is what this used to keep.
+         *
+         * AND THE TWO WAYS A GRANT SURVIVES ARE NOT THE SAME ADVICE. An account Composio refused is
+         * one a second press reaches, which is what "disconnecting again" is worth saying about. An
+         * account it described with no id is not: the row will be as unnameable next time, so the
+         * only honest instruction is the one that does not run through this page at all.
          */
+        const left =
+          nameless.length === 0
+            ? "Disconnecting again asks only for the accounts that are left."
+            : `Composio described ${nameless.length} of them with no id at all, so this deployment has no way to name those in a withdrawal and disconnecting again meets them unchanged: removing them in Composio's own dashboard is what ends them.`;
         throw new BrokerRefusalError(
-          `Composio withdrew ${accounts.length - refused.length} of this person's ${accounts.length} accounts for ${toolkit} and refused the rest, so their access to it has not ended. Disconnecting again asks only for the accounts that are left.`,
-          { cause: everyRefusal(refused) },
+          `Composio withdrew ${ids.length - refused.length} of this person's ${accounts.length} accounts for ${toolkit} and did not withdraw the rest, so their access to it has not ended. ${left}`,
+          { cause: everyRefusal([...refused, ...nameless]) },
         );
       }
 
