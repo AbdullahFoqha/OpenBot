@@ -21,12 +21,15 @@
  * every line this script writes goes through {@link say}, which redacts it. That is belt and braces
  * on purpose: the adapter promises not to quote the key, but a vendor exception is a foreign object
  * and "this SDK does not put the key in an error" is not a promise this file is in a position to
- * make on the SDK's behalf.
+ * make on the SDK's behalf. Which is why no vendor call below is awaited bare — an unhandled
+ * rejection is printed by the runtime rather than by this file, and that is the one way out past
+ * {@link say}. {@link ask} is what closes it.
  */
 import {
   type ComposioResult,
   effectOf,
   LISTING_LIMIT,
+  vendorSentence,
 } from "../server/src/plugins/composio";
 import { createComposioClient } from "../server/src/plugins/composio-adapter";
 
@@ -107,16 +110,66 @@ function say(line: string): void {
  * whatever else the vendor attached to it, and `console.error(error)` prints all of it — which is
  * the path by which a key ends up in a terminal and in whatever captured it. So the shape is
  * discarded here and the one human sentence is kept, and even that goes out through {@link say}.
+ *
+ * WHICH MESSAGE, THOUGH, IS NOT THE OUTER ONE. `error.message` on a Composio throw is "Error
+ * executing the tool GMAIL_GET_PROFILE" — the placeholder `./composio` documents as the sentence
+ * never worth passing on, and on a diagnostic it is worse than useless: it names the thing the
+ * reader just asked for and says nothing about why the key could not do it. The actionable
+ * sentence — "API Key is not valid", "No connected account found for user ID …" — is nested two
+ * levels inside `cause`, beside the whole HTTP response. {@link vendorSentence} is the reach that
+ * takes that sentence and nothing else, and it is imported rather than rewritten here so that a
+ * vendor changing the nesting breaks one place.
+ *
+ * The thrown message stays as the fallback, because a failure that is not a Composio throw at all —
+ * DNS, a proxy, a TLS refusal — carries its whole diagnosis there.
  */
 function sentence(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return (
+    vendorSentence(error) ??
+    (error instanceof Error ? error.message : String(error))
+  );
+}
+
+/**
+ * One vendor read, with a thrown failure reported rather than raised.
+ *
+ * WITHOUT THIS THE READS BELOW GO ROUND THE REDACTOR, which is the one rule this file has. A
+ * top-level await that rejects is an unhandled rejection, and the runtime prints the thrown value
+ * itself: for a bad key that is the vendor's error object with the 401 body, every response header
+ * and two stack traces, none of it through {@link say}. A bad key is also the FIRST thing this
+ * script exists to diagnose — so the crash was reserved for exactly the case the script was written
+ * for, and the guarantee at the top of this file held only while nothing went wrong.
+ *
+ * IT EXITS RATHER THAN ANSWERING A SENTINEL, because each read below is a precondition for the ones
+ * after it: a catalogue that could not be read makes "no connection" a statement about nothing.
+ */
+async function ask<T>(attempt: string, read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    say(`${attempt} failed: ${sentence(error)}`);
+    process.exit(1);
+  }
 }
 
 const { actions, broker } = createComposioClient(key);
 
-const apps = await broker.listApps();
+const apps = await ask("Listing the apps this key can see", () =>
+  broker.listApps(),
+);
 const app = apps.find((candidate) => candidate.slug === APP);
 say(`Composio listed ${apps.length} apps for this key.`);
+if (apps.length >= LISTING_LIMIT) {
+  /*
+   * Said because at the ceiling a whole catalogue and a cut-off one are the same array, and no
+   * second request can tell them apart — see {@link LISTING_LIMIT}, which is the largest page this
+   * SDK can express. So a full page is reported as a full page rather than as the catalogue, and an
+   * app missing from it may be past the cut rather than absent from the account.
+   */
+  say(
+    `That is the whole page Composio will answer with (${LISTING_LIMIT}), so the catalogue came back full and anything missing below may be past the cut rather than absent.`,
+  );
+}
 if (!app) {
   /*
    * Stated rather than shrugged at. A catalogue that does not contain Gmail is a key pointed at
@@ -130,7 +183,10 @@ if (!app) {
 }
 say(`${app.name} publishes ${app.actionCount} actions.`);
 
-const connected = await broker.isConnected({ userId: user, toolkit: APP });
+const connected = await ask(
+  `Asking whether ${user} has a ${APP} connection`,
+  () => broker.isConnected({ userId: user, toolkit: APP }),
+);
 say(
   connected
     ? `${user} has a live ${APP} connection.`
@@ -155,7 +211,21 @@ if (!connected) {
  * and the behaviour labels, which are what makes the claim "read-only" checkable instead of
  * asserted in a comment.
  */
-const listed = await actions.listActions(APP, { limit: LISTING_LIMIT });
+const listed = await ask(`Listing ${APP}'s actions`, () =>
+  actions.listActions(APP, { limit: LISTING_LIMIT }),
+);
+/*
+ * The count, because it is the number {@link APP} was chosen for: Gmail publishes enough actions
+ * that a page truncated at the ceiling, or narrowed to the vendor's "important" subset, reads as an
+ * obviously wrong number beside the count the catalogue published — and neither one announces
+ * itself. Printing only the catalogue's figure left the comparison this file promises impossible to
+ * make.
+ */
+say(
+  listed.length >= LISTING_LIMIT
+    ? `Composio answered with ${listed.length} ${APP} actions, which is the whole page it will answer with (${LISTING_LIMIT}), so that listing came back full and is likely cut off.`
+    : `Composio listed ${listed.length} of the ${app.actionCount} actions ${app.name} publishes.`,
+);
 const action = listed.find((candidate) => candidate.slug === READ_ACTION);
 if (!action) {
   say(
