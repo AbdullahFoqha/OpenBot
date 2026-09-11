@@ -7,9 +7,9 @@ import type { AgentProfileStore } from "./agents/profile-store";
 import { createAgentRoutes } from "./agents/routes";
 import {
   type AuditEventType,
+  AuditQueryError,
   type AuditReader,
   type AuditStore,
-  AuditQueryError,
   auditQueryFromUrl,
   DEPLOYMENT_INITIATOR,
   recordAuditEvent,
@@ -41,6 +41,7 @@ import type { CredentialAdminService, CredentialInput } from "./credentials";
 import { createIntelligenceClient } from "./intelligence-client";
 import type { OnboardingStore } from "./people/onboarding";
 import type { PeopleStore } from "./people/store";
+import type { ComposioBroker } from "./plugins/broker";
 import { createPluginRoutes } from "./plugins/routes";
 import type { PluginStore } from "./plugins/store";
 import { REFUSAL_MARKER } from "./plugins/tools";
@@ -221,6 +222,19 @@ export function createApp(
    * shown an empty box, and the obvious thing to do with an empty box is fill it in again.
    */
   userInstructions?: UserInstructionsStore,
+  /**
+   * The broker behind apps a person connects through Composio rather than an administrator
+   * registering an MCP server.
+   *
+   * Appended last, like everything above it: these are positional, so inserting one anywhere else
+   * silently shifts every existing call site's arguments by one.
+   *
+   * Passed in already built, like the copilot handler and the intent router, so this module never
+   * imports the vendor's package. Absent leaves the plugin surface reporting that no broker is
+   * configured, which is the correct degraded behaviour: a deployment with no Composio API key has
+   * no app directory to offer, rather than one that lists apps nobody can connect.
+   */
+  composio?: { broker: ComposioBroker },
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -1061,33 +1075,39 @@ export function createApp(
   if (pluginStore) {
     app.route(
       "/api/plugins",
-      createPluginRoutes(pluginStore, requireUser, canUseBot, {
-        encryptionKey: config.keyEncryptionKey,
-        /*
-         * Whether the person a consent was started for still has access, asked when the callback
-         * lands rather than when the flow began.
-         *
-         * The callback carries no session — identity comes from the state — so this is where the
-         * question gets asked at all. `find` answers both halves of it: no row means a user id that
-         * names nobody, and `revoked` means an administrator removed them while they were away at
-         * the vendor. Either way there is no live person for a fresh refresh token to belong to.
-         *
-         * No people store means this deployment cannot answer the question, so it refuses rather
-         * than assuming yes. It also cannot remove anybody, which is exactly why guessing here
-         * would be a hole nothing else closes.
-         */
-        personHasAccess: async (userId) => {
-          if (!peopleStore) return false;
-          const person = await peopleStore.find(userId);
-          return person !== undefined && !person.revoked;
+      createPluginRoutes(
+        pluginStore,
+        requireUser,
+        canUseBot,
+        {
+          encryptionKey: config.keyEncryptionKey,
+          /*
+           * Whether the person a consent was started for still has access, asked when the callback
+           * lands rather than when the flow began.
+           *
+           * The callback carries no session — identity comes from the state — so this is where the
+           * question gets asked at all. `find` answers both halves of it: no row means a user id that
+           * names nobody, and `revoked` means an administrator removed them while they were away at
+           * the vendor. Either way there is no live person for a fresh refresh token to belong to.
+           *
+           * No people store means this deployment cannot answer the question, so it refuses rather
+           * than assuming yes. It also cannot remove anybody, which is exactly why guessing here
+           * would be a hole nothing else closes.
+           */
+          personHasAccess: async (userId) => {
+            if (!peopleStore) return false;
+            const person = await peopleStore.find(userId);
+            return person !== undefined && !person.revoked;
+          },
+          // The deployment-wide fallback a Bot may present, as a yes or no. The secret itself stays
+          // in config and is checked in `/api/agent-tools/call`; the surface only needs to know
+          // whether a Bot without its own credential has any way to call back.
+          botsMayCallBack: Boolean(config.agentToolToken),
+          publicUrl: config.publicUrl,
+          appUrl: config.appUrl,
         },
-        // The deployment-wide fallback a Bot may present, as a yes or no. The secret itself stays
-        // in config and is checked in `/api/agent-tools/call`; the surface only needs to know
-        // whether a Bot without its own credential has any way to call back.
-        botsMayCallBack: Boolean(config.agentToolToken),
-        publicUrl: config.publicUrl,
-        appUrl: config.appUrl,
-      }),
+        composio,
+      ),
     );
   }
 

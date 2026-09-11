@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import type { BotAccessCheck } from "../agents/profile-policy";
 import type { AppVariables } from "../auth/guards";
 import { requireAdmin } from "../auth/guards";
+import type { ComposioBroker } from "./broker";
 import { CATALOGUE, catalogueEntry } from "./catalogue";
 import {
   authorizationUrlFor,
@@ -106,6 +107,23 @@ export function createPluginRoutes(
      */
     appUrl: string | undefined;
   },
+  /**
+   * The broker this deployment talks to when an app is connected for somebody rather than
+   * registered by an administrator.
+   *
+   * Its own parameter rather than a field on `connect`, because nothing on that object applies
+   * here. `connect` is the OAuth consent flow this deployment runs itself: the key its state is
+   * sealed with, the redirect URI a vendor sends people back to, the access check the sessionless
+   * callback asks. A brokered app uses none of it — the vendor holds the consent, so there is no
+   * state to seal, no callback to land here and no redirect URI to publish. Folding it in would put
+   * a field on an object whose every other field is about a flow it never enters.
+   *
+   * Optional, and last for the same reason `connect` is: a deployment with no Composio API key
+   * configured simply has no broker, and the surface says so rather than pretending one exists. The
+   * trap `connect` documents applies here with one more argument in it — every parameter from that
+   * position on is optional, so a misplaced one typechecks and quietly does nothing.
+   */
+  composio?: { broker: ComposioBroker },
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
 
@@ -164,6 +182,15 @@ export function createPluginRoutes(
        * every call was refused before it reached the boundary.
        */
       botsMayCallBack: connect?.botsMayCallBack === true,
+      /*
+       * Whether this deployment has a broker at all, so the page knows whether brokered apps are
+       * on offer.
+       *
+       * A boolean about configuration, never the key. The API key that builds the broker is a
+       * deployment credential and the Plugins page is reachable by any signed-in person; what the
+       * screen needs is whether to draw the app directory, which is a yes or a no.
+       */
+      composioConfigured: Boolean(composio),
       servers: await store.listServers(),
       // Scoped: the deployment's skills plus this person's own. An administrator sees them all.
       skills: await store.listSkills(skillActor(context)),
