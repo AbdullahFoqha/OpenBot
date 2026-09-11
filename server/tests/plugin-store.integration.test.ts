@@ -6421,6 +6421,75 @@ test("a brokered disconnect that withdrew no grant records that it withdrew none
 });
 
 /**
+ * A disconnect that found nothing to disconnect says nothing in the trail.
+ *
+ * CRITERION. With no `composio_connections` row for the pair, the call still asks the broker to
+ * revoke, and files an `mcp.account_disconnected` event only where that ask withdrew a grant.
+ * Nothing here and nothing at the vendor is nothing disconnected, and the trail stays empty.
+ *
+ * REASON. This is the second press of Disconnect. The screen that made it easy — a row still
+ * reading "Connected" after a successful disconnect — has been fixed, but any caller can make the
+ * same call twice, and an event filed for it would tell whoever reads the trail back that
+ * somebody's account ended at a moment when nobody's did. A trail padded with acts nobody
+ * performed cannot answer the one question it is kept for, which is the reasoning
+ * `confirmBrokeredConnection` already files its connected event under.
+ *
+ * THE VENDOR IS ASKED ALL THE SAME, which is asserted and not assumed. The row is a cache of
+ * Composio's answer and it drifts by construction — the confirm deletes it on any `false` from the
+ * vendor — so an absence here is no evidence that the grant is gone, and this call is the only
+ * operation in this deployment that can end one. What the missing row stops is the writing-down of
+ * an act, not the ask.
+ *
+ * BOTH ANSWERS IN ONE TEST, because the second is what makes the first mean something: a guard
+ * that filed nothing whenever the row was missing would pass the empty-trail assertion on its own,
+ * and would lose the case that matters most — a live account ended for somebody whose local row
+ * had already gone.
+ */
+test("a brokered disconnect with nothing to disconnect files nothing in the trail", async () => {
+  let granted = false;
+  const { broker, order } = brokerSpy({ revoke: async () => granted });
+  const { store, auditStore } = await freshStore({ broker });
+  const pair = { toolkit: "gmail", userId: "user_asker" };
+
+  expect(
+    await store.disconnectBrokered({
+      ...pair,
+      by: "user_asker",
+      reason: "self",
+    }),
+  ).toEqual({ vendorRevoked: false });
+
+  expect(order).toEqual(["revoke:user_asker"]);
+  expect(await store.brokeredConnection(pair)).toBeNull();
+  // Empty, which is the whole of the first half: no row went and no grant was withdrawn, so
+  // nobody was disconnected and the trail has nothing to say about it.
+  expect(auditStore.recorded()).toHaveLength(0);
+
+  // The same absence locally, but this time the ask found a live account and ended it. That is an
+  // act — the weightier of the two this method performs — and it is recorded.
+  granted = true;
+  expect(
+    await store.disconnectBrokered({
+      ...pair,
+      by: "user_asker",
+      reason: "self",
+    }),
+  ).toEqual({ vendorRevoked: true });
+
+  const disconnected = auditStore
+    .recorded()
+    .filter((event) => event.eventType === "mcp.account_disconnected");
+  expect(disconnected).toHaveLength(1);
+  expect(disconnected[0]?.payload).toMatchObject({
+    actor: "user_asker",
+    server: "gmail",
+    owner: "user_asker",
+    reason: "self",
+    vendorRevoked: true,
+  });
+});
+
+/**
  * A brokered connection is visible to the person who made it, under the server row's own id.
  *
  * CRITERION. `brokeredConnectionsFor` answers one row per app this person has connected, shaped

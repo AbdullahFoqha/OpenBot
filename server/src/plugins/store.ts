@@ -3843,6 +3843,32 @@ export function createPluginStore(options: PluginStoreOptions) {
      * own answer, passed through. True where a grant was withdrawn, false where there was none to
      * withdraw, and the value of the field is exactly that a reader can tell a grant this
      * deployment ended from one that outlives it somewhere else.
+     *
+     * THE VENDOR IS ASKED WHETHER OR NOT A ROW IS HERE. The row is a cache of Composio's answer
+     * and never the account itself (see {@link brokeredConnection}), so its absence is not
+     * evidence that the grant is gone: the confirm above deletes it on any `false` from the
+     * vendor, and a person whose row was cleared that way can still be holding a live account at
+     * Composio with nothing left here pointing at it. Asking anyway is the only operation in this
+     * deployment that can end such a grant, and it costs nothing where there is genuinely nothing
+     * to withdraw — the broker answers `false` and says so. Skipping the revoke for want of a
+     * local row would make the safe half of disconnect unreachable for exactly the person who
+     * needs it, on the strength of a cache we already know drifts.
+     *
+     * BUT THE TRAIL RECORDS ONLY A DISCONNECT THAT HAPPENED. The event is filed where something
+     * actually ended — a row deleted here, or a grant withdrawn at the vendor — and not otherwise.
+     * A call that found no row and withdrew no grant disconnected nothing, and an
+     * `mcp.account_disconnected` row for it tells whoever reads the trail that somebody's account
+     * ended at a moment when nobody's did. It is the criterion
+     * {@link confirmBrokeredConnection} files its own event under, one act the other way round:
+     * the trail records acts, and a call that changed nothing performed none.
+     *
+     * WHICH IS NOT THE SAME QUESTION AS `vendorRevoked`. A row here with no grant at the vendor is
+     * a disconnect — the gate this deployment decides every brokered call on was open, and this
+     * call closed it — so the event is filed, saying `vendorRevoked: false`. A grant at the vendor
+     * with no row here is a disconnect too, and the weightier of the two, because somebody's live
+     * account was ended; the event is filed for that as well. Only where both are absent is there
+     * no act to record, and the two cases stay legible in the trail because the field still says
+     * which of them happened.
      */
     async disconnectBrokered(input: {
       toolkit: string;
@@ -3865,30 +3891,35 @@ export function createPluginStore(options: PluginStoreOptions) {
         toolkit: input.toolkit,
       });
 
-      await database
+      // `returning` because whether a row was here is half of what decides if anybody was
+      // disconnected, and a delete that answered nothing would leave the two cases indistinguishable.
+      const [deleted] = await database
         .delete(composioConnections)
         .where(
           and(
             eq(composioConnections.toolkit, input.toolkit),
             eq(composioConnections.userId, input.userId),
           ),
-        );
+        )
+        .returning({ toolkit: composioConnections.toolkit });
 
-      await recordAuditEvent(auditStore, {
-        eventType: "mcp.account_disconnected",
-        targetType: "mcp_server",
-        targetId: input.toolkit,
-        payload: {
-          actor: input.by,
-          server: input.toolkit,
-          // Whose account this was, which is not always who ended it: an administrator offboarding
-          // somebody and a person disconnecting themselves write the same shape of row, and only
-          // these two fields tell them apart.
-          owner: input.userId,
-          reason: input.reason,
-          vendorRevoked,
-        },
-      });
+      if (deleted || vendorRevoked) {
+        await recordAuditEvent(auditStore, {
+          eventType: "mcp.account_disconnected",
+          targetType: "mcp_server",
+          targetId: input.toolkit,
+          payload: {
+            actor: input.by,
+            server: input.toolkit,
+            // Whose account this was, which is not always who ended it: an administrator
+            // offboarding somebody and a person disconnecting themselves write the same shape of
+            // row, and only these two fields tell them apart.
+            owner: input.userId,
+            reason: input.reason,
+            vendorRevoked,
+          },
+        });
+      }
 
       return { vendorRevoked };
     },
