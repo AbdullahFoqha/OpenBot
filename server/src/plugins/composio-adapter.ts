@@ -9,6 +9,7 @@ import {
   type ComposioActions,
   type ComposioResult,
   LISTING_LIMIT,
+  vendorSentence,
 } from "./composio";
 
 /**
@@ -510,6 +511,278 @@ function actionOf(
 }
 
 /**
+ * WHAT THIS DEPLOYMENT WAS DOING WHEN A VENDOR CALL REFUSED, so a translated refusal can say.
+ *
+ * A CONDITION AND AN OUTCOME ARE TWO DIFFERENT HALVES OF A SENTENCE, and only one of them is the
+ * vendor's. "This person already holds an account for gmail" is what Composio determined; "so their
+ * connection to gmail was not begun" is what this deployment did about it, and a reader needs both
+ * — the first to know why asking again will not help, the second to know what state they are in
+ * now. The vendor cannot supply the second, because it does not know which of this file's ten calls
+ * it was answering.
+ *
+ * WRITTEN AT THE CALL SITE AS A FINISHED CLAUSE, in the past tense, so that it reads after "so"
+ * without any sentence below having to conjugate it. That is also what keeps the outcomes honest:
+ * each one is composed beside the call it describes, where whether anything was sent is a fact
+ * rather than a guess.
+ */
+type VendorCall = {
+  /** What did not happen, as a clause following "so": "the app catalogue was not read". */
+  outcome: string;
+  /** The app the call is about, or null where the question names no app at all. */
+  app: string | null;
+};
+
+/**
+ * The vendor's own name for the condition it raised, or null where it raised something anonymous.
+ *
+ * READ OFF `name` RATHER THAN ASKED WITH `instanceof`, which is a deliberate choice and not a
+ * shortcut. Every error class in `@composio/core` 0.18.1 ends its constructor by assigning its own
+ * `name` (`src/errors/*.ts`), so the name is the vendor's published discriminator and is stable
+ * across the package boundary; `instanceof` is not, because it is identity on a constructor and
+ * therefore hostage to a second copy of the package anywhere in the tree. The SDK makes the same
+ * judgement about its own classes — `isRequestAbortError` falls back to `constructor.name` and
+ * `name` and says why: "dual-package-hazard cases" (`src/errors/SDKErrors.ts`). `./composio`'s
+ * `isSchemaMismatch` reaches for a shape rather than a class for the same reason.
+ *
+ * AND IT IS WHAT LETS THE TABLE BE A TABLE. Naming eight classes as values would mean importing
+ * eight symbols from the vendor into the one file whose whole argument is that the vendor's surface
+ * is confined — and a version that renames one would then be a compile error in a switch that is
+ * meant to degrade to "not a condition this file knows" rather than to fail the build.
+ */
+function conditionOf(error: unknown): string | null {
+  const name = (error as { name?: unknown } | null | undefined)?.name;
+  return typeof name === "string" && name.trim() !== "" ? name : null;
+}
+
+/**
+ * A VENDOR CONDITION AS A SENTENCE THIS DEPLOYMENT WROTE, or null where there is none to write.
+ *
+ * THE DEFECT THIS CLOSES IS THAT ALMOST NOTHING WAS TRANSLATED. `routes.ts` answers a thrown broker
+ * error by reaching for the vendor's own sentence and, finding none, telling the reader that
+ * Composio said nothing about why and that an administrator should check this deployment's Composio
+ * key. That is exactly right about a socket that hung up. It is wrong twice over about a condition
+ * `@composio/core` raised by name: the key is fine — the call that failed usually went out through
+ * a listing that had just succeeded on the same key — and several of these states are settled at
+ * the vendor, so the "and try again" half of the advice is an instruction to repeat something that
+ * will answer identically for ever. The worst of them is the first row below: a person who already
+ * has an account for an app was told to check an API key and retry.
+ *
+ * ONE SENTENCE PER CONDITION AND NO SENTENCE SHARED, which is the property its test asserts in both
+ * directions. A translation that gave two conditions one wording would be worse than leaving both
+ * alone: the reader would be handed a remedy that is right for somebody else's failure and would
+ * have no way to tell, where an untranslated failure at least says plainly that nothing is known.
+ *
+ * NULL WHERE COMPOSIO'S OWN SERVER EXPLAINED ITSELF, WHICH IS THE LIMIT ON DOING THIS AT ALL.
+ * `routes.ts` reads `brokerSentence` first and `vendorSentence` second, so a refusal authored here
+ * HIDES the vendor's message rather than joining it. Several of the SDK's classes are wrappers
+ * around whatever the API returned — `ComposioFailedToCreateConnectedAccountLink` keeps the
+ * `BadRequestError` as its `cause` (`src/models/ConnectedAccounts.ts`), and `vendorSentence` reaches
+ * through exactly that nesting — so translating one of those unconditionally would replace a
+ * specific server sentence with this deployment's general one. Where the vendor said something a
+ * reader can use, the error goes on untouched and the vendor gets the last word.
+ *
+ * THE ORIGINAL IS KEPT AS `cause` on every refusal, for whoever is reading a log rather than a page.
+ * It is never quoted into the message: the file's promise about {@link BrokerRefusalError} is that
+ * its sentence is safe to show anybody who could have made the request, and a vendor error object
+ * out of `connectedAccounts.link` carries the request that was being minted.
+ *
+ * WHAT IS DELIBERATELY NOT HERE, because the route's default answer is the correct one for it:
+ * `ComposioToolkitFetchError`, which `Toolkits.getToolkits` wraps around EVERY catalogue failure
+ * including its own validation one, and whose message is the bare "Failed to fetch toolkits" — the
+ * key and the status page genuinely are the remedy; and `ComposioToolExecutionError`, the same
+ * wrapper one call further on, whose `cause` carries the server's own words for `vendorSentence` to
+ * find and whose own message `./composio`'s {@link VENDOR_PLACEHOLDER} already refuses to pass on.
+ */
+function vendorRefusal(
+  error: unknown,
+  call: VendorCall,
+): BrokerRefusalError | null {
+  if (vendorSentence(error) !== null) return null;
+
+  const app = call.app ?? "the app";
+  const outcome = call.outcome;
+  const refusal = (message: string): BrokerRefusalError =>
+    new BrokerRefusalError(message, { cause: error });
+
+  switch (conditionOf(error)) {
+    /*
+     * THE ONE THAT WAS DOING THE MOST DAMAGE. `connectedAccounts.link` lists this person's active
+     * accounts for the config before it mints anything and refuses where it finds one
+     * (`@composio/core` 0.18.1, `src/models/ConnectedAccounts.ts`), which is this deployment's own
+     * rule met one layer down — one person holds one account per app, because the call that runs an
+     * action names the person and not the account. So it is a settled fact rather than a moment,
+     * and "check the key and try again" is advice that cannot ever come true.
+     */
+    case "ComposioMultipleConnectedAccountsError":
+      return refusal(
+        `Composio answered that this person already holds a connected account for ${app}, so ${outcome}. That is a settled state at Composio rather than a moment that passes — asking again meets the same answer — and what clears it is disconnecting the account they already hold, on this deployment's Connected accounts page, before another is attached.`,
+      );
+
+    /*
+     * ACCESS RULES ARE NOT SOMETHING THIS FILE SENDS, which is the whole of why this one is worth a
+     * sentence. The SDK raises it when the server rejects ACL fields on an account that is not
+     * shared, and nothing here asks for sharing — so the reader must not go looking through this
+     * deployment's settings for a field it does not have. The config in Composio's dashboard is
+     * where the sharing is decided and where an operator can change it.
+     */
+    case "ComposioAclOnlyForSharedError":
+      return refusal(
+        `Composio refused account-sharing rules on an account that is not a shared one, so ${outcome}. This deployment attaches every account to one person and asks for no sharing, so the rules are on the authorization config rather than on anything sent from here: an operator changing how ${app} is shared in Composio's own dashboard is what clears it.`,
+      );
+
+    /*
+     * REACHED ONLY WHERE THE SERVER SAID NOTHING, by the guard at the top of this function. What is
+     * left when it is reached is still worth far more than the route's default, because of what has
+     * already happened by the time this call is made: the auth configs were listed through the same
+     * key moments earlier and one of them was found enabled. So the two things the default sends an
+     * operator to check are both already proven, and the two things a person needs to know — that
+     * they were not sent anywhere, and that their consent is unspent — are facts about this
+     * particular call that no general sentence carries.
+     */
+    case "ComposioFailedToCreateConnectedAccountLink":
+      return refusal(
+        `Composio would not mint a connect link for ${app} and said nothing about why, so ${outcome}. Nobody was sent to a consent screen and no consent was spent. This deployment's key and its authorization config for the app were both read through successfully moments earlier, so neither of those is what to check; Composio's status page is.`,
+      );
+
+    /*
+     * THE SDK'S OWN SCHEMA REFUSING, ON EITHER SIDE OF THE WIRE. `ValidationError` is raised by
+     * nearly every model here — the auth-config create, the connected-account listing and link, the
+     * tool listing and the execute all `safeParse` what they are handed and what comes back — and in
+     * both directions it means the same thing: this deployment's copy of `@composio/core` and
+     * Composio's API no longer agree. It is the one condition below whose remedy is a package
+     * rather than a page, which is why it shares its wording with the shape refusals above.
+     */
+    case "ValidationError":
+      return refusal(
+        `This deployment's @composio/core refused the request or Composio's answer against its own schema, so ${outcome} — either before Composio was asked or after it had replied. Nothing an operator can set corrects that and the key is not what to check: upgrading this deployment's @composio/core is what fixes it.`,
+      );
+
+    /*
+     * NOTHING IS WRONG AT COMPOSIO, WHICH IS THE ENTIRE MESSAGE. A cancelled request is a caller's
+     * own abort, so sending somebody to a key or a status page is sending them to look at two things
+     * that are working. The one honest thing to add is the ambiguity: a call cancelled in flight may
+     * or may not have been acted on at the vendor, and this deployment cannot tell which.
+     */
+    case "ComposioRequestCancelledError":
+      return refusal(
+        `The request was cancelled before Composio answered, so ${outcome} as far as this deployment can tell — and how far it had got when the cancellation landed is exactly what it cannot tell. Nothing is wrong at Composio and nothing needs setting here; asking for it again is what settles which of the two it was.`,
+      );
+
+    /*
+     * THE ACCOUNT IS GONE AT THE VENDOR, WHICH THIS DEPLOYMENT'S ROWS DO NOT KNOW. `tools.execute`
+     * maps API error code 1803 onto this class (`src/errors/ToolErrors.ts`), and what it reports is
+     * a person whose `composio_connections` row still stands over an account Composio no longer
+     * holds — a grant withdrawn at Google, or an account removed in the dashboard. Retrying reaches
+     * neither; connecting again is what puts an account back under the row.
+     */
+    case "ComposioConnectedAccountNotFoundError":
+      return refusal(
+        `Composio holds no connected account for this person and ${app}, so ${outcome}. A grant withdrawn at the provider and an account removed in Composio's own dashboard both read exactly like this, and a retry reaches neither: connecting ${app} again on this deployment's Connected accounts page is what restores it.`,
+      );
+
+    /*
+     * THE ACTION THIS DEPLOYMENT HOLDS IS NO LONGER ONE COMPOSIO PUBLISHES. Raised by the resolve
+     * that `execute` makes before it runs anything (`src/models/Tools.ts`), so nothing ran. The
+     * tools this deployment stores are a listing taken at some earlier moment, and the remedy is
+     * therefore the same one the app-mismatch refusal below already names: re-read the listing.
+     */
+    case "ComposioToolNotFoundError":
+      return refusal(
+        `Composio no longer publishes that action at the version this deployment recorded for it, so ${outcome}. An action withdrawn from an app and a toolkit version retired both read like this, and a retry reaches neither: refreshing ${app}'s tools on its Plugins page records what Composio publishes now.`,
+      );
+
+    /*
+     * A RECORDED VERSION OF "latest" IS A ROW THAT NEEDS REWRITING, not a call that needs repeating.
+     * The SDK refuses `latest` for a tool executed one at a time (`src/models/Tools.ts`), and the
+     * version travelling with a call is whatever the listing wrote down for the action, so the fix
+     * is on the row rather than at Composio.
+     */
+    case "ComposioToolVersionRequiredError":
+      return refusal(
+        `Composio refuses a call whose toolkit version is "latest", and that is the version travelling with this one, so ${outcome}. A dated version is recorded when an app's actions are listed, so refreshing ${app}'s tools on its Plugins page replaces "latest" with a version Composio will accept.`,
+      );
+
+    default:
+      return null;
+  }
+}
+
+/**
+ * One vendor call, with whatever it refuses with translated on the way out.
+ *
+ * WRAPPED AROUND THE `await vendor.*` AND NOTHING ELSE, which is the discipline that makes this
+ * safe to apply everywhere. Everything else inside these methods is this file's own reading and
+ * refusing, and those already carry authored sentences; passing one back through
+ * {@link vendorRefusal} could only find a name it does not know, but the narrower scope is what
+ * makes that true by construction rather than by inspection.
+ *
+ * A CALL WITH NO ENTRY HERE IS THE FAILURE MODE THE TABLE IN THE TESTS EXISTS FOR. TypeScript has
+ * no checked exceptions, so nothing enumerates the calls that translate and nothing notices a new
+ * one that does not; the seam's own test walks every method of both projections and fails the
+ * method that forgot.
+ */
+async function askVendor<T>(
+  call: VendorCall,
+  ask: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await ask();
+  } catch (error) {
+    const refusal = vendorRefusal(error, call);
+    if (refusal !== null) throw refusal;
+    throw error;
+  }
+}
+
+/**
+ * Whether a thrown failure is this deployment's own bug rather than anybody's answer to a request.
+ *
+ * ONLY A PROGRAM PRODUCES THESE. A `TypeError`, a `ReferenceError` and a `RangeError` are what a
+ * mistake in this file or in the SDK looks like — a field read off `undefined`, a name that is not
+ * there — and none of them is a thing Composio can reply. The distinction matters in exactly one
+ * place, {@link buildComposioClient}'s delete loop, whose whole job is to keep going after a
+ * refusal: a loop that absorbs a bug of ours reports it as "Composio refused the rest" and tells an
+ * operator to press the button again about a fault that will do the same thing every time.
+ *
+ * NAMED AS A SMALL CLOSED LIST RATHER THAN GUESSED AT, because the cost of the two mistakes is not
+ * symmetric. A vendor error wrongly treated as our bug escapes the loop early and is reported as
+ * itself, which is loud and recoverable; our bug wrongly treated as a vendor refusal is swallowed
+ * into a count and a retry instruction, which is the state that hides.
+ */
+function isOurFault(error: unknown): boolean {
+  return (
+    error instanceof TypeError ||
+    error instanceof ReferenceError ||
+    error instanceof RangeError
+  );
+}
+
+/**
+ * Every reason a set-wide refusal collected, in one value a `cause` can hold.
+ *
+ * ALL OF THEM, WHICH IS THE CORRECTION. The two loops below used to throw with `cause: refused[0]`,
+ * so a person with five accounts of which three refused left one reason attached and two discarded
+ * — and the sentence those throws carry is a COUNT, deliberately, because a count is the thing a
+ * reader can act on. The reasons were therefore the only place the detail existed at all, and two
+ * thirds of it was being dropped on the floor.
+ *
+ * CARRIED RATHER THAN LOGGED, and that is this file's rule rather than a preference. A vendor error
+ * out of `connectedAccounts.link` or an account delete carries the request it was made for, and a
+ * console line is a line in an aggregator; nothing in this module logs a vendor object, for the same
+ * reason nothing in it logs the key. A `cause` travels to whoever is already holding the failure.
+ *
+ * ONE REFUSAL STAYS ITSELF. Wrapping a single error in an `AggregateError` would make every reader
+ * unwrap a list to find one thing, and `store.ts` already reads `error.cause` directly.
+ */
+function everyRefusal(refused: unknown[]): unknown {
+  if (refused.length === 1) return refused[0];
+  return new AggregateError(
+    refused,
+    `Composio refused ${refused.length} of the requests this call made.`,
+  );
+}
+
+/**
  * What this adapter needs of `@composio/core`'s client, written as a shape rather than as a class.
  *
  * A TEST SATISFIES IT WITH AN OBJECT LITERAL, which is the entire argument for it and the reason
@@ -866,13 +1139,20 @@ export function buildComposioClient(
     toolkit: string,
     statuses: VendorAccountStatus[],
   ): Promise<string[]> => {
-    const answered: unknown = await vendor.connectedAccounts.list({
-      userIds: [userId],
-      toolkitSlugs: [toolkit],
-      statuses,
-      accountType: "ALL",
-      limit: LISTING_LIMIT,
-    });
+    const answered: unknown = await askVendor(
+      {
+        outcome: `this person's ${toolkit} accounts were not read`,
+        app: toolkit,
+      },
+      () =>
+        vendor.connectedAccounts.list({
+          userIds: [userId],
+          toolkitSlugs: [toolkit],
+          statuses,
+          accountType: "ALL",
+          limit: LISTING_LIMIT,
+        }),
+    );
     /*
      * CHECKED HERE RATHER THAN AT EITHER CALLER, so that the two questions cannot drift on this.
      * `isConnected` answers a boolean and `revoke` deletes by id, and an unreadable listing is the
@@ -906,11 +1186,18 @@ export function buildComposioClient(
   const configsMadeHere = async (
     toolkit: string,
   ): Promise<CheckedAuthConfig[]> => {
-    const answered: unknown = await vendor.authConfigs.list({
-      toolkit,
-      limit: LISTING_LIMIT,
-      showDisabled: true,
-    });
+    const answered: unknown = await askVendor(
+      {
+        outcome: `this deployment's authorization configs for ${toolkit} were not read`,
+        app: toolkit,
+      },
+      () =>
+        vendor.authConfigs.list({
+          toolkit,
+          limit: LISTING_LIMIT,
+          showDisabled: true,
+        }),
+    );
     /*
      * CHECKED BEFORE THE FILTER AND NOT AFTER IT, which is the order the whole guard turns on. The
      * filter's question IS the name, so a row checked only once it had been kept would be a row
@@ -942,6 +1229,20 @@ export function buildComposioClient(
    * SERIALLY RATHER THAN TOGETHER, for the same reason every other call here goes out one at a
    * time: the vendor rate-limits, and a person with several accounts is not a reason to open
    * several connections. The order is the listing's, which is sorted.
+   *
+   * EVERY REFUSAL IS ANSWERED AND NOT ONLY THE FIRST. What the callers do with this list is throw a
+   * COUNT — "two of three were withdrawn and the rest refused" — because a count is what a reader
+   * can act on, which makes the reasons the only place the detail lives. Returning them all is what
+   * lets {@link everyRefusal} put all of them on the failure the caller raises; the previous version
+   * collected them and both callers then read `refused[0]`, so the second and third reason existed
+   * for the length of one expression and were then dropped.
+   *
+   * AND A BUG OF OURS IS NOT A REFUSAL BY COMPOSIO, which is the other half. The catch used to take
+   * everything, so a `TypeError` out of this file's own code arrived in the same list as a vendor's
+   * 502 and came back to a person as "Composio refused the rest, press disconnect again" — advice
+   * about a fault that will do exactly the same thing the second time, wearing the vendor's name.
+   * {@link isOurFault} names the three classes only a program produces, and one of those comes
+   * straight back out of the loop as itself.
    */
   const askForEach = async <T>(
     items: T[],
@@ -952,6 +1253,7 @@ export function buildComposioClient(
       try {
         await ask(item);
       } catch (error) {
+        if (isOurFault(error)) throw error;
         refused.push(error);
       }
     }
@@ -988,10 +1290,10 @@ export function buildComposioClient(
    * catalogue is this deployment's own job, over the rows below.
    */
   const fetchDirectory = async (): Promise<BrokerApp[]> => {
-    const answered: unknown = await vendor.toolkits.get({
-      limit: LISTING_LIMIT,
-      sortBy: "usage",
-    });
+    const answered: unknown = await askVendor(
+      { outcome: "the app catalogue was not read", app: null },
+      () => vendor.toolkits.get({ limit: LISTING_LIMIT, sortBy: "usage" }),
+    );
 
     /*
      * THE CONTAINER IS SETTLED BEFORE ITS LENGTH IS MEASURED, which is why this sits above the
@@ -1060,10 +1362,17 @@ export function buildComposioClient(
        * `page` required precisely so that no layer could quietly supply one. See the module
        * comment on what an omitted limit does beyond truncating.
        */
-      const answered: unknown = await vendor.tools.getRawComposioTools({
-        toolkits: [toolkit],
-        limit: page.limit,
-      });
+      const answered: unknown = await askVendor(
+        {
+          outcome: `${toolkit}'s action list was not refreshed and the tools already held are untouched`,
+          app: toolkit,
+        },
+        () =>
+          vendor.tools.getRawComposioTools({
+            toolkits: [toolkit],
+            limit: page.limit,
+          }),
+      );
 
       const tools = Array.isArray(answered) ? answered : null;
       if (tools === null) {
@@ -1095,9 +1404,16 @@ export function buildComposioClient(
        * rather than a saved one. It buys the one thing a single request cannot: a mismatch that is
        * refused before anything runs, rather than discovered in an audit row afterwards.
        */
-      const resolved = await vendor.tools.getRawComposioToolBySlug(call.slug, {
-        version: call.version,
-      });
+      const resolved = await askVendor(
+        {
+          outcome: `${call.slug} was not resolved and nothing was run`,
+          app: call.toolkit,
+        },
+        () =>
+          vendor.tools.getRawComposioToolBySlug(call.slug, {
+            version: call.version,
+          }),
+      );
       const ran = resolved.toolkit?.slug;
       if (ran !== call.toolkit) {
         /*
@@ -1118,11 +1434,15 @@ export function buildComposioClient(
         );
       }
 
-      return vendor.tools.execute(call.slug, {
-        arguments: args,
-        userId: call.userId,
-        version: call.version,
-      });
+      return askVendor(
+        { outcome: `${call.slug} was not run`, app: call.toolkit },
+        () =>
+          vendor.tools.execute(call.slug, {
+            arguments: args,
+            userId: call.userId,
+            version: call.version,
+          }),
+      );
     },
   };
 
@@ -1213,10 +1533,17 @@ export function buildComposioClient(
       const existing = await configsMadeHere(toolkit);
       if (existing.length > 0) return;
 
-      await vendor.authConfigs.create(toolkit, {
-        type: "use_composio_managed_auth",
-        name: `${name} ${CONFIG_SUFFIX}`,
-      });
+      await askVendor(
+        {
+          outcome: `no authorization config was created for ${toolkit} and the app is not enabled`,
+          app: toolkit,
+        },
+        () =>
+          vendor.authConfigs.create(toolkit, {
+            type: "use_composio_managed_auth",
+            name: `${name} ${CONFIG_SUFFIX}`,
+          }),
+      );
     },
 
     async deleteAuthConfig(toolkit): Promise<void> {
@@ -1240,7 +1567,14 @@ export function buildComposioClient(
        */
       const ours = await configsMadeHere(toolkit);
       const refused = await askForEach(ours, (config) =>
-        vendor.authConfigs.delete(config.id, { revoke_on_delete: true }),
+        askVendor(
+          {
+            outcome: `one of this deployment's authorization configs for ${toolkit} was not removed`,
+            app: toolkit,
+          },
+          () =>
+            vendor.authConfigs.delete(config.id, { revoke_on_delete: true }),
+        ),
       );
       if (refused.length > 0) {
         /*
@@ -1249,11 +1583,13 @@ export function buildComposioClient(
          * supposed to end, and the app's row is deleted after this returns — so a swallowed failure
          * here is the one state nothing in this deployment can find again. The count is the whole
          * message: an operator who can see that one of two configs went knows that pressing remove
-         * again finishes the job rather than repeating it.
+         * again finishes the job rather than repeating it. Every refusal the loop met travels as
+         * `cause` — see {@link everyRefusal} — because the count is deliberately all the sentence
+         * says, which leaves the reasons nowhere else to live.
          */
         throw new BrokerRefusalError(
           `Composio removed ${ours.length - refused.length} of this deployment's ${ours.length} authorization configs for ${toolkit} and refused the rest, so the app has not been fully withdrawn. Removing it again asks only for what is left.`,
-          { cause: refused[0] },
+          { cause: everyRefusal(refused) },
         );
       }
     },
@@ -1360,9 +1696,16 @@ export function buildComposioClient(
        * calls it a "magic function" for exactly that — which is the opposite of what this
        * deployment wants.
        */
-      const request = await vendor.connectedAccounts.link(userId, config.id, {
-        callbackUrl: returnUrl,
-      });
+      const request = await askVendor(
+        {
+          outcome: `this person's connection to ${toolkit} was not begun`,
+          app: toolkit,
+        },
+        () =>
+          vendor.connectedAccounts.link(userId, config.id, {
+            callbackUrl: returnUrl,
+          }),
+      );
       const redirectUrl = request.redirectUrl;
       if (!redirectUrl) {
         /*
@@ -1406,7 +1749,13 @@ export function buildComposioClient(
        */
       const accounts = await accountsFor(userId, toolkit, REVOCABLE);
       const refused = await askForEach(accounts, (id) =>
-        vendor.connectedAccounts.delete(id, { revoke_on_delete: true }),
+        askVendor(
+          {
+            outcome: `one of this person's ${toolkit} accounts was not withdrawn`,
+            app: toolkit,
+          },
+          () => vendor.connectedAccounts.delete(id, { revoke_on_delete: true }),
+        ),
       );
 
       if (refused.length > 0) {
@@ -1424,12 +1773,13 @@ export function buildComposioClient(
          * WHICH IS ALSO WHY IT IS NOT A `true` WITH A GRUMBLE. Nothing was disconnected in the
          * sense the person asked about: their app still answers. The count is in the sentence
          * because "some of your accounts were withdrawn" is the one thing a reader cannot work out
-         * for themselves, and the vendor's own error is kept as `cause` for whoever is reading a
-         * log rather than a page.
+         * for themselves, and EVERY refusal the loop met is kept as `cause` for whoever is reading
+         * a log rather than a page — see {@link everyRefusal} for why all of them rather than the
+         * first, which is what this used to keep.
          */
         throw new BrokerRefusalError(
           `Composio withdrew ${accounts.length - refused.length} of this person's ${accounts.length} accounts for ${toolkit} and refused the rest, so their access to it has not ended. Disconnecting again asks only for the accounts that are left.`,
-          { cause: refused[0] },
+          { cause: everyRefusal(refused) },
         );
       }
 
