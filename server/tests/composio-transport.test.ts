@@ -295,6 +295,28 @@ describe("finding the vendor's own sentence", () => {
     expect(vendorSentence(nested({ text: "a nested sentence" }))).toBeNull();
     expect(vendorSentence(nested(["a sentence in a list"]))).toBeNull();
   });
+
+  test("the vendor's placeholder is not a sentence, however deep it arrives", () => {
+    /*
+     * THE GUARD COVERED THE BRANCH THAT THROWS AND NOT THE ONE THIS FUNCTION READS, which is the
+     * half that matters: `listingSentence` and `callTool` both prefer this answer over their own
+     * fallbacks, so "Error executing the tool X" found nested inside `cause` walked straight past a
+     * check written for exactly that string. This module's own comment calls it the one sentence
+     * never worth passing on; a reader who asked for that tool learns from it only that they asked.
+     */
+    expect(
+      vendorSentence(nested("Error executing the tool GMAIL_FETCH_EMAILS")),
+    ).toBeNull();
+    expect(vendorSentence(nested("  error executing the tool X\n"))).toBeNull();
+
+    // Matched on its opening and not looked for anywhere in the string, because a real sentence
+    // that goes on to mention the phrase is still a real sentence.
+    expect(
+      vendorSentence(
+        nested("No connected account found; error executing the tool X."),
+      ),
+    ).toBe("No connected account found; error executing the tool X.");
+  });
 });
 
 describe("listing an app's actions", () => {
@@ -875,6 +897,185 @@ describe("listing an app's actions", () => {
     expect(Object.keys(blank ?? {})).not.toContain("version");
     // Recorded as the version `callTool` will actually send, rather than as one it has to repair.
     expect(padded?.version).toBe("20260903_00");
+  });
+
+  test("the name recorded is the slug the guard measured, without its padding", async () => {
+    /*
+     * The guard above admits an action by measuring `slug.trim()`, and the version beside it is
+     * recorded trimmed for a reason this file writes down — so the name went to `mcp_tools` and on
+     * to Composio with the padding still on it. That name is NOT NULL and half the primary key, it
+     * is what a grant records, and it is the `slug` `callTool` sends back; a row keyed on
+     * " GMAIL_FETCH_EMAILS " is a different action from the one anybody granted.
+     */
+    useComposioClient(
+      recording({
+        listActions: async () => [
+          { ...GMAIL_READ, slug: " GMAIL_FETCH_EMAILS\n" },
+        ],
+      }).client,
+    );
+
+    const [tool] = await listTools({ url: "composio://gmail" });
+
+    expect(tool?.name).toBe("GMAIL_FETCH_EMAILS");
+  });
+
+  test("a slug listed twice is listed twice, because the collision is settled downstream", async () => {
+    /*
+     * WHY THIS IS NOT A FIFTH REFUSAL, written down because it was proposed as one. `mcp_tools`
+     * holds one row per name, so a vendor naming an action twice IS a collision — and
+     * `storableTools` in `./store` already resolves it before a transaction is opened, keying the
+     * insert by name and keeping the first occurrence. "a vendor naming one action twice records it
+     * once" in `plugin-store.integration.test.ts` pins that end: one row, and `lastError` null.
+     * Refusing here would replace a healthy refresh with a total failure and strand every grant on
+     * the app — the loss the refusals around this one exist to prevent, caused by one of them.
+     *
+     * WHAT THIS PATH DOES OWE THAT DE-DUPLICATION is the name it de-duplicates by. The map records
+     * the trimmed slug, so two spellings of one action arrive downstream as one name rather than
+     * as two rows the database will happily keep apart.
+     */
+    useComposioClient(
+      recording({
+        listActions: async () => [
+          GMAIL_READ,
+          {
+            ...GMAIL_READ,
+            slug: "  GMAIL_FETCH_EMAILS  ",
+            description: "Fetch emails, listed again.",
+            version: "20260101_00",
+          },
+        ],
+      }).client,
+    );
+
+    const listed = await listTools({ url: "composio://gmail" });
+
+    expect(listed.map((tool) => tool.name)).toEqual([
+      "GMAIL_FETCH_EMAILS",
+      "GMAIL_FETCH_EMAILS",
+    ]);
+  });
+
+  test("tags that are not a list of labels break the listing rather than the runtime", async () => {
+    /*
+     * `effectOf` builds a Set out of whatever is in this field, and the element guard above only
+     * settles that the action is an object. A `tags` that is not iterable throws
+     * `{} is not iterable` out of a map that sits OUTSIDE the try wrapping the vendor's call, so
+     * that string is what `refreshTools` writes into `lastError` for a person to read.
+     *
+     * A STRING IS THE WORSE HALF, because it does not throw at all: `new Set("readOnlyHint")`
+     * yields its characters, no hint matches, and a read-only action is recorded as a write. That
+     * is the silent wrong answer a refusal exists to prevent, so both shapes are refused rather
+     * than repaired.
+     */
+    for (const tags of [{}, "readOnlyHint", 7, { 0: "readOnlyHint" }]) {
+      useComposioClient(
+        recording({
+          listActions: async () =>
+            [
+              GMAIL_READ,
+              { slug: "GMAIL_ODD", description: "Odd labels.", tags },
+            ] as unknown as ComposioAction[],
+        }).client,
+      );
+
+      const outcome = await listTools({ url: "composio://gmail" }).then(
+        () => "the listing was committed",
+        (error: unknown) => (error as Error).message,
+      );
+
+      expect(outcome).not.toBe("the listing was committed");
+      expect(outcome).toContain("GMAIL_ODD");
+      expect(outcome).toContain("gmail");
+      expect(outcome).not.toMatch(/is not iterable|is not a function/i);
+    }
+  });
+
+  test("a vendor complaint that merely carries issues is not answered with an upgrade", async () => {
+    /*
+     * `isSchemaMismatch` duck-types on the PRESENCE of an `issues` array, and an array under that
+     * name is not the vendor's SDK refusing its own answer. A gateway's validation payload carries
+     * one, and so does any error somebody built with a list of complaints in it. Read as a schema
+     * mismatch, the one sentence saying what actually went wrong is replaced by an instruction to
+     * upgrade a package that is working perfectly.
+     */
+    for (const thrown of [
+      Object.assign(
+        new Error("Gmail rejected the query: from: is not a search operator."),
+        { issues: ["from: is not a search operator."] },
+      ),
+      Object.assign(new Error("Composio rejected the request for gmail."), {
+        issues: [{ field: "query", reason: "required" }],
+      }),
+    ]) {
+      useComposioClient(
+        recording({
+          listActions: async () => {
+            throw thrown;
+          },
+        }).client,
+      );
+
+      const message = await listTools({ url: "composio://gmail" }).then(
+        () => "",
+        (error: unknown) => (error as Error).message,
+      );
+
+      expect(message).toContain("rejected");
+      expect(message).not.toMatch(/upgrad/i);
+    }
+  });
+
+  test("a listing left empty by the file filter is not committed as an app with no actions", async () => {
+    /*
+     * THE FILTER CAN EMPTY A LISTING, and an empty listing is the one thing this function's four
+     * other refusals exist to prevent. `refreshTools` commits a listing as the complete truth
+     * about the app — the replace is a delete and an insert — so every recorded action goes, with
+     * its `effect`, `destructive` and `version`, under a refresh that reported success. The
+     * versions are the loss no later refresh repairs where Composio publishes none.
+     *
+     * An app whose actions all stage files is not an app with no actions, and the sentence has to
+     * say which of the two this is.
+     */
+    const onlyFiles = [
+      {
+        slug: "GMAIL_SEND_EMAIL",
+        description: "Send an email.",
+        tags: ["createHint"],
+        version: "20260903_00",
+        inputParameters: {
+          type: "object",
+          properties: { attachment: FILE_PROPERTY },
+        },
+      },
+      {
+        slug: "GMAIL_REPLY_TO_THREAD",
+        description: "Reply to a thread.",
+        tags: ["createHint"],
+        version: "20260903_00",
+        inputParameters: {
+          type: "object",
+          properties: { attachment: FILE_PROPERTY },
+        },
+      },
+    ];
+    useComposioClient(recording({ listActions: async () => onlyFiles }).client);
+
+    const outcome = await listTools({ url: "composio://gmail" }).then(
+      (listed) => `the listing was committed with ${listed.length} actions`,
+      (error: unknown) => (error as Error).message,
+    );
+
+    expect(outcome).not.toContain("committed");
+    expect(outcome).toContain("gmail");
+    expect(outcome).toMatch(/file/i);
+
+    // AND THE VENDOR'S OWN EMPTY ANSWER IS STILL AN ANSWER. `[]` from a vendor that was asked and
+    // advertises nothing is what every other transport means by it, and `refreshTools` is right to
+    // commit it. The refusal above is about a listing this deployment emptied, not one that
+    // arrived empty.
+    useComposioClient(recording({ listActions: async () => [] }).client);
+    expect(await listTools({ url: "composio://gmail" })).toEqual([]);
   });
 });
 
@@ -1506,5 +1707,117 @@ describe("calling one action", () => {
       expect(result.text).toContain("GMAIL_FETCH_EMAILS");
       expect(result.text).not.toMatch(/is not an object|undefined is not/i);
     }
+  });
+
+  test("a schema mismatch on the way to the call is not handed on as a Zod dump", async () => {
+    /*
+     * THE SDK'S PARSE RUNS BEFORE THE SDK'S OWN TRY DOES. `./composio-adapter` resolves the tool
+     * first — `getRawComposioToolBySlug`, which runs `ToolSchema.parse` — so a vendor answer their
+     * schema rejects arrives here as a raw `ZodError`, whose `message` is the issue array as JSON.
+     * The listing path has refused that string since the day it was written; this path passed the
+     * whole dump to the model and into `store.ts`'s audit row, wearing the vendor's words for a
+     * failure that is a version skew between this deployment and their package.
+     */
+    const issues = [
+      {
+        code: "invalid_type",
+        expected: "string",
+        received: "undefined",
+        path: ["toolkit", "slug"],
+        message: "Required",
+      },
+    ];
+    useComposioClient(
+      recording({
+        execute: async () => {
+          throw Object.assign(new Error(JSON.stringify(issues, null, 2)), {
+            name: "ZodError",
+            issues,
+          });
+        },
+      }).client,
+    );
+
+    const result = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.text).not.toContain("invalid_type");
+    expect(result.text).not.toContain("received");
+    expect(result.text).toContain("GMAIL_FETCH_EMAILS");
+    // A vendor change rather than anything an administrator can do to this connection, so the
+    // sentence has to name the one step that helps.
+    expect(result.text).toMatch(/upgrad/i);
+  });
+
+  test("a placeholder nested in the cause is refused like the thrown one", async () => {
+    /*
+     * The same string, reached by the route the guard did not cover. `vendorSentence` is preferred
+     * over the thrown message, so a placeholder sitting where the useful sentence usually sits was
+     * handed to the model past a check written to stop it.
+     */
+    useComposioClient(
+      recording({
+        execute: async () => {
+          throw Object.assign(
+            new Error("Error executing the tool GMAIL_FETCH_EMAILS"),
+            {
+              cause: {
+                error: {
+                  error: {
+                    message: "Error executing the tool GMAIL_FETCH_EMAILS",
+                  },
+                },
+              },
+            },
+          );
+        },
+      }).client,
+    );
+
+    const result = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.text).not.toMatch(/^error executing the tool/i);
+    expect(result.text).toMatch(/Plugins page/);
+  });
+
+  test("an answer that serializes to nothing at all is refused in this file's own words", async () => {
+    /*
+     * `JSON.stringify` ANSWERS `undefined` RATHER THAN THROWING for a function, a symbol, or
+     * anything else with no JSON form — `ComposioResult` is this module's projection and the value
+     * is the vendor's, so that is a shape this path meets rather than one it forbids. The
+     * `undefined` then reached the cap, which measures `.length`, and the engine's own
+     * `undefined is not an object` became the second half of a sentence this file wrote.
+     */
+    useComposioClient(
+      recording({
+        execute: async () => ({
+          data: (() => "x") as unknown as Record<string, unknown>,
+          error: null,
+          successful: true,
+        }),
+      }).client,
+    );
+
+    const result = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/could not turn that answer into text/i);
+    expect(result.text).toContain("GMAIL_FETCH_EMAILS");
+    expect(result.text).not.toMatch(
+      /is not an object|undefined is not|TypeError/i,
+    );
   });
 });
