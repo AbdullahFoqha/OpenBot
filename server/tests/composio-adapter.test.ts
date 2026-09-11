@@ -1,3 +1,4 @@
+import { Composio } from "@composio/core";
 import { describe, expect, test } from "bun:test";
 import {
   BrokerRefusalError,
@@ -9,7 +10,10 @@ import {
   LISTING_LIMIT,
   vendorSentence,
 } from "../src/plugins/composio";
-import { buildComposioClient } from "../src/plugins/composio-adapter";
+import {
+  buildComposioClient,
+  createComposioClient,
+} from "../src/plugins/composio-adapter";
 
 /**
  * The three facts about the adapter that a type checker cannot settle, asserted with no network.
@@ -155,6 +159,36 @@ const OURS_SPARE = {
   name: "Linear (OpenBot)",
   status: "ENABLED",
 };
+
+/**
+ * The gmail config this deployment made, which is what a withdrawal is now allowed to reach.
+ *
+ * `revoke` READS THE CONFIGS BEFORE IT READS THE ACCOUNTS, which is why every fixture below that
+ * withdraws anything answers this listing. The account listing is scoped to the ids that come back
+ * from it, so a fixture that did not answer it would be describing a deployment with no config of
+ * its own — for which there is, correctly, nothing to withdraw — and every assertion about what the
+ * delete was asked would be an assertion about a call that never went out.
+ *
+ * ITS OWN CONSTANT RATHER THAN {@link OURS}, because the suffix is the whole of what the adapter
+ * reads and the rest of the name is the app an administrator typed. A gmail withdrawal answered
+ * with a config called "Linear (OpenBot)" would pass, and would leave the one fixture in this file
+ * that names the app it is about naming the wrong one.
+ */
+const OUR_GMAIL = {
+  id: "ac_gmail_ours",
+  name: "Gmail (OpenBot)",
+  status: "ENABLED",
+};
+
+/** An operator's own gmail config, carrying no suffix, which is the whole of what tells them apart. */
+const BY_HAND_GMAIL = {
+  id: "ac_gmail_by_hand",
+  name: "Gmail",
+  status: "ENABLED",
+};
+
+/** That listing as a vendor double, since every withdrawing fixture below needs the same one. */
+const ourGmailConfig = async () => ({ items: [OUR_GMAIL] });
 
 /**
  * The three sentences `authorize` can refuse with, told apart by the remedy each one prescribes.
@@ -1120,6 +1154,7 @@ describe("withdrawing one person's grants", () => {
     const deleted: unknown[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({ items: [{ id: "ca_1" }] }),
           delete: async (...call: unknown[]) => {
@@ -1139,6 +1174,7 @@ describe("withdrawing one person's grants", () => {
   test("a delete Composio answered `success: false` is not a withdrawal", async () => {
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({ items: [{ id: "ca_1" }] }),
           // A 200 whose body says the account was not deleted. The flag went out, Composio read
@@ -1172,6 +1208,7 @@ describe("withdrawing one person's grants", () => {
   test("a delete whose verdict Composio did not send is not counted as one either", async () => {
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({ items: [{ id: "ca_1" }] }),
           /*
@@ -1207,6 +1244,7 @@ describe("withdrawing one person's grants", () => {
     const asked: unknown[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async (query: unknown) => {
             asked.push(query);
@@ -1226,6 +1264,13 @@ describe("withdrawing one person's grants", () => {
      * about. The statuses because an unfinished consent or a lapsed token is still something a
      * provider is holding. `REVOKED` is the one left out: it is the only status that says the grant
      * is already gone, and deleting a tombstone would have this report a withdrawal that never was.
+     *
+     * AND `authConfigIds`, WHICH THIS ASSERTION USED TO SAY WAS ABSENT. It was written out as the
+     * whole query on the reasoning that the breadth is the point — and it is, for three of the four
+     * parameters. The fourth is the opposite: omitting it asks about every authorization config in
+     * the project, including ones an operator built by hand in Composio's dashboard, and this
+     * listing is the one that decides what gets deleted with `revoke_on_delete`. The assertion was
+     * therefore pinning the defect in place, which is why it moved rather than being relaxed.
      */
     expect(asked).toEqual([
       {
@@ -1240,6 +1285,7 @@ describe("withdrawing one person's grants", () => {
           "INACTIVE",
         ],
         accountType: "ALL",
+        authConfigIds: [OUR_GMAIL.id],
         limit: WHOLE_LISTING,
       },
     ]);
@@ -1298,6 +1344,7 @@ describe("withdrawing one person's grants", () => {
     const deleted: string[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({
             items: [{ id: "ca_1" }, { id: "ca_2" }, { id: "ca_3" }],
@@ -1322,6 +1369,7 @@ describe("withdrawing one person's grants", () => {
   test("a partial withdrawal is a failure rather than a reported disconnection", async () => {
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({ items: [{ id: "ca_1" }, { id: "ca_2" }] }),
           delete: async (id: string) => {
@@ -1363,6 +1411,7 @@ describe("withdrawing one person's grants", () => {
     const deleted: string[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({
             items: [{ id: "ca_1" }, { id: null }, { id: "ca_3" }],
@@ -1413,6 +1462,207 @@ describe("withdrawing one person's grants", () => {
     expect(
       await broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
     ).toBe(true);
+  });
+
+  /**
+   * AN OPERATOR'S OWN AUTHORIZATION CONFIG IS NOT THIS DEPLOYMENT'S TO EMPTY.
+   *
+   * The account listing was asked by person, by app and by "all account types" and by nothing else,
+   * so it returned every account Composio holds for that pair — including ones attached to a config
+   * an operator built by hand in their dashboard, for purposes this deployment knows nothing about,
+   * and including the SHARED ones other people are acting through. Each of those was then deleted
+   * with `revoke_on_delete`, which tears the grant up at the provider. One person pressing
+   * disconnect on their own settings page ended somebody else's integration, silently, and answered
+   * `true`.
+   *
+   * WHICH IS THE PRINCIPLE `deleteAuthConfig` ALREADY STATES ONE LEVEL UP: it refuses to delete a
+   * config it cannot show is this deployment's, on exactly the reasoning that an operator's
+   * dashboard work is not ours to destroy. The accounts hanging off that config are the same work.
+   *
+   * ASSERTED ON WHAT WENT OUT, because an implementation that asked the unscoped question and then
+   * deleted everything it found answers this test's `true` just as confidently.
+   */
+  test("the withdrawal asks only about accounts on configs this deployment made", async () => {
+    const scoped: unknown[] = [];
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          // An operator's beside ours, which is the state the whole guard is about. Out of the
+          // vendor's order, so a reader that took the first row would take the wrong one.
+          list: async () => ({ items: [BY_HAND_GMAIL, OUR_GMAIL] }),
+        },
+        connectedAccounts: {
+          list: async (query: unknown) => {
+            scoped.push((query as { authConfigIds?: unknown }).authConfigIds);
+            return { items: [{ id: "ca_1" }] };
+          },
+          delete: async (id: string) => {
+            deleted.push(id);
+            return WITHDRAWN;
+          },
+        },
+      }),
+    );
+
+    expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+      true,
+    );
+
+    // The operator's config is not in the question, so no account on it can be in the answer and
+    // none of them can reach the delete.
+    expect(scoped).toEqual([[OUR_GMAIL.id]]);
+    expect(deleted).toEqual(["ca_1"]);
+  });
+
+  /**
+   * NOTHING OF OURS IS NOTHING TO WITHDRAW, AND IT IS ANSWERED WITHOUT ASKING.
+   *
+   * `authorize` mints every connect link against a config this deployment made and refuses where
+   * there is none, so an app with none of ours never had a connection begun through it. Listing
+   * accounts anyway could only turn up somebody else's, and the one thing this call does with an
+   * account it turns up is delete it.
+   *
+   * THE ASSERTION IS THE DOUBLE. `connectedAccounts.list` is left at {@link fakeVendor}'s refusal,
+   * so an implementation that asked the question at all fails here by name — which is a stronger
+   * statement than the `false` beside it, because a listing scoped to an EMPTY set of configs would
+   * answer `false` too while putting a filter on the wire that the far side is free to read as no
+   * filter at all.
+   */
+  test("a person's accounts are not listed where this deployment holds no config of its own", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [BY_HAND_GMAIL] }) },
+      }),
+    );
+
+    expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+      false,
+    );
+  });
+
+  /**
+   * A WITHDRAWAL THAT HAPPENED, REPORTED AS A FAILURE — the guard for `success: false` overreaching.
+   *
+   * The installed client resolves two answers with no document at all: a 204 becomes `null`
+   * ("fetch refuses to read the body when the status code is 204") and a JSON reply carrying
+   * `content-length: 0` becomes `undefined` (`@composio/client` 0.1.0-alpha.76,
+   * `src/internal/parse.ts:16-42`). Neither can be a rejection the vendor made: every `!response.ok`
+   * is thrown as an `APIError` before parsing (`src/client.ts:539`), so an answer arriving at all is
+   * Composio having accepted the request and deleted the account.
+   *
+   * READING THAT AS "NO VERDICT" TURNED A COMPLETED WITHDRAWAL INTO A PARTIAL-WITHDRAWAL REFUSAL,
+   * which leaves the person's connection row standing, tells them their access has not ended, and
+   * has them press disconnect again — against an account that is already gone, which is a second
+   * fault waiting on the first. It is the same lie as the unread `success: false` before it, facing
+   * the other way.
+   *
+   * THE OTHER DIRECTION IS ASSERTED NEXT DOOR AND IS NOT WEAKENED BY THIS: `{}` is a document that
+   * arrived without its verdict, which is a fact about the package, and it still refuses.
+   */
+  for (const { shape, answer } of [
+    { shape: "a 204 carrying no content", answer: null },
+    { shape: "a JSON reply of content-length zero", answer: undefined },
+  ]) {
+    test(`a withdrawal Composio answered with ${shape} is a withdrawal`, async () => {
+      const deleted: string[] = [];
+      const { broker } = buildComposioClient(
+        fakeVendor({
+          authConfigs: { list: ourGmailConfig },
+          connectedAccounts: {
+            list: async () => ({ items: [{ id: "ca_1" }] }),
+            delete: async (id: string) => {
+              deleted.push(id);
+              return answer;
+            },
+          },
+        }),
+      );
+
+      expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+        true,
+      );
+      // And the flag still went out, so the `true` is about a delete that asked for the grant to be
+      // revoked rather than about one that quietly filed the account away.
+      expect(deleted).toEqual(["ca_1"]);
+    });
+  }
+
+  /**
+   * A ROW THE LISTING NAMED TWICE IS ONE ACCOUNT, NOT TWO.
+   *
+   * The paging loop guards against the vendor repeating a CURSOR and not against it repeating a
+   * ROW, and those are different faults: a page boundary crossed while accounts are being created
+   * or deleted, or a proxy stitching two overlapping pages together, hands the same id over twice
+   * with a cursor that advanced perfectly each time. The second delete then meets Composio's "there
+   * is no such account" — which arrives as a refusal — so a withdrawal that in fact COMPLETED was
+   * thrown over as a partial one, the person's connection row was left standing, and every retry
+   * met the same duplicate and failed in the same place.
+   *
+   * THE DOUBLE REFUSES THE SECOND DELETE OF ONE ACCOUNT, which is what the vendor does and what
+   * makes this test able to fail. A stub that answered both identically would be green against an
+   * adapter that sent the delete twice.
+   */
+  test("an account the listing named twice is withdrawn once", async () => {
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: ourGmailConfig },
+        connectedAccounts: {
+          list: async (query: unknown) =>
+            (query as { cursor?: string }).cursor === undefined
+              ? { items: [{ id: "ca_1" }], nextCursor: "page_2" }
+              : { items: [{ id: "ca_1" }], nextCursor: null },
+          delete: async (id: string) => {
+            if (deleted.includes(id)) {
+              throw new Error(
+                `Composio holds no connected account with the id ${id}.`,
+              );
+            }
+            deleted.push(id);
+            return WITHDRAWN;
+          },
+        },
+      }),
+    );
+
+    expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+      true,
+    );
+    expect(deleted).toEqual(["ca_1"]);
+  });
+
+  /**
+   * AND THE COUNT IN A REAL PARTIAL FAILURE IS OF ACCOUNTS, NOT OF ROWS.
+   *
+   * The denominator was `accounts.length`, which is how many rows the listing handed over — so a
+   * listing that named one account twice made the sentence a reader is meant to act on state a
+   * figure nothing had counted. "One of three" over two accounts is the same class of mistake as
+   * the page-ceiling sentence that asserted a row count it had not measured.
+   */
+  test("a duplicated row is not a third account in the sentence a partial failure carries", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: ourGmailConfig },
+        connectedAccounts: {
+          list: async () => ({
+            items: [{ id: "ca_1" }, { id: "ca_1" }, { id: "ca_2" }],
+          }),
+          delete: async (id: string) => {
+            if (id === "ca_2") throw new Error("Composio refused this one.");
+            return WITHDRAWN;
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const failure = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+    expect(failure).toBeInstanceOf(BrokerRefusalError);
+    expect(failure.message).toMatch(/withdrew 1 of this person's 2 accounts/);
+    expect(failure.message).not.toMatch(A_CRASH);
   });
 });
 
@@ -1513,6 +1763,7 @@ describe("a catalogue that might be a fragment", () => {
   test("each caller gets its own rows, so one of them cannot edit the cache", async () => {
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         toolkits: {
           get: async () => [
             {
@@ -1766,6 +2017,9 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
     {
       method: "revoke",
       vendor: (raise) => ({
+        // The configs first, because the withdrawal reads them to find out which accounts are this
+        // deployment's to end before it asks for any account at all.
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({ items: [{ id: "ca_1" }] }),
           delete: raise,
@@ -2132,6 +2386,7 @@ describe("what the delete loop keeps of the failures it meets", () => {
   test("every account Composio refused is carried, not only the first", async () => {
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({
             items: [{ id: "ca_1" }, { id: "ca_2" }, { id: "ca_3" }],
@@ -2162,6 +2417,7 @@ describe("what the delete loop keeps of the failures it meets", () => {
   test("a single refusal is still carried as itself rather than wrapped", async () => {
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({ items: [{ id: "ca_1" }, { id: "ca_2" }] }),
           delete: async (id: string) => {
@@ -2200,6 +2456,7 @@ describe("what the delete loop keeps of the failures it meets", () => {
     const deleted: string[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({
             items: [{ id: "ca_1" }, { id: "ca_2" }, { id: "ca_3" }],
@@ -2399,6 +2656,12 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
         const sent: string[] = [];
         return {
           parts: {
+            authConfigs: {
+              list: async () => {
+                sent.push("authConfigs.list");
+                return { items: [OUR_GMAIL] };
+              },
+            },
             connectedAccounts: {
               list: async () => {
                 sent.push("connectedAccounts.list");
@@ -2416,7 +2679,11 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
       // delete must not be reached at all — a withdrawal of `undefined` is the request this refusal
       // exists to stop being made. Where SOME rows are readable the answer is different and the
       // test for it sits beside `revoke`: those go, and the sentence counts what was left.
-      asked: ["connectedAccounts.list"],
+      //
+      // The config listing goes out first because the withdrawal is scoped to this deployment's own
+      // configs before it asks for an account at all; it is named here rather than left out so that
+      // the assertion stays a statement about the whole conversation with the vendor.
+      asked: ["authConfigs.list", "connectedAccounts.list"],
       ask: ({ broker }) =>
         broker.revoke({ userId: "user_1", toolkit: "gmail" }),
       authored: true,
@@ -2518,6 +2785,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
     const deleted: string[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async (query: unknown) => {
             asked.push(query);
@@ -2549,6 +2817,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
         toolkitSlugs: ["gmail"],
         statuses: REVOCABLE_STATUSES,
         accountType: "ALL",
+        authConfigIds: [OUR_GMAIL.id],
         limit: WHOLE_LISTING,
       },
       {
@@ -2556,6 +2825,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
         toolkitSlugs: ["gmail"],
         statuses: REVOCABLE_STATUSES,
         accountType: "ALL",
+        authConfigIds: [OUR_GMAIL.id],
         limit: WHOLE_LISTING,
         cursor: "page_2",
       },
@@ -2580,6 +2850,96 @@ describe("a listing that arrived with a cursor still outstanding", () => {
     expect(
       await broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
     ).toBe(true);
+  });
+
+  /**
+   * A YES/NO QUESTION THAT PAGING MADE FAILABLE, WHICH IS THE OTHER HALF OF THE TEST ABOVE.
+   *
+   * Reading every page is what makes `isConnected`'s `false` honest, and it is also what put the
+   * two cursor refusals and the page ceiling in front of a person whose ACTIVE account had already
+   * been found. `true` is settled the moment one row arrives — no cursor Composio sends next and no
+   * fiftieth page can turn it into anything else — so a fault on a page nobody needed was deciding
+   * the answer to a question nobody still had. And the consequence is not a wasted request:
+   * `store.ts` DELETES this person's `composio_connections` row on anything other than a `true`,
+   * and the route turns the refusal into "Composio's answer could not be read" over an account that
+   * is right there on page one.
+   *
+   * THE THREE FAULTS ARE ASSERTED SEPARATELY, because they are three different branches of
+   * `everyRowOf` and an early stop that closed one of them would be green on a test that only asked
+   * about another.
+   */
+  for (const { fault, pages } of [
+    {
+      fault: "a cursor that is not a cursor",
+      pages: () => async () => ({ items: [{ id: "ca_1" }], nextCursor: 7 }),
+    },
+    {
+      fault: "a cursor that never advances",
+      pages: () => async () => ({
+        items: [{ id: "ca_1" }],
+        nextCursor: "page_2",
+      }),
+    },
+    {
+      fault: "a cursor that advances for ever",
+      pages: () => {
+        let page = 0;
+        return async () => ({
+          items: [{ id: `ca_${++page}` }],
+          nextCursor: `page_${page + 1}`,
+        });
+      },
+    },
+  ]) {
+    test(`${fault} cannot unanswer a connection the first page proved`, async () => {
+      let asked = 0;
+      const page = pages();
+      const { broker } = buildComposioClient(
+        fakeVendor({
+          connectedAccounts: {
+            list: async () => {
+              asked += 1;
+              return page();
+            },
+          },
+        }),
+        () => 1_000_000,
+      );
+
+      expect(
+        await broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
+      ).toBe(true);
+      // One request, because the first answer settled it. Counted rather than left implicit: an
+      // implementation that read on and happened not to throw would answer `true` as well, and the
+      // whole point is that the later pages are never reached.
+      expect(asked).toBe(1);
+    });
+  }
+
+  /**
+   * AND THE `false` IS STILL NOT ALLOWED TO BE A GUESS, which is what stops the fix above from
+   * collapsing into "read one page and answer".
+   *
+   * With no row in hand the question is genuinely unsettled, so a cursor this deployment cannot
+   * follow means it does not know — and saying `false` there would delete the person's row and tell
+   * a gate they may not act through an app they hold. The refusal is the honest answer, and it is
+   * the one an early stop is most likely to take away by accident.
+   */
+  test("a cursor fault before any account has been seen is still a refusal", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => ({ items: [], nextCursor: 7 }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const failure = await failureOf(
+      broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
+    );
+    expect(failure).toBeInstanceOf(BrokerRefusalError);
+    expect(failure.message).not.toMatch(A_CRASH);
   });
 
   test("every page of this app's configs is read, so none is left standing", async () => {
@@ -2655,6 +3015,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
     const deleted: string[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => {
             calls += 1;
@@ -2695,6 +3056,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
     const deleted: string[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => {
             calls += 1;
@@ -2729,6 +3091,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
     const deleted: string[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => {
             calls += 1;
@@ -3371,6 +3734,7 @@ describe("a field Composio padded with whitespace", () => {
     const deleted: unknown[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
+        authConfigs: { list: ourGmailConfig },
         connectedAccounts: {
           list: async () => ({ items: [{ id: " ca_1 " }] }),
           delete: async (...call: unknown[]) => {
@@ -3441,5 +3805,139 @@ describe("a field Composio padded with whitespace", () => {
     );
 
     expect(ran).toHaveLength(1);
+  });
+});
+
+/**
+ * WHICH `delete` THE VENDOR OBJECT ACTUALLY CARRIES, asserted without a network and without a key.
+ *
+ * THIS IS THE ONE DECISION IN {@link createComposioClient} AND NOTHING REACHED IT. That function is
+ * described in its own comment as too thin to have a bug in, and it is — except for two lines.
+ * `Composio`'s own `authConfigs.delete` and `connectedAccounts.delete` hard-code the request body
+ * they send (`@composio/core` 0.18.1, `src/models/AuthConfigs.ts:303-311`,
+ * `src/models/ConnectedAccounts.ts:532-540`), so through them `revoke_on_delete` cannot be passed at
+ * all and every delete soft-deletes while the grant at Google or Slack stands. Both are therefore
+ * satisfied from `composio.getClient()` instead, and that routing is the whole reason this
+ * deployment's withdrawals withdraw anything.
+ *
+ * EVERY OTHER TEST IN THIS FILE DRIVES {@link buildComposioClient}, which takes the vendor object
+ * already assembled — so the four that assert `revoke_on_delete` went out assert it about a double,
+ * and none of them can see which function `createComposioClient` put behind it. Swapping those two
+ * lines back to `composio.authConfigs.delete` and `composio.connectedAccounts.delete` type-checks
+ * and leaves this suite green while restoring the exact defect the flag was added for. The only
+ * thing that ever exercised the real wiring was `composio-live.test.ts`, which is skipped in every
+ * run that has no key — which is every ordinary run.
+ *
+ * WHAT MAKES IT OBSERVABLE OFFLINE IS THAT BOTH CLIENTS ARE CONSTRUCTIBLE WITHOUT DIALLING
+ * ANYTHING. `new Composio({ apiKey })` opens no socket once tracking and the npm version check are
+ * off, `getClient()` hands back the underlying `@composio/client` it already holds, and the methods
+ * of both live on their classes' prototypes. So a prototype replaced BEFORE `createComposioClient`
+ * runs is what the client it builds will call: the SDK's telemetry wrapper copies each method off
+ * the prototype at construction (`src/telemetry/Telemetry.ts:95-116`), and the raw client's
+ * resources carry no own properties at all. Four recorders — one on each side of each delete — turn
+ * "which function was reached" into a list, which is a fact about the wiring rather than about a
+ * request that was never made.
+ *
+ * THE IMPORT OF `@composio/core` HERE DOES NOT BREAK THE ONE-IMPORT-SITE RULE. That rule is about
+ * `server/src`, so that a version bump has exactly one FILE of product code to be read against;
+ * this is a test, and the version it is written against is the whole of what it asserts.
+ */
+describe("the key becoming a vendor, and which delete that vendor carries", () => {
+  /** One class's methods, as the object a replacement is written onto. */
+  type Methods = Record<string, (...args: unknown[]) => Promise<unknown>>;
+
+  const methodsOf = (instance: object): Methods =>
+    Object.getPrototypeOf(instance) as Methods;
+
+  test("both deletes are the raw client's, and neither is the SDK's own wrapper", async () => {
+    /*
+     * A SECOND CLIENT, BUILT ONLY TO REACH THE CLASSES. Nothing is called on it: it exists because
+     * the prototypes are not exported, and the way to a prototype is an instance. The key is a
+     * string nobody will ever send anywhere, which is the point of asserting this without one.
+     */
+    const seed = new Composio({
+      apiKey: "never-dialled",
+      allowTracking: false,
+      disableVersionCheck: true,
+    });
+    const sdkAccounts = methodsOf(seed.connectedAccounts);
+    const sdkConfigs = methodsOf(seed.authConfigs);
+    const rawAccounts = methodsOf(seed.getClient().connectedAccounts);
+    const rawConfigs = methodsOf(seed.getClient().authConfigs);
+
+    const restore: { on: Methods; name: string; was: Methods[string] }[] = [];
+    const replace = (on: Methods, name: string, answer: Methods[string]) => {
+      restore.push({ on, name, was: on[name] });
+      on[name] = answer;
+    };
+
+    const reached: string[] = [];
+    const recorder =
+      (whose: string): Methods[string] =>
+      async (...call: unknown[]) => {
+        reached.push(`${whose} ${JSON.stringify(call)}`);
+        return { success: true };
+      };
+
+    try {
+      /*
+       * BOTH SIDES OF BOTH DELETES ARE RECORDED, which is what makes the list an assertion rather
+       * than a spy. A recorder on the raw client alone would still fire if the SDK's wrapper were
+       * used, because the wrapper calls straight through to it — so what tells the two wirings
+       * apart is whose recorder answered, and the only way to see that is to have one on each.
+       */
+      replace(
+        rawAccounts,
+        "delete",
+        recorder("the raw client's connectedAccounts.delete"),
+      );
+      replace(
+        sdkAccounts,
+        "delete",
+        recorder("the SDK's own connectedAccounts.delete"),
+      );
+      replace(
+        rawConfigs,
+        "delete",
+        recorder("the raw client's authConfigs.delete"),
+      );
+      replace(
+        sdkConfigs,
+        "delete",
+        recorder("the SDK's own authConfigs.delete"),
+      );
+
+      // The two listings that carry each delete to its argument. Answered from memory, so this test
+      // reaches the network exactly as often as it reaches the live Composio account: never.
+      replace(sdkAccounts, "list", async () => ({
+        items: [{ id: "ca_1" }],
+        nextCursor: null,
+      }));
+      replace(sdkConfigs, "list", async () => ({
+        items: [OUR_GMAIL],
+        nextCursor: null,
+      }));
+
+      const { broker } = createComposioClient("never-dialled");
+      expect(await broker.revoke({ userId: "user_1", toolkit: "gmail" })).toBe(
+        true,
+      );
+      await broker.deleteAuthConfig("gmail");
+    } finally {
+      // Restored whatever happened above, because these are the SDK's own classes and every later
+      // test in this process would otherwise be running against a patched vendor.
+      for (const { on, name, was } of restore.reverse()) on[name] = was;
+    }
+
+    /*
+     * THE WHOLE OF WHAT WAS REACHED, IN ORDER. An implementation that routed either delete through
+     * the SDK's wrapper puts that wrapper's name in this list, and the equality says so; one that
+     * dropped the flag puts a different argument list in it. Both are the same defect seen from
+     * two sides, and neither is visible to any other test in this file.
+     */
+    expect(reached).toEqual([
+      `the raw client's connectedAccounts.delete ["ca_1",{"revoke_on_delete":true}]`,
+      `the raw client's authConfigs.delete ["${OUR_GMAIL.id}",{"revoke_on_delete":true}]`,
+    ]);
   });
 });

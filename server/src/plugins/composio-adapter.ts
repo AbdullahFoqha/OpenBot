@@ -407,12 +407,27 @@ type Listing = {
  * sentence the old branch could never have produced and a check that covers shapes nobody here
  * enumerated. What is left below are the three faults the vendor CAN hand over, all of them about
  * the cursor, because the cursor is the one field these transformers copy off the wire unchecked.
+ *
+ * AND A QUESTION ALREADY ANSWERED STOPS HERE, WHICH IS WHAT `enough` IS FOR. Paging made three of
+ * this file's answers complete and made one of them FAILABLE: {@link ComposioBroker.isConnected}
+ * returns a boolean, and the first page carrying a single row has settled it — no cursor Composio
+ * could send next, and no fiftieth page, can turn that `true` into anything else. Reading on
+ * anyway put the two cursor refusals and the page ceiling in front of a person whose account had
+ * already been found, so a fault on a page nobody needed decided the answer to a question nobody
+ * still had. The default reads every page, because that is what a withdrawal and a config listing
+ * genuinely need; a caller that says when it has enough is a caller that cannot be failed after it
+ * has its answer.
+ *
+ * CHECKED WHERE THE ROWS LAND AND BEFORE THE CURSOR IS LOOKED AT, deliberately. Reading the cursor
+ * first and stopping afterwards would keep every one of the three refusals reachable on the page
+ * that already answered the question, which is the whole of what this closes.
  */
 async function everyRowOf<Row>(
   listing: Listing,
   page: (
     cursor: string | undefined,
   ) => Promise<{ items: Row[]; nextCursor?: unknown }>,
+  enough: (rows: Row[]) => boolean = () => false,
 ): Promise<Row[]> {
   const rows: Row[] = [];
   const followed = new Set<string>();
@@ -421,6 +436,7 @@ async function everyRowOf<Row>(
   for (;;) {
     const answered = await page(cursor);
     rows.push(...answered.items);
+    if (enough(rows)) return rows;
 
     /*
      * ABSENT AND NULL BOTH MEAN THE END, and they are the two the vendor actually sends: the
@@ -640,12 +656,26 @@ function configOf(
  * every row (`@composio/core` 0.18.1, `src/utils/transformers/connectedAccounts.ts:60`), so a
  * non-object row raises a `TypeError` inside the vendor's own code and never reaches this function
  * — see the `TypeError` row in {@link vendorRefusal}, which is where that answer is now given.
+ *
+ * ONE ID IS ONE WITHDRAWAL, HOWEVER MANY TIMES THE LISTING NAMED IT. The paging loop above guards
+ * against a vendor repeating a CURSOR and not against it repeating a ROW, and those are different
+ * faults: a page boundary crossed while an account is created or deleted, or a proxy stitching two
+ * overlapping pages together, hands the same account id over twice with a cursor that advanced
+ * normally every time. The second delete of one account then meets Composio's "there is no such
+ * account", which arrives here as a refusal — so {@link ComposioBroker.revoke} counted a
+ * withdrawal that had in fact completed as a partial one, threw over it, and left the person's
+ * connection row standing to be pressed again. Every retry meets the same duplicate. Deduplicating
+ * is not tidying the listing: it is the difference between one account and two.
+ *
+ * THE FIRST SIGHTING KEEPS ITS PLACE, so the order the deletes go out in is still the listing's,
+ * which is the order {@link buildComposioClient}'s sort makes stable.
  */
 function withdrawableAccounts(
   rows: { id?: unknown }[],
   toolkit: string,
 ): { ids: string[]; nameless: BrokerRefusalError[] } {
   const ids: string[] = [];
+  const alreadyNamed = new Set<string>();
   const nameless: BrokerRefusalError[] = [];
 
   rows.forEach((row, position) => {
@@ -658,6 +688,8 @@ function withdrawableAccounts(
       );
       return;
     }
+    if (alreadyNamed.has(id)) return;
+    alreadyNamed.add(id);
     ids.push(id);
   });
 
@@ -693,15 +725,30 @@ function withdrawableAccounts(
  * for a condition no button changes.
  *
  * NULLABLE IN THE PARAMETER THOUGH THE DECLARATION SAYS OTHERWISE. The generated client parses the
- * body and returns it; a `null` body is a `null` here, and reading a field off it would be a
- * `TypeError` carrying a sentence that reads like a stack trace — which is the one thing every
- * refusal in this file exists not to be. It falls into the unreadable branch, where it belongs.
+ * body and returns it, and there are two answers for which it hands over no body at all.
+ *
+ * AND NO BODY AT ALL IS NOT A REFUSAL, WHICH IS THE CORRECTION AND THE OPPOSITE MISTAKE TO THE ONE
+ * ABOVE. `defaultParseResponse` resolves a 204 to `null` — "fetch refuses to read the body when the
+ * status code is 204" — and a JSON reply carrying `content-length: 0` to `undefined`
+ * (`@composio/client` 0.1.0-alpha.76, `src/internal/parse.ts:16-42`). Neither of those ever reaches
+ * a non-2xx: the client throws `APIError` for every `!response.ok` before parsing
+ * (`src/client.ts:539`), so an answer arriving here at all is Composio having accepted the request.
+ * A 204 is therefore the vendor saying it did the delete and has nothing to add, and the guard
+ * added for `success: false` read it as the one shape it could not tell apart from a failure —
+ * turning a withdrawal that HAPPENED into a partial-withdrawal refusal, over a grant that was in
+ * fact ended. That is the same lie as the one this function exists to stop, pointing the other way.
+ *
+ * WHICH IS NOT THE SAME AS A BODY THAT ARRIVED WITHOUT THE FIELD. `{}` is Composio answering with a
+ * document whose verdict is missing, and a document this deployment cannot read is a fact about the
+ * package rather than an outcome — so it stays in the unreadable branch below. What is exempted
+ * here is the narrower thing the client documents: no document.
  */
 function withdrawalDeclined(
   answer: { success?: unknown } | null | undefined,
   toolkit: string,
 ): BrokerRefusalError | null {
-  const verdict = answer?.success;
+  if (answer === null || answer === undefined) return null;
+  const verdict = answer.success;
   if (verdict === true) return null;
   if (verdict === false) {
     return new BrokerRefusalError(
@@ -1232,6 +1279,25 @@ export type ComposioVendor = {
        * can act through the app, and the revoke is about ending every account they can act through.
        */
       accountType: "ALL";
+      /**
+       * Which authorization configs the question is about, ABSENT where it is about all of them.
+       *
+       * THE TWO QUESTIONS DIFFER HERE TOO, AND ONLY ONE OF THEM MAY ACT. `authConfigIds` is a
+       * parameter of the listing (`ConnectedAccountListParamsSchema.authConfigIds`,
+       * `@composio/core` 0.18.1, `src/types/connectedAccounts.types.ts:260-264`) forwarded as
+       * `auth_config_ids` (`src/models/ConnectedAccounts.ts:117`), and omitting it asks about every
+       * config in the project — this deployment's and an operator's hand-made ones alike. That is
+       * the right question for {@link ComposioBroker.isConnected}, which only reads whether a person
+       * can act through the app, and the wrong one for {@link ComposioBroker.revoke}, which deletes
+       * what it finds: see there for why an account on somebody else's config is not this
+       * deployment's to end.
+       *
+       * NEVER THE EMPTY ARRAY. A caller with no configs of its own has nothing to scope TO, and an
+       * empty filter is the shape most likely to be read as no filter at all by whatever is on the
+       * far side — which would be the unscoped listing arriving through the parameter added to
+       * prevent it. `revoke` answers before it asks in that case.
+       */
+      authConfigIds?: string[];
       limit: number;
       /**
        * Where the last page left off, ABSENT on the first request rather than undefined.
@@ -1337,11 +1403,18 @@ export type ComposioVendor = {
      * — which says when it CAN appear, not that it always does — so a guard on it would turn every
      * withdrawal Composio accepted into a permanent failure the first time they stopped sending it,
      * which is the shape of mistake this file has already made twice in the other direction.
+     *
+     * NULLABLE AND OPTIONAL THOUGH THE VENDOR'S OWN DECLARATION IS NEITHER, because the generated
+     * client has two answers it resolves with no document: a 204 becomes `null` and a JSON reply
+     * carrying `content-length: 0` becomes `undefined` (`@composio/client` 0.1.0-alpha.76,
+     * `src/internal/parse.ts:16-42`). Declaring this at the vendor's `ConnectedAccountDeleteResponse`
+     * would be the same assertion-over-a-wire-value every other field here refuses to make, and it
+     * would hide the one case {@link withdrawalDeclined} has to tell from a refusal.
      */
     delete(
       id: string,
       params: { revoke_on_delete: true },
-    ): Promise<{ success?: unknown }>;
+    ): Promise<{ success?: unknown } | null | undefined>;
   };
 };
 
@@ -1507,17 +1580,31 @@ export function buildComposioClient(
    * would come from — the breadth of `accountType`, the limit, and the fact that both ask about one
    * person and one app — so the difference between them is exactly the list of statuses and is
    * visible at both call sites.
+   *
+   * AND SO ARE THE OTHER TWO THINGS THE TWO QUESTIONS DO NOT SHARE, for the same reason the
+   * statuses are. `configs` is which authorization configs the answer is about — every one of them
+   * for the gate, and only this deployment's for the withdrawal, because the withdrawal ACTS on
+   * what it finds. `enough` is when the rows in hand already settle the question, which is true of
+   * a boolean the moment one row arrives and never true of a set of accounts to end. Both are
+   * written at the call sites below, beside the statuses, so that the whole of the difference
+   * between the two questions is one argument list a reader can compare.
    */
   const accountsFor = async (
     userId: string,
     toolkit: string,
     statuses: VendorAccountStatus[],
+    asked: {
+      configs?: string[];
+      enough?: (rows: { id?: unknown }[]) => boolean;
+    } = {},
   ): Promise<{ id?: unknown }[]> => {
     /*
-     * EVERY PAGE, READ HERE RATHER THAN AT EITHER CALLER, so that the two questions cannot drift on
-     * the one thing they do share. A truncated listing is the wrong answer to both of them for the
-     * same reason: `false` claims somebody has no account for an app when nobody looked at all of
-     * them, and a withdrawal that saw one page ends fewer grants than it reports.
+     * EVERY PAGE UNLESS THE CALLER SAYS OTHERWISE, READ HERE RATHER THAN AT EITHER CALLER, so that
+     * the two questions cannot drift on the one thing they do share. A truncated listing is the
+     * wrong answer to both of them for the same reason: `false` claims somebody has no account for
+     * an app when nobody looked at all of them, and a withdrawal that saw one page ends fewer
+     * grants than it reports. What a caller may say is that it has ENOUGH — see {@link everyRowOf}
+     * — which is not truncation: it is a question that has been answered.
      *
      * THE ROWS GO BACK AS ROWS, WHICH IS NARROWER THAN WHAT THIS USED TO HAND OVER. It read every
      * id here, and the two callers do not want the same thing: `isConnected` is a COUNT — the id is
@@ -1544,10 +1631,16 @@ export function buildComposioClient(
               toolkitSlugs: [toolkit],
               statuses,
               accountType: "ALL",
+              // Spread for the reason the cursor is: an explicit `undefined` reaches the vendor's
+              // `parse` as a key, and "about every config" is said by not naming any.
+              ...(asked.configs === undefined
+                ? {}
+                : { authConfigIds: asked.configs }),
               limit: LISTING_LIMIT,
               ...(cursor === undefined ? {} : { cursor }),
             }),
         ),
+      asked.enough,
     );
     return rows;
   };
@@ -2332,8 +2425,30 @@ export function buildComposioClient(
        * without an id is still an ACTIVE account: this person can act through the app, which is the
        * whole of what this gate asks. Reading the id here used to turn that into a refusal, so a
        * field this question never looks at decided its answer.
+       *
+       * AND IT STOPS AT THE FIRST ROW, WHICH IS THE SAME CORRECTION ONE LEVEL OUT. This method
+       * answers a boolean, and a boolean settled by page one cannot be improved by page two — but
+       * reading on left the answer exposed to three faults that belong to pages nobody needed: a
+       * cursor Composio sent as a number, a cursor it repeated, and the fiftieth page of a listing
+       * that will not end. Each of those threw at a person whose ACTIVE account had already been
+       * found and told them the vendor's shape was wrong, and `store.ts` deletes their connection
+       * row on a `false` — so a question that had been answered `true` was made failable by the
+       * machinery that made the `false` complete. Paging is still what makes the `false` honest:
+       * with no row yet, the next page is the only thing that can settle it, so it is read.
+       *
+       * ASKED OF EVERY CONFIG, WHICH IS WHERE THIS DIVERGES FROM `revoke` BELOW. A person whose
+       * only account for the app sits on a config an operator built by hand can still act through
+       * the app — the call that runs an action names the person and the toolkit, not the account —
+       * so scoping this to configs of ours would refuse somebody who is, in fact, connected. This
+       * method only READS; the one that acts is the one that has to be narrow.
        */
-      return (await accountsFor(userId, toolkit, CONNECTED)).length > 0;
+      return (
+        (
+          await accountsFor(userId, toolkit, CONNECTED, {
+            enough: (rows) => rows.length > 0,
+          })
+        ).length > 0
+      );
     },
 
     async revoke({ userId, toolkit }): Promise<boolean> {
@@ -2355,8 +2470,39 @@ export function buildComposioClient(
        * fresh one, or a shared account beside their own — and each of them is access this
        * deployment's calls could run under. See {@link REVOCABLE} for why the listing here is wider
        * than the one behind `isConnected`.
+       *
+       * AND EVERY ACCOUNT MEANS EVERY ACCOUNT ON A CONFIG THIS DEPLOYMENT MADE, WHICH IS NARROWER
+       * THAN WHAT THIS USED TO DELETE. The listing was asked by person, app and "all account
+       * types" and by nothing else, so it returned accounts attached to authorization configs an
+       * operator built by hand in Composio's dashboard — for purposes this deployment knows nothing
+       * about, on scopes it cannot see, and, with `accountType: "ALL"`, including the SHARED ones
+       * that other people are acting through. Every one of those was then deleted with
+       * `revoke_on_delete`, which tears the grant up at Google or Slack. One person pressing
+       * disconnect on their own settings page ended somebody else's integration.
+       *
+       * WHICH IS THE PRINCIPLE {@link ComposioBroker.deleteAuthConfig} ALREADY STATES, ARRIVING
+       * ONE LEVEL DOWN. That method refuses to delete a config it cannot show is this
+       * deployment's, on the reasoning that an operator's dashboard work is not ours to destroy —
+       * and the accounts hanging off that config are the same work. {@link madeHere} is the only
+       * thing that tells the two apart, so it decides both.
+       *
+       * NOTHING OF OURS IS NOTHING TO WITHDRAW, AND IT IS ANSWERED WITHOUT ASKING. An app with no
+       * config of this deployment's never had a connection begun through it — {@link
+       * ComposioBroker.authorize} mints every link against {@link configsMadeHere} and refuses
+       * where there is none — so there is nothing here that this deployment granted. Answering
+       * before the listing is also what keeps the empty filter off the wire; see `authConfigIds`
+       * on {@link ComposioVendor} for why an empty one must never be sent.
+       *
+       * AND `false` STILL MEANS WHAT IT SAID. The audit trail's `vendorRevocationRequested` records
+       * whether THIS DEPLOYMENT asked the vendor to end something, and an account on a config it
+       * did not make is not something it ever granted. What survives a disconnect here is an
+       * attachment made outside this deployment, which only the dashboard that made it can end.
        */
-      const accounts = await accountsFor(userId, toolkit, REVOCABLE);
+      const ours = await configsMadeHere(toolkit);
+      if (ours.length === 0) return false;
+      const accounts = await accountsFor(userId, toolkit, REVOCABLE, {
+        configs: ours.map((config) => config.id),
+      });
       /*
        * THE READABLE ONES GO FIRST AND THE UNREADABLE ONES ARE REPORTED AFTERWARDS. Reading the ids
        * of all of them before sending any delete is what made one unnameable row a permanent block
@@ -2412,18 +2558,32 @@ export function buildComposioClient(
          * one a second press reaches, which is what "disconnecting again" is worth saying about. An
          * account it described with no id is not: the row will be as unnameable next time, so the
          * only honest instruction is the one that does not run through this page at all.
+         *
+         * AND THE DENOMINATOR IS THE ACCOUNTS, NOT THE ROWS. It was `accounts.length`, which is how
+         * many rows the listing handed over, and a listing that named one account twice is a
+         * listing with more rows than accounts — see {@link withdrawableAccounts}. "Withdrew 1 of
+         * this person's 2 accounts" over one account that is gone is a count nothing measured, in
+         * the sentence a reader is meant to act on. The two halves this call actually holds are the
+         * accounts it could name and the ones it could not, and their sum is the set.
          */
+        const held = ids.length + nameless.length;
         const left =
           nameless.length === 0
             ? "Disconnecting again asks only for the accounts that are left."
             : `Composio described ${nameless.length} of them with no id at all, so this deployment has no way to name those in a withdrawal and disconnecting again meets them unchanged: removing them in Composio's own dashboard is what ends them.`;
         throw new BrokerRefusalError(
-          `Composio withdrew ${ids.length - refused.length} of this person's ${accounts.length} accounts for ${toolkit} and did not withdraw the rest, so their access to it has not ended. ${left}`,
+          `Composio withdrew ${ids.length - refused.length} of this person's ${held} accounts for ${toolkit} and did not withdraw the rest, so their access to it has not ended. ${left}`,
           { cause: everyRefusal([...refused, ...nameless]) },
         );
       }
 
-      return accounts.length > 0;
+      /*
+       * THE ACCOUNTS WITHDRAWN, WHICH IS THE SAME NUMBER BY A HONESTER ROUTE. Reaching this line
+       * means nothing refused and nothing was nameless, so the rows and the accounts differ only
+       * where the listing repeated one — and `true` is a claim about having asked the vendor to
+       * withdraw something, which is exactly what `ids` counts.
+       */
+      return ids.length > 0;
     },
   };
 
