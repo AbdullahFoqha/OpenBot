@@ -896,3 +896,19 @@ describe("how far a Bot may hand work on", () => {
     ).toThrow("BOT_HANDOFF_MAX_PER_RUN");
   });
 });
+
+/**
+ * Composio, which a deployment either bought or did not.
+ *
+ * Unset is the ordinary state and not a degraded one, so the absence has to read as `undefined`
+ * rather than as an empty string that later code would have to keep asking about. Trimmed like
+ * every other secret here, because a key pasted into a hosting dashboard arrives with whatever
+ * whitespace came with it and the vendor would refuse the padded copy.
+ */
+test("a Composio key is read when set and absent when not", () => {
+  expect(loadConfig(baseEnvironment).composioApiKey).toBeUndefined();
+  expect(
+    loadConfig({ ...baseEnvironment, COMPOSIO_API_KEY: "  ak_example  " })
+      .composioApiKey,
+  ).toBe("ak_example");
+});

@@ -172,6 +172,20 @@ export type DeploymentConfig = {
    */
   deploymentId: string | undefined;
   /**
+   * The key this deployment talks to Composio with, the broker that holds people's accounts for a
+   * few hundred apps so a Bot can act in Gmail or Slack without an OAuth client of this
+   * deployment's own registered with each of them.
+   *
+   * Optional, and undefined is the ordinary state rather than a degraded one. A deployment that has
+   * not bought Composio is not a deployment missing something: no Composio surface appears anywhere
+   * in the product, and nothing else it does is any worse for that.
+   *
+   * Nothing here validates the key. There is no shape to check it against and no call worth making
+   * at boot to find out, so the first real request is what says whether it works — which is also
+   * where a key that was revoked last week would have surfaced regardless.
+   */
+  composioApiKey: string | undefined;
+  /**
    * Where this deployment is reached from outside, with no trailing slash.
    *
    * Needed because an OAuth redirect URI has to match what an administrator registered with the
@@ -975,6 +989,7 @@ export function loadConfig(
     ...(managedAgent ? { managedAgent } : {}),
     agentEndpointAllowedHosts: agentEndpointAllowedHosts(environment),
     deploymentId: optional(environment, "DEPLOYMENT_ID"),
+    composioApiKey: optional(environment, "COMPOSIO_API_KEY"),
     publicUrl: (
       optional(environment, "OPENBOT_PUBLIC_URL") ?? auth?.baseUrl
     )?.replace(/\/+$/, ""),
