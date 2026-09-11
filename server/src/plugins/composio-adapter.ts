@@ -418,5 +418,16 @@ export function createComposioClient(apiKey: string): {
   actions: ComposioActions;
   broker: ComposioBroker;
 } {
-  return buildComposioClient(new Composio({ apiKey }));
+  return buildComposioClient(
+    new Composio({
+      apiKey,
+      // Their default telemetry installs its own interrupt handlers, and this is a self-hosted
+      // product whose operator never opted into a third party's analytics.
+      allowTracking: false,
+      // Both default the other way, so both have to be said. The version check reaches npm for the
+      // SDK's latest release as the client is constructed, and a deployment's boot must not depend
+      // on the vendor's release feed.
+      disableVersionCheck: true,
+    }),
+  );
 }
