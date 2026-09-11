@@ -2123,6 +2123,19 @@ export function createPluginStore(options: PluginStoreOptions) {
           `${input.id} is the name of a server this deployment already knows. Choose another.`,
         );
       }
+
+      /*
+       * Nor may it take the name of a screen. `/admin/plugins/composio` is a static route — the app
+       * directory's own page — and a static route is matched ahead of `/admin/plugins/$key`, so a
+       * server sitting at this id would be listed and then open somebody else's page instead of its
+       * own. Brokered servers are `composio-<slug>` and no catalogue entry is called this, which
+       * leaves a hand-typed id as the only way to reach it.
+       */
+      if (input.id === "composio") {
+        throw new CustomServerRefusedError(
+          "composio is the name of this deployment's own Composio screen, so a server added there could never be opened. Choose another.",
+        );
+      }
       if (!/^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/.test(input.id)) {
         throw new CustomServerRefusedError(
           "A server name is lower-case letters, numbers and hyphens.",
@@ -3553,6 +3566,266 @@ export function createPluginStore(options: PluginStoreOptions) {
         scope: row.scope,
         connectedAt: iso(row.connectedAt) ?? "",
       }));
+    },
+
+    /**
+     * Which brokered apps this person has connected, for the same settings page.
+     *
+     * A SECOND METHOD RATHER THAN A WIDER {@link connectionsFor}, because the two answer out of
+     * different tables for a reason the schema is built on: a `user-oauth` connection is a pointer
+     * into the vault, and a brokered one holds no secret at all because Composio keeps the account
+     * (see {@link brokeredConnection}). Reading only the vault side is what left a brokered
+     * connection invisible to the browser, so the settings screen could not honestly say whether
+     * somebody was connected.
+     *
+     * THE SERVER ID IS JOINED, NOT SPELLED. `addBrokeredApp` writes the app into the url, and every
+     * later call resolves against that url — so matching on it asks the row what it is, where
+     * composing `composio-${toolkit}` by hand would re-derive the id from a convention nothing
+     * holds it to. It is the reasoning the directory route already uses when it reads a row's
+     * toolkit off its url rather than off its id. An app this deployment has since removed
+     * therefore drops out of the answer, which is the honest result: there is no server row left
+     * for a page to name.
+     *
+     * `scope` IS EMPTY for the reason {@link confirmBrokeredConnection} sets out: Composio grants
+     * none that it tells us about, and the field exists to record what the vendor said it granted
+     * rather than what we suppose. It is returned all the same, so the shape matches what
+     * {@link connectionsFor} answers and one screen can draw both kinds of row.
+     */
+    async brokeredConnectionsFor(
+      userId: string,
+    ): Promise<{ serverId: string; scope: string; connectedAt: string }[]> {
+      const rows = await database
+        .select({
+          serverId: mcpServers.id,
+          connectedAt: composioConnections.connectedAt,
+        })
+        .from(composioConnections)
+        .innerJoin(
+          mcpServers,
+          sql`${mcpServers.url} = 'composio://' || ${composioConnections.toolkit}`,
+        )
+        .where(eq(composioConnections.userId, userId))
+        .orderBy(asc(mcpServers.id));
+
+      return rows.map((row) => ({
+        serverId: row.serverId,
+        scope: "",
+        connectedAt: iso(row.connectedAt) ?? "",
+      }));
+    },
+
+    /**
+     * Whether this person has one brokered app connected, and since when.
+     *
+     * THE ROW IS A CACHE OF COMPOSIO'S ANSWER, not a record of a flow this deployment watched
+     * finish. Nothing here holds a secret for a brokered app: the vendor keeps the account, and
+     * what {@link composioConnections} holds is the sentence "Composio said yes when we asked",
+     * written down so that every later call can be gated without a round trip. That makes drift
+     * possible by construction — somebody can end the connection in Composio's own dashboard, and
+     * this row would go on saying yes — and it is why {@link confirmBrokeredConnection} asks the
+     * vendor again rather than trusting what is here. Calling confirm on any page load is
+     * therefore how a row that drifted heals.
+     *
+     * Read by the pair, because the pair is the primary key: an app has many people's connections
+     * and a person has many apps, and the only question anybody asks is about one of each.
+     */
+    async brokeredConnection(input: {
+      toolkit: string;
+      userId: string;
+    }): Promise<{ connectedAt: string } | null> {
+      const [row] = await database
+        .select({ connectedAt: composioConnections.connectedAt })
+        .from(composioConnections)
+        .where(
+          and(
+            eq(composioConnections.toolkit, input.toolkit),
+            eq(composioConnections.userId, input.userId),
+          ),
+        )
+        .limit(1);
+
+      if (!row) return null;
+      return { connectedAt: iso(row.connectedAt) ?? "" };
+    },
+
+    /**
+     * Ask Composio whether this person's account is really attached, and write down the answer.
+     *
+     * THE VENDOR IS ASKED, NOT THE BROWSER. The return trip from a consent screen is an ordinary
+     * redirect carrying nothing signed, so a person arriving back on the page is not evidence that
+     * they finished the flow, nor that the account they finished it with is the one a row would
+     * claim. A confirm that wrote a row because somebody came back would hand every later brokered
+     * call a gate that passes for an account nobody has — and the first anyone would hear of it is
+     * the vendor's own error about a connection it cannot find, at the moment a Bot was asked to do
+     * something.
+     *
+     * SO THE ANSWER NO LEAVES NO ROW BEHIND. `false` from {@link ComposioBroker.isConnected} is a
+     * positive claim that there is no account, and the honest local state for that claim is an
+     * absence — so a row already sitting here is deleted rather than left standing. Leaving it
+     * would have the settings list go on drawing "Connected" for an account nobody has, and would
+     * go on passing the gate every later brokered call is decided on, while the app's own detail
+     * page asks the vendor and says the opposite.
+     *
+     * AND THAT DELETION FILES NO TRAIL ENTRY. Nobody disconnected anything here: the grant ended
+     * somewhere else, and this is our record catching up with a fact. {@link disconnectBrokered}
+     * owns `mcp.account_disconnected` and files it for the act it performed; a second filer here
+     * would have the trail claim an act that did not happen, credited to whichever page load
+     * happened to notice.
+     *
+     * UPSERT RATHER THAN INSERT, keyed on the pair the table itself is keyed on. This is safe to
+     * call repeatedly and is meant to be: because the row is only a cache of the vendor's answer
+     * (see {@link brokeredConnection}), a row that drifted out of step — an account ended in
+     * Composio's own dashboard, a connect this deployment missed the callback for — is healed by
+     * the next confirm on any page load, in whichever direction it drifted: by the upsert here
+     * where the vendor says yes, and by the delete above where it says no.
+     *
+     * `scope` IS EMPTY BECAUSE COMPOSIO GRANTS NONE THAT IT TELLS US ABOUT. The field exists so a
+     * later refusal for want of a permission can be explained by what the vendor actually granted,
+     * and Composio's connection answer is a boolean with no scope in it. Writing a plausible claim
+     * there — the app's full access, say — would put words in the vendor's mouth in the one field
+     * whose whole job is to say what it said.
+     *
+     * `reconnected` IS FALSE FOR THE SAME REASON, and trivially so. The flag distinguishes somebody
+     * replacing a grant from somebody making one, and the only confirms that reach the trail are
+     * the ones that found no row at all — so there was nothing here to replace.
+     *
+     * AND THE EVENT IS WRITTEN ONLY WHERE THE ROW IS NEW. This method runs on every page load
+     * rather than only when a person acts, so an event per yes from the vendor would file ten
+     * "account connected" rows for somebody who opened the connector page ten times having
+     * connected once. A confirm that heals a row nothing changed is a read, and the trail records
+     * acts: where a row was already there the connection has been recorded once already, by the
+     * confirm that first found none.
+     */
+    async confirmBrokeredConnection(input: {
+      toolkit: string;
+      userId: string;
+    }): Promise<{ connected: boolean }> {
+      // Before anything, and for the reason `addBrokeredApp` says it first too: a deployment with
+      // no key has no broker to have connected anybody at, so there is nothing here to ask.
+      if (!broker) throw new BrokerUnconfiguredError();
+
+      const connected = await broker.isConnected({
+        userId: input.userId,
+        toolkit: input.toolkit,
+      });
+      if (!connected) {
+        // Deleted rather than left alone, because the row is only the vendor's last answer: an
+        // account ended in Composio's own dashboard reaches this deployment as the no above and
+        // as nothing else, and a row that outlived it would go on saying yes about an account the
+        // vendor has just denied.
+        await database
+          .delete(composioConnections)
+          .where(
+            and(
+              eq(composioConnections.toolkit, input.toolkit),
+              eq(composioConnections.userId, input.userId),
+            ),
+          );
+        return { connected: false };
+      }
+
+      // Read before the write, because the upsert leaves nothing behind that tells the two cases
+      // apart, and whether a row was already here is the whole of what decides if anybody acted.
+      const existing = await this.brokeredConnection(input);
+
+      await database
+        .insert(composioConnections)
+        .values({ toolkit: input.toolkit, userId: input.userId })
+        .onConflictDoUpdate({
+          target: [composioConnections.toolkit, composioConnections.userId],
+          // `connected_at` is left alone on purpose: the person connected when they connected, and
+          // a confirm that moved it would make every page load look like a fresh connection on
+          // their own settings page.
+          set: { updatedAt: new Date() },
+        });
+
+      if (!existing) {
+        await recordAuditEvent(auditStore, {
+          eventType: "mcp.account_connected",
+          targetType: "mcp_server",
+          // The app, which is all a brokered connection is keyed on — the same id
+          // `retireConnectionsFor` files its rows under, so one query answers what happened to one
+          // person's access to one app however it ended.
+          targetId: input.toolkit,
+          payload: {
+            actor: input.userId,
+            server: input.toolkit,
+            scope: "",
+            reconnected: false,
+          },
+        });
+      }
+
+      return { connected: true };
+    },
+
+    /**
+     * End this person's brokered account at the vendor, and then forget where it was.
+     *
+     * REVOKE BEFORE DELETE, AND THAT ORDER IS THE WHOLE METHOD. The row is the only thing in this
+     * deployment that says which app this person connected: the app is read off
+     * `composio_connections`, and a revoke needs it. Delete first and a revoke that then fails
+     * leaves a live grant on somebody's mailbox that no operation here can reach, because the one
+     * value it would have to be revoked under is gone. The other order costs nothing by
+     * comparison — a revoke that throws leaves the row standing, the person presses disconnect
+     * again, and the second attempt has everything the first one had.
+     *
+     * WHICH ALSO MEANS THE FAILURE IS LOUD. Nothing is caught here: a broker that will not answer
+     * ends this call, and no row and no trail entry claims an account was disconnected when the
+     * account is still live.
+     *
+     * `vendorRevoked` IS WHAT HAPPENED, NOT WHAT WAS ATTEMPTED — {@link ComposioBroker.revoke}'s
+     * own answer, passed through. True where a grant was withdrawn, false where there was none to
+     * withdraw, and the value of the field is exactly that a reader can tell a grant this
+     * deployment ended from one that outlives it somewhere else.
+     */
+    async disconnectBrokered(input: {
+      toolkit: string;
+      userId: string;
+      by: string;
+      /**
+       * Why the account ended, which is the closed pair and not free text. A brokered account ends
+       * in exactly two ways — the person disconnecting their own, and the person being removed
+       * from the People screen, which is the word {@link retireConnectionsFor} already files its
+       * own rows under. A reader asking the trail which of the two happened can be answered only
+       * if it is the same word every time, so the type is the pair rather than whatever sentence a
+       * caller happened to spell.
+       */
+      reason: "self" | "person_removed";
+    }): Promise<{ vendorRevoked: boolean }> {
+      if (!broker) throw new BrokerUnconfiguredError();
+
+      const vendorRevoked = await broker.revoke({
+        userId: input.userId,
+        toolkit: input.toolkit,
+      });
+
+      await database
+        .delete(composioConnections)
+        .where(
+          and(
+            eq(composioConnections.toolkit, input.toolkit),
+            eq(composioConnections.userId, input.userId),
+          ),
+        );
+
+      await recordAuditEvent(auditStore, {
+        eventType: "mcp.account_disconnected",
+        targetType: "mcp_server",
+        targetId: input.toolkit,
+        payload: {
+          actor: input.by,
+          server: input.toolkit,
+          // Whose account this was, which is not always who ended it: an administrator offboarding
+          // somebody and a person disconnecting themselves write the same shape of row, and only
+          // these two fields tell them apart.
+          owner: input.userId,
+          reason: input.reason,
+          vendorRevoked,
+        },
+      });
+
+      return { vendorRevoked };
     },
 
     /**

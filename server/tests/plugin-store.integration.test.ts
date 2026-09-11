@@ -3342,6 +3342,36 @@ describe("a dynamic client the vendor has evicted", () => {
 });
 
 /**
+ * A custom server may not take a name the app directory already answers to.
+ *
+ * `/admin/plugins/composio` is a static route and `/admin/plugins/$key` is the one every server is
+ * opened through, and a static route wins. So a server whose id is literally `composio` would be
+ * listed, saved, refreshed and then never openable: the row for it would send the operator to the
+ * Composio screen instead. Brokered ids are `composio-<slug>`, so this is only reachable by typing
+ * the id into the custom-server form, which the id pattern otherwise allows.
+ */
+describe("a custom server may not be named after one of the app's own screens", () => {
+  test("the id composio is refused, and no server is written", async () => {
+    await expect(
+      store.addCustomServer({
+        id: "composio",
+        title: "Collector",
+        url: "https://collector.example/mcp",
+        by: "admin@example.com",
+      }),
+    ).rejects.toBeInstanceOf(CustomServerRefusedError);
+
+    // Written-and-unopenable is the whole harm, so the refusal has to stop the write rather than
+    // report on it afterwards.
+    const rows = await database
+      .select({ id: mcpServers.id })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, "composio"));
+    expect(rows).toHaveLength(0);
+  });
+});
+
+/**
  * Which credential a custom server is allowed to be pointed at.
  *
  * `addCustomServer` takes the pointer from the request body, and the add itself dereferences it: the
@@ -6010,4 +6040,394 @@ test("enabling an app with no broker says which setting is missing", async () =>
       by: "admin@example.com",
     }),
   ).rejects.toThrow("COMPOSIO_API_KEY");
+});
+
+/**
+ * A broker that answers only the methods a test names, in the order it was asked.
+ *
+ * WHAT IS NOT NAMED THROWS, which is the half that carries the assertions below. "The disconnect
+ * asked the broker to revoke" is worth very little on its own; "and asked it nothing else" is the
+ * property, because a connection path that also listed the catalogue or created an auth config
+ * would be doing work on somebody's behalf that nobody here has reasoned about. A default stub
+ * answering plausibly would let all of that pass unremarked.
+ *
+ * `order` records the calls rather than counting them, so a test can say which of two things
+ * happened first. The state a call found the database in is NOT recorded here: the handlers are
+ * the test's own functions, so a test that needs to know what a row looked like at the moment of
+ * the call reads it inside its own handler — the same way the enablement test above establishes
+ * that the auth config comes before the row.
+ */
+function brokerSpy(answers: {
+  isConnected?: (request: {
+    userId: string;
+    toolkit: string;
+  }) => Promise<boolean>;
+  revoke?: (request: { userId: string; toolkit: string }) => Promise<boolean>;
+}): { broker: ComposioBroker; order: string[] } {
+  const order: string[] = [];
+  const unasked = (what: string) => async (): Promise<never> => {
+    throw new Error(`the connection path asked the broker to ${what}`);
+  };
+  const asked = <Request, Answer>(
+    name: string,
+    handler: ((request: Request) => Promise<Answer>) | undefined,
+    what: string,
+  ) => {
+    return async (request: Request): Promise<Answer> => {
+      order.push(name);
+      if (!handler)
+        throw new Error(`the connection path asked the broker to ${what}`);
+      return await handler(request);
+    };
+  };
+
+  return {
+    order,
+    broker: {
+      listApps: unasked("list the catalogue"),
+      ensureAuthConfig: unasked("create an auth config"),
+      deleteAuthConfig: unasked("delete an auth config"),
+      authorize: unasked("begin somebody's connection"),
+      isConnected: asked(
+        "isConnected",
+        answers.isConnected,
+        "check somebody's connection",
+      ),
+      revoke: asked("revoke", answers.revoke, "withdraw somebody's grant"),
+    },
+  };
+}
+
+/**
+ * The row is the vendor's answer written down, and nothing else may write it.
+ *
+ * CRITERION. After a confirm the deployment says somebody is connected if and only if Composio
+ * said so when asked.
+ *
+ * REASON. The return trip from consent is an ordinary redirect with nothing signed in it, so a
+ * browser arriving back on the page is evidence of nothing at all — not that the flow finished,
+ * and not that the account it finished with is the one this row would claim. A confirm that wrote
+ * a row because somebody came back would hand every subsequent brokered call a gate that passes
+ * for an account that may not exist, and the first thing anybody would see of the mistake is the
+ * vendor's own error about a connection it cannot find.
+ *
+ * BOTH ANSWERS IN ONE TEST, over one store, because the second is what makes the first mean
+ * something: a confirm that never wrote a row would pass the "not connected" assertion on its own.
+ */
+test("a brokered connection row is written only where the vendor says the account is live", async () => {
+  let live = false;
+  const { broker, order } = brokerSpy({ isConnected: async () => live });
+  const { store, auditStore } = await freshStore({ broker });
+  const pair = { toolkit: "gmail", userId: "user_asker" };
+
+  expect(await store.confirmBrokeredConnection(pair)).toEqual({
+    connected: false,
+  });
+  // Nothing at all, which is the whole of the first half: the gate a brokered call is decided on
+  // must not exist for somebody the vendor does not recognise.
+  expect(await store.brokeredConnection(pair)).toBeNull();
+  expect(auditStore.recorded()).toHaveLength(0);
+
+  live = true;
+  expect(await store.confirmBrokeredConnection(pair)).toEqual({
+    connected: true,
+  });
+  const connection = await store.brokeredConnection(pair);
+  expect(connection?.connectedAt).toBeTruthy();
+
+  expect(order).toEqual(["isConnected", "isConnected"]);
+  const connected = auditStore
+    .recorded()
+    .filter((event) => event.eventType === "mcp.account_connected");
+  expect(connected).toHaveLength(1);
+  expect(connected[0]?.payload).toMatchObject({
+    actor: "user_asker",
+    server: "gmail",
+    // Empty because Composio grants no scope this deployment is told about, and the field explains
+    // a later refusal for want of one. A guess written here would be an explanation nobody gave.
+    scope: "",
+    reconnected: false,
+  });
+});
+
+/**
+ * An account ended in Composio's own dashboard is forgotten here the next time we ask.
+ *
+ * CRITERION. Where a row is already written down and the vendor says the account is not live, the
+ * confirm removes the row, and it files nothing in the trail for having removed it.
+ *
+ * REASON. The row is a cache of the vendor's answer, and nothing tells this deployment when that
+ * answer changes: a grant withdrawn at Composio ends the account with no callback arriving here.
+ * A confirm that only ever wrote rows would leave the settings list drawing "Connected" for an
+ * account nobody has, leave the gate every brokered call is decided on passing for it, and leave
+ * the app's own detail page — which asks the vendor on mount — contradicting the list beside it.
+ *
+ * THE TRAIL STAYS EMPTY, which is asserted rather than assumed. Nobody disconnected anything: the
+ * grant ended elsewhere and this is the record catching up, so an `mcp.account_disconnected` row
+ * written here would credit a page load with an act it did not perform. `disconnectBrokered` is
+ * what files that event, for the disconnect it actually carried out.
+ */
+test("confirming a brokered connection the vendor no longer has removes the row", async () => {
+  const { broker, order } = brokerSpy({ isConnected: async () => false });
+  const { store, database, auditStore } = await freshStore({ broker });
+  const pair = { toolkit: "gmail", userId: "user_asker" };
+  await database.insert(composioConnections).values(pair);
+
+  expect(await store.confirmBrokeredConnection(pair)).toEqual({
+    connected: false,
+  });
+
+  expect(await store.brokeredConnection(pair)).toBeNull();
+  expect(order).toEqual(["isConnected"]);
+  expect(auditStore.recorded()).toHaveLength(0);
+});
+
+/**
+ * A confirm that healed a row nothing changed is a read, and the trail does not record reads.
+ *
+ * CRITERION. Confirming a connection that is already written down leaves exactly the one
+ * `mcp.account_connected` row the first confirm filed, however many times it is called.
+ *
+ * REASON. This method runs on page load and not on a button: the connector page calls it once per
+ * mount for every brokered app it draws. An event per yes from the vendor therefore writes ten
+ * "account connected" rows for somebody who opened the page ten times having connected once, and
+ * a trail padded with acts nobody performed cannot answer the only question it is kept for. It is
+ * the failure the `reconnected` field is already written to avoid, arriving one level up at the
+ * event itself.
+ *
+ * THE VENDOR IS STILL ASKED EVERY TIME, which is asserted here rather than assumed: the row is a
+ * cache of Composio's answer and the re-asking is how a row that drifted heals. What stops on the
+ * second call is the writing-down of the heal as somebody's act, not the heal.
+ */
+test("confirming a brokered connection already recorded writes no second trail row", async () => {
+  const { broker, order } = brokerSpy({ isConnected: async () => true });
+  const { store, auditStore } = await freshStore({ broker });
+  const pair = { toolkit: "gmail", userId: "user_asker" };
+
+  expect(await store.confirmBrokeredConnection(pair)).toEqual({
+    connected: true,
+  });
+  const first = await store.brokeredConnection(pair);
+  expect(first?.connectedAt).toBeTruthy();
+
+  expect(await store.confirmBrokeredConnection(pair)).toEqual({
+    connected: true,
+  });
+  expect(await store.confirmBrokeredConnection(pair)).toEqual({
+    connected: true,
+  });
+
+  expect(order).toEqual(["isConnected", "isConnected", "isConnected"]);
+  // Unmoved, because the person connected when they connected: the confirms above are page loads.
+  expect(await store.brokeredConnection(pair)).toEqual(first);
+  expect(
+    auditStore
+      .recorded()
+      .filter((event) => event.eventType === "mcp.account_connected"),
+  ).toHaveLength(1);
+});
+
+/**
+ * Disconnecting ends the account at the vendor BEFORE it forgets where the account was.
+ *
+ * CRITERION. The broker is asked to revoke while the row is still there, and the row goes only
+ * after it answered.
+ *
+ * REASON. The row is the only thing in this deployment that names which app this person connected:
+ * delete it first and a revoke that then fails leaves a live grant on somebody's mailbox that no
+ * operation here can reach, because the toolkit it would have to be revoked under is readable off
+ * a row that is by now gone. Ordering the other way is recoverable by definition — pressing
+ * disconnect again asks again.
+ *
+ * ASSERTED ON WHAT THE REVOKE SAW, not on a call count, because a count says nothing about order
+ * and the order is the entire property.
+ */
+test("disconnecting a brokered connection revokes at the vendor before the row goes", async () => {
+  const rowsWhenRevoked: string[] = [];
+  const { broker, order } = brokerSpy({
+    revoke: async () => {
+      const rows = await database
+        .select({ userId: composioConnections.userId })
+        .from(composioConnections)
+        .where(ownedConnections());
+      rowsWhenRevoked.push(...rows.map((row) => row.userId));
+      return true;
+    },
+  });
+  const { store, database, auditStore } = await freshStore({ broker });
+  const pair = { toolkit: "gmail", userId: "user_asker" };
+  await database.insert(composioConnections).values(pair);
+
+  const outcome = await store.disconnectBrokered({
+    ...pair,
+    by: "user_asker",
+    reason: "self",
+  });
+
+  expect(outcome).toEqual({ vendorRevoked: true });
+  expect(rowsWhenRevoked).toEqual(["user_asker"]);
+  expect(order).toEqual(["revoke"]);
+  expect(await store.brokeredConnection(pair)).toBeNull();
+
+  const disconnected = auditStore
+    .recorded()
+    .filter((event) => event.eventType === "mcp.account_disconnected");
+  expect(disconnected).toHaveLength(1);
+  expect(disconnected[0]?.payload).toMatchObject({
+    actor: "user_asker",
+    server: "gmail",
+    owner: "user_asker",
+    reason: "self",
+    // What happened, not what was attempted. The broker said it withdrew a grant, so the trail
+    // says so; a field that always said true would make the row a worse record than none.
+    vendorRevoked: true,
+  });
+});
+
+/**
+ * A revoke that throws leaves the connection exactly where it was, so pressing again finishes it.
+ *
+ * CRITERION. A failed disconnect removes nothing and records nothing, and the same call made again
+ * against a broker that now answers completes the job.
+ *
+ * REASON. This is the payoff of the ordering above, stated as the behaviour somebody actually
+ * meets: Composio is down for a minute, the person presses disconnect, and the alternative to
+ * keeping the row is an account still live at the vendor with nothing left here that knows which
+ * app it belongs to. Keeping it means the only cost of the failure is that they press the button
+ * again.
+ */
+test("a brokered connection outlives a revoke that failed, and a second attempt ends it", async () => {
+  let broken = true;
+  const { broker } = brokerSpy({
+    revoke: async () => {
+      if (broken) throw new Error("Composio would not answer (502).");
+      return true;
+    },
+  });
+  const { store, database, auditStore } = await freshStore({ broker });
+  const pair = { toolkit: "gmail", userId: "user_asker" };
+  await database.insert(composioConnections).values(pair);
+
+  await expect(
+    store.disconnectBrokered({
+      ...pair,
+      by: "user_asker",
+      reason: "self",
+    }),
+  ).rejects.toThrow("Composio would not answer (502).");
+
+  expect(await store.brokeredConnection(pair)).not.toBeNull();
+  // No row in the trail either. "Their account was disconnected" is a claim about the vendor, and
+  // nothing was disconnected anywhere.
+  expect(auditStore.recorded()).toHaveLength(0);
+
+  broken = false;
+  expect(
+    await store.disconnectBrokered({
+      ...pair,
+      by: "user_asker",
+      reason: "self",
+    }),
+  ).toEqual({ vendorRevoked: true });
+  expect(await store.brokeredConnection(pair)).toBeNull();
+});
+
+/**
+ * A revoke that found nothing to withdraw says so, and the row goes all the same.
+ *
+ * CRITERION. Where the broker answers `false`, both the outcome and the trail carry
+ * `vendorRevoked: false`, and the `composio_connections` row is deleted regardless.
+ *
+ * REASON. This is the grant somebody already ended in Composio's own dashboard. The account is
+ * gone at the vendor, so the local row is the stale half of a pair that has drifted and deleting
+ * it is what makes the two agree again. What must not happen is the trail claiming this
+ * deployment withdrew something: a row saying the grant was ended here when it was ended
+ * somewhere else is a worse record than none, because whoever reads back for who ended it is
+ * given the wrong answer in the same words as the right one.
+ *
+ * THE FALSE IS THE WHOLE TEST. `vendorRevoked` is indistinguishable from a hardcoded `true` until
+ * a revoke answers no, and no other test in this file exercises one.
+ */
+test("a brokered disconnect that withdrew no grant records that it withdrew none", async () => {
+  const { broker, order } = brokerSpy({ revoke: async () => false });
+  const { store, database, auditStore } = await freshStore({ broker });
+  const pair = { toolkit: "gmail", userId: "user_asker" };
+  await database.insert(composioConnections).values(pair);
+
+  expect(
+    await store.disconnectBrokered({
+      ...pair,
+      by: "user_asker",
+      reason: "self",
+    }),
+  ).toEqual({ vendorRevoked: false });
+
+  expect(order).toEqual(["revoke"]);
+  // Gone, because there was nothing at the vendor and the row was therefore the half that had
+  // drifted. Keeping it would leave the gate on every brokered call passing for an account that
+  // no longer exists anywhere.
+  expect(await store.brokeredConnection(pair)).toBeNull();
+
+  const disconnected = auditStore
+    .recorded()
+    .filter((event) => event.eventType === "mcp.account_disconnected");
+  expect(disconnected).toHaveLength(1);
+  expect(disconnected[0]?.payload).toMatchObject({
+    actor: "user_asker",
+    server: "gmail",
+    owner: "user_asker",
+    reason: "self",
+    vendorRevoked: false,
+  });
+});
+
+/**
+ * A brokered connection is visible to the person who made it, under the server row's own id.
+ *
+ * CRITERION. `brokeredConnectionsFor` answers one row per app this person has connected, shaped
+ * exactly as `connectionsFor` answers, and the `serverId` in it is the id of the `mcp_servers` row
+ * whose url names that app.
+ *
+ * REASON. `connectionsFor` selects from the vault's join table alone, so a brokered connection was
+ * invisible to the browser and the settings screen could not honestly say whether somebody was
+ * connected. The id has to be joined rather than composed because the url is where the app is
+ * recorded: `composio-${toolkit}` spelled by hand answers with whatever production happens to
+ * spell today, and this fixture — a server row at `gmail`, not at `composio-gmail` — is the case
+ * that tells a joined id from a guessed one.
+ */
+test("a brokered connection is listed for its owner under the server row's own id", async () => {
+  const { store, database } = await freshStore();
+  await seedComposioGmail(database, store);
+
+  const connections = await store.brokeredConnectionsFor("user_asker");
+  expect(connections).toHaveLength(1);
+  expect(connections[0]).toMatchObject({
+    serverId: "gmail",
+    // Empty for the reason the confirm gives: Composio grants no scope it tells us about, and the
+    // field is returned anyway so one settings screen can draw both kinds of connection.
+    scope: "",
+  });
+  expect(connections[0]?.connectedAt).toBeTruthy();
+
+  // Nobody else's, which is the only other thing this query promises.
+  expect(await store.brokeredConnectionsFor("user_leaver")).toEqual([]);
+});
+
+/**
+ * And it is the url that decides which server row a connection belongs to, not the id.
+ *
+ * CRITERION. A person connected to `gmail`, with the only Composio server row sitting at
+ * `composio://slack`, is listed against nothing.
+ *
+ * REASON. The id and the url are two fields and nothing in the schema holds them equal — which is
+ * the shape `seedComposioGmail` exists to reproduce. Reading the connection's app off the url is
+ * the same thing the directory route does when it decides which apps are enabled, and it is what
+ * stops this query telling somebody they have a Slack connection because a row called `gmail`
+ * happened to be pointed somewhere else.
+ */
+test("a brokered connection is not listed against a server row whose url names another app", async () => {
+  const { store, database } = await freshStore();
+  await seedComposioGmail(database, store, { url: "composio://slack" });
+
+  expect(await store.brokeredConnectionsFor("user_asker")).toEqual([]);
 });
