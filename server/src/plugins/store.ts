@@ -3909,10 +3909,26 @@ export function createPluginStore(options: PluginStoreOptions) {
      * itself the permission — the only thing deciding whether a call may go out as this person.
      * Sweeping the vault alone therefore left that gate passing for somebody who had been removed.
      *
-     * NOT vendor-side revocation. That needs the OAuth client and the vendor's revoke endpoint, and
-     * it belongs with disconnect. This is the half that stops us holding the secret; the grant at
-     * Google outlives it until somebody revokes it there. Said plainly rather than implied, because
-     * the difference matters to whoever has to answer for it.
+     * NOT VENDOR-SIDE REVOCATION FOR THE VAULT HALF. That needs the OAuth client and the vendor's
+     * revoke endpoint, and it belongs with disconnect. Those rows are the half that stops us
+     * holding the secret; the grant at Google outlives it until somebody revokes it there. Said
+     * plainly rather than implied, because the difference matters to whoever has to answer for it.
+     *
+     * THE BROKERED HALF DOES END IT AT THE VENDOR, because there is no secret of ours to stop
+     * holding: clearing the row alone would shut the gate this deployment owns and leave the
+     * mailbox attached at Composio, which is "we removed their access" being untrue of the only
+     * thing that matters, for the person it matters most about. So every app this person connected
+     * is revoked through the broker, exactly as {@link disconnectBrokered} revokes for one and
+     * {@link removeServer} for a whole app.
+     *
+     * REVOKE BEFORE DELETE, ALWAYS. The row is the only thing that names which apps this person
+     * had, and it outlives the `users` row precisely so offboarding can still find them — which
+     * was the table's whole justification and until now was theoretical. A delete that ran first
+     * would leave a failed revoke with nothing to revoke under: a live grant on a departed
+     * person's mailbox that no operation in this deployment can reach. The other order costs a
+     * repeat of an act nobody minds repeating. Nothing is caught around the revokes either, so a
+     * broker that will not answer ends this method with the rows still standing rather than
+     * letting it report an ending that did not happen.
      */
     async retireConnectionsFor(
       userId: string,
@@ -3987,17 +4003,40 @@ export function createPluginStore(options: PluginStoreOptions) {
        * be what deletes it.
        *
        * COUNTED, because the number is what "we removed their access" claims. Retiring twice stays
-       * quiet on its own: the rows are gone, so the second call deletes none.
+       * quiet on its own: the rows are gone, so the second call finds none.
+       *
+       * READ BEFORE ANYTHING IS DELETED, because the revokes below need the apps and the rows are
+       * where the apps are — the reason the docblock gives for revoking first. Sorted, so two
+       * retirements of the same person revoke in the same order and write their rows in the same
+       * order.
        */
       const brokered = await database
-        .delete(composioConnections)
+        .select({ toolkit: composioConnections.toolkit })
+        .from(composioConnections)
         .where(eq(composioConnections.userId, userId))
-        .returning({ toolkit: composioConnections.toolkit });
+        .orderBy(asc(composioConnections.toolkit));
 
-      // Sorted, so two retirements of the same person write their rows in the same order.
-      for (const connection of brokered.sort((left, right) =>
-        left.toolkit.localeCompare(right.toolkit),
-      )) {
+      /*
+       * What the broker actually did for each app, kept so the trail below records the answer
+       * rather than the attempt. False where there is no broker at all: a deployment whose key has
+       * since been unset can still offboard somebody, and it could not have been calling Composio
+       * either way — but nothing was ended there and the row must not claim otherwise.
+       */
+      const vendorRevoked = new Map<string, boolean>();
+      for (const connection of brokered) {
+        vendorRevoked.set(
+          connection.toolkit,
+          broker
+            ? await broker.revoke({ userId, toolkit: connection.toolkit })
+            : false,
+        );
+      }
+
+      await database
+        .delete(composioConnections)
+        .where(eq(composioConnections.userId, userId));
+
+      for (const connection of brokered) {
         retired += 1;
         await recordAuditEvent(auditStore, {
           eventType: "mcp.account_disconnected",
@@ -4011,12 +4050,14 @@ export function createPluginStore(options: PluginStoreOptions) {
             owner: userId,
             reason: "person_removed",
             /*
-             * False here for a different reason than above. There, the grant at Google outlives our
-             * copy of the secret. Here there is no secret of ours at all: the account stays
-             * connected at Composio until somebody ends it there, and what this did was shut the
-             * only gate this deployment owns.
+             * What happened, not what was attempted — {@link ComposioBroker.revoke}'s own answer,
+             * passed through, and the one place this half differs from the vault loop above.
+             * There the grant at Google outlives our copy of the secret and the field can only
+             * say so; here there was no secret of ours and the account itself was ended, or was
+             * already gone, or there was no broker to ask. The value of the field is exactly that
+             * a reader can tell those apart, so a constant here would be worse than none.
              */
-            vendorRevoked: false,
+            vendorRevoked: vendorRevoked.get(connection.toolkit) ?? false,
           },
         });
       }

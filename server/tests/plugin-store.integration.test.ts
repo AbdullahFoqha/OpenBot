@@ -256,19 +256,27 @@ let ownsFixtureIds = false;
 /**
  * Every `composio_connections` row this file may claim, as one clause used by all three sites.
  *
- * CRITERION. The refuse-to-run guard, the per-test sweep and the teardown ask exactly the same
- * question, and a fixture added at a fourth pair has to change one place rather than three.
+ * CRITERION. The pair set is an app crossed with a person: `gmail` or `linear`, held by
+ * `user_asker`, by `user_leaver` or by the anonymous actor. The refuse-to-run guard, the per-test
+ * sweep and the teardown ask exactly that question and nothing wider, and a fixture written at a
+ * pair outside the cross has to widen one clause rather than three.
+ *
+ * A CROSS RATHER THAN A LIST, so it is a little wider than what the fixtures actually write — no
+ * test here connects `user_asker` to `linear`. That is deliberate and it is safe in this one
+ * direction: the guard runs first and has already established that no row sits anywhere in the
+ * cross, so every pair the sweep and the teardown delete is a pair this run put there.
  *
  * REASON. They disagreed. The guard and the sweep asked by person across every app; one test's
  * cleanup asked by the anonymous actor across every app; the pair `("gmail", "")` was in none of
  * them. So the file refused to run on rows it does not create, deleted rows it did not create, and
  * left behind one that it did — three faces of one confusion about what makes a row this file's.
- * The app is half the answer: every row here is at `gmail`, because a Composio app IS its toolkit
- * slug and this file asserts things about the real one.
+ * The app is half the answer: every row here is at a real app, because a Composio app IS its
+ * toolkit slug and this file asserts things about the real ones — so naming the person alone
+ * claims that person's rows at every other app as well.
  */
 function ownedConnections() {
   return and(
-    eq(composioConnections.toolkit, "gmail"),
+    inArray(composioConnections.toolkit, ["gmail", "linear"]),
     inArray(composioConnections.userId, ["user_asker", "user_leaver", ""]),
   );
 }
@@ -297,23 +305,23 @@ beforeAll(async () => {
       /*
        * Brokered connections, keyed on the PAIR rather than on the person.
        *
-       * CRITERION. This guard refuses on `("gmail", <one of these three>)` and on no other
-       * `composio_connections` row, because those three pairs are the only ones this file inserts
-       * and the only ones it deletes.
+       * CRITERION. This guard refuses on {@link ownedConnections} — two real apps crossed with
+       * three people — and on no other `composio_connections` row, because every pair this file
+       * inserts and every pair it deletes is inside that cross.
        *
-       * REASON. Every connection row this file writes is at `gmail` — the two people it invents
-       * and the anonymous actor alike — so the app is half of what makes a row this file's, and
-       * asking by person alone claims rows at every other app as well. Both spellings of that
-       * over-reach have already cost something. `user_id = ''` caught the anonymous row
-       * `composio-connections.test.ts` writes against its own run-suffixed app, so a run of that
-       * file killed before its cleanup refused every test here for good; `user_id IN (asker,
-       * leaver)` claims a `("slack", "user_asker")` row the same way, and `freshDatabase` would
-       * then DELETE it — a `composio_connections` row is the entire gate on a brokered call, and
-       * nothing else can find it again.
+       * REASON. Every connection row this file writes is at a real app, `gmail` or `linear` — the
+       * two people it invents and the anonymous actor alike — so the app is half of what makes a
+       * row this file's, and asking by person alone claims rows at every other app as well. Both
+       * spellings of that over-reach have already cost something. `user_id = ''` caught the
+       * anonymous row `composio-connections.test.ts` writes against its own run-suffixed app, so a
+       * run of that file killed before its cleanup refused every test here for good; `user_id IN
+       * (asker, leaver)` claims a `("slack", "user_asker")` row the same way, and `freshDatabase`
+       * would then DELETE it — a `composio_connections` row is the entire gate on a brokered
+       * call, and nothing else can find it again.
        *
-       * The anonymous actor is one of the three because `user_id` is notNull and notNull does not
-       * exclude the empty string, so `("gmail", "")` is a row a deployment can legally hold, which
-       * is the whole point of the test that inserts one.
+       * The anonymous actor is one of the three people because `user_id` is notNull and notNull
+       * does not exclude the empty string, so `("gmail", "")` is a row a deployment can legally
+       * hold, which is the whole point of the test that inserts one.
        */
       database
         .select({
@@ -3986,10 +3994,10 @@ afterAll(async () => {
    * CRITERION. Nothing at `sweep_witness_${suite}` outlives this run.
    *
    * REASON. It is removed in its own test's `finally`, which a killed process does not run — and
-   * nothing else would reach it: `ownedConnections` is keyed on `gmail`, and the anonymous actor
-   * is precisely what `retireConnectionsFor` refuses to act on, so no operation in the product
-   * could clear it either. Named exactly rather than by prefix, because another run's witness is
-   * that run's to take back.
+   * nothing else would reach it: `ownedConnections` names `gmail` and `linear`, and the anonymous
+   * actor is precisely what `retireConnectionsFor` refuses to act on, so no operation in the
+   * product could clear it either. Named exactly rather than by prefix, because another run's
+   * witness is that run's to take back.
    */
   await database
     .delete(composioConnections)
@@ -6641,4 +6649,209 @@ test("removing an app revokes everybody, then clears rows, then drops the config
         ),
       );
   }
+});
+
+/**
+ * Offboarding somebody ends the accounts they connected, where they actually live.
+ *
+ * CRITERION. `retireConnectionsFor` on somebody holding two brokered connections revokes both at
+ * the broker while their rows are still standing, deletes the rows after that, counts both, and
+ * says in the trail of each that the grant was really withdrawn.
+ *
+ * REASON. A brokered connection holds no secret of ours, so deleting the row shuts the gate this
+ * deployment owns and leaves the mailbox attached at Composio. "We removed their access" was then
+ * untrue of the only thing that matters — the grant at the vendor — for the person it matters most
+ * about, one who has been removed and cannot be asked to disconnect anything themselves.
+ *
+ * REVOKE BEFORE DELETE, and the order is forced by what the row is. It is the only place naming
+ * which apps this person had, and it outlives the `users` row precisely so offboarding can still
+ * find them; that was the table's whole justification and until now nothing exercised it. Delete
+ * first and a broker that refuses leaves a live grant on a departed person's mailbox with nothing
+ * left here to revoke it under. Revoke first and the same refusal leaves the rows standing and
+ * offboarding repeatable. Dead-and-reachable beats live-and-unreachable.
+ *
+ * ASSERTED ON WHAT EACH CALL SAW, not on a count and not on the call list. Both revokes are for
+ * one person, so the recorded sequence is identical whichever order the code uses — an
+ * implementation revoking off what the delete returned would make the same two calls. Reading the
+ * table from inside the stub is the only thing here that can tell the two apart.
+ *
+ * THE APPS ARE CONNECTED IN REVERSE, `linear` before `gmail`, so the sorted revoke is doing work
+ * rather than agreeing with the insertion order by luck.
+ */
+test("removing a person revokes their brokered accounts at the broker", async () => {
+  /** Which apps this person was still connected to at the moment of each revoke, in call order. */
+  const connectedWhenAsked: string[][] = [];
+  /** Which app each revoke was for, which the spy's own `revoke:user_leaver` entries cannot say. */
+  const revoked: string[] = [];
+  // Through the file's own handle, which is the one `freshStore` hands back: the rows this test
+  // writes are swept by {@link freshDatabase} and the teardown, so nothing here needs a local name
+  // for the database.
+  const stillConnected = async () =>
+    (
+      await database
+        .select({ toolkit: composioConnections.toolkit })
+        .from(composioConnections)
+        .where(eq(composioConnections.userId, "user_leaver"))
+        .orderBy(asc(composioConnections.toolkit))
+    ).map((row) => row.toolkit);
+
+  const { broker, order } = brokerSpy({
+    isConnected: async () => true,
+    revoke: async ({ toolkit }) => {
+      connectedWhenAsked.push(await stillConnected());
+      revoked.push(toolkit);
+      return true;
+    },
+  });
+  const { store, auditStore } = await freshStore({ broker });
+
+  for (const toolkit of ["linear", "gmail"]) {
+    expect(
+      await store.confirmBrokeredConnection({ toolkit, userId: "user_leaver" }),
+    ).toEqual({ connected: true });
+  }
+
+  // The setup's own traffic, cleared so what follows is about the offboarding and nothing else.
+  order.length = 0;
+
+  expect(await store.retireConnectionsFor("user_leaver", "admin")).toEqual({
+    // Both of them, because the number is what "we removed their access" claims.
+    retired: 2,
+  });
+
+  expect(order).toEqual(["revoke:user_leaver", "revoke:user_leaver"]);
+  expect(revoked).toEqual(["gmail", "linear"]);
+  /*
+   * Both revokes found both rows. This is the ordering neither list above can see: revoking off
+   * the rows a delete had already returned would produce both of them unchanged while leaving
+   * nothing to revoke under if the broker refused.
+   */
+  expect(connectedWhenAsked).toEqual([
+    ["gmail", "linear"],
+    ["gmail", "linear"],
+  ]);
+
+  expect(
+    await store.brokeredConnection({ toolkit: "gmail", userId: "user_leaver" }),
+  ).toBeNull();
+  expect(
+    await store.brokeredConnection({
+      toolkit: "linear",
+      userId: "user_leaver",
+    }),
+  ).toBeNull();
+
+  const disconnected = auditStore
+    .recorded()
+    .filter((event) => event.eventType === "mcp.account_disconnected");
+  expect(disconnected).toHaveLength(2);
+  // The app, which for a brokered connection is all the row records and all that is left once
+  // the person is gone.
+  expect(disconnected.map((event) => event.targetId)).toEqual([
+    "gmail",
+    "linear",
+  ]);
+  expect(disconnected.map((event) => event.payload)).toEqual([
+    {
+      actor: "admin",
+      server: "gmail",
+      owner: "user_leaver",
+      // An administrator removing somebody, never somebody changing their own mind.
+      reason: "person_removed",
+      /*
+       * True, and true because the broker said so rather than because the call returned. This
+       * is the whole change: the row used to say `false` here whatever happened, which was
+       * honest only while offboarding left every account live at Composio.
+       */
+      vendorRevoked: true,
+    },
+    {
+      actor: "admin",
+      server: "linear",
+      owner: "user_leaver",
+      reason: "person_removed",
+      vendorRevoked: true,
+    },
+  ]);
+});
+
+/**
+ * And where there was no grant left to withdraw, offboarding says so.
+ *
+ * CRITERION. A broker answering `false` leaves `vendorRevoked: false` in the trail, and the row is
+ * deleted and counted just the same.
+ *
+ * REASON. The account was already ended in Composio's own dashboard, so the local row is the stale
+ * half of a pair that has drifted. What must not happen is the trail claiming this deployment
+ * withdrew something: whoever reads back for who ended somebody's access is then given the wrong
+ * answer in the same words as the right one.
+ *
+ * THE FALSE IS THE WHOLE TEST. A pass-through is indistinguishable from a hardcoded `true` until a
+ * revoke answers no, and nothing else on this path exercises one.
+ */
+test("offboarding a brokered account nobody held any more withdraws nothing, and says so", async () => {
+  const { broker, order } = brokerSpy({ revoke: async () => false });
+  const { store, database, auditStore } = await freshStore({ broker });
+  const pair = { toolkit: "gmail", userId: "user_leaver" };
+  await database.insert(composioConnections).values(pair);
+
+  expect(await store.retireConnectionsFor("user_leaver", "admin")).toEqual({
+    retired: 1,
+  });
+
+  expect(order).toEqual(["revoke:user_leaver"]);
+  // Gone, because there was nothing at the vendor and the row was therefore the half that had
+  // drifted. Keeping it would leave the gate passing for a person who no longer exists.
+  expect(await store.brokeredConnection(pair)).toBeNull();
+
+  const disconnected = auditStore
+    .recorded()
+    .filter((event) => event.eventType === "mcp.account_disconnected");
+  expect(disconnected).toHaveLength(1);
+  expect(disconnected[0]?.payload).toMatchObject({
+    actor: "admin",
+    server: "gmail",
+    owner: "user_leaver",
+    reason: "person_removed",
+    vendorRevoked: false,
+  });
+});
+
+/**
+ * The same false, on the other act that ends a brokered connection.
+ *
+ * CRITERION. `removeServer` on a brokered row whose broker answers `false` records
+ * `vendorRevoked: false`, and still clears the row and drops the config.
+ *
+ * REASON. The removal test above pins the `true`, which a literal `true` in the store would pass
+ * just as well — and one did, for the whole of this suite, until this test. A field whose only
+ * purpose is to tell a grant this deployment ended from one that outlives it somewhere else is
+ * worth nothing if it can only ever say one of the two.
+ */
+test("removing an app records the grant it did not withdraw as not withdrawn", async () => {
+  const { broker, order } = brokerSpy({
+    revoke: async () => false,
+    deleteAuthConfig: async () => {},
+  });
+  const { store, database, auditStore } = await freshStore({ broker });
+  await seedComposioGmail(database, store);
+
+  await store.removeServer("gmail", "admin");
+
+  expect(order).toEqual(["revoke:user_asker", "deleteAuthConfig"]);
+  expect(
+    await store.brokeredConnection({ toolkit: "gmail", userId: "user_asker" }),
+  ).toBeNull();
+
+  const disconnected = auditStore
+    .recorded()
+    .filter((event) => event.eventType === "mcp.account_disconnected");
+  expect(disconnected).toHaveLength(1);
+  expect(disconnected[0]?.payload).toMatchObject({
+    actor: "admin",
+    server: "gmail",
+    owner: "user_asker",
+    reason: "mcp_server_removed",
+    vendorRevoked: false,
+  });
 });

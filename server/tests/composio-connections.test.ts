@@ -269,9 +269,9 @@ test("offboarding somebody retires the app they connected, and the next call is 
     actor: admin,
     server: toolkit,
     owner: askerId,
-    // An administrator removing somebody, never somebody changing their own mind. And the account
-    // at the broker is still connected: this closed the gate, it did not revoke anything at
-    // Composio.
+    // An administrator removing somebody, never somebody changing their own mind. And false
+    // because this store was built with no broker, so there was nobody to revoke at:
+    // `retireConnectionsFor` ends the account at Composio on a deployment that has one.
     reason: "person_removed",
     vendorRevoked: false,
   });
