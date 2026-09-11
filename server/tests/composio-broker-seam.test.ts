@@ -88,4 +88,35 @@ describe("brokerReturnUrl", () => {
       "http://localhost:3001/admin/plugins/x",
     );
   });
+
+  /**
+   * The address handed back is the one that was checked, which is the whole of what the check is
+   * worth.
+   *
+   * A guard that reads one value and returns another has approved nothing. `OPENBOT_APP_URL` is an
+   * environment string, and an environment string carries whatever was pasted into it: a leading
+   * space from a copied address, a trailing newline from a file read line by line, a tab or a
+   * carriage return from a variable assembled by a shell. Every one of those is invisible where it
+   * is set and every one reaches Composio as part of the callback if the guard hands the raw string
+   * back — which is the same person on the same hosted page the guard exists to keep them off.
+   *
+   * Each case below is the same intended address wearing a different disguise, and the disguises are
+   * split deliberately: the first three sit at the ends, where trimming would find them, and the
+   * last three sit in the middle of the host and the path, where it would not. A fix that only
+   * trimmed would pass the first half of this table and strand somebody on the second.
+   */
+  test("hands back the address it checked rather than the padding around it", () => {
+    const intended = "https://openbot.test/settings/connected-accounts/x";
+
+    for (const disguised of [
+      " https://openbot.test/settings/connected-accounts/x",
+      "https://openbot.test/settings/connected-accounts/x\n",
+      "\thttps://openbot.test/settings/connected-accounts/x ",
+      "https://openbot\n.test/settings/connected-accounts/x",
+      "https://openbot.test/settings/\tconnected-accounts/x",
+      "https://openbot.test/settings\r/connected-accounts/x",
+    ]) {
+      expect(brokerReturnUrl(disguised)).toBe(intended);
+    }
+  });
 });

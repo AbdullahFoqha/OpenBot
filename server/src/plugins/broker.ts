@@ -236,10 +236,20 @@ export class BrokerReturnUrlError extends BrokerRefusalError {
  * the address arrived empty or malformed; the value is a page address for one person's connection
  * and belongs in no message, no log and no audit row, for the reason the connect url does not.
  *
- * The address is returned unchanged rather than normalised. Whatever a caller passes is what the
- * vendor is told and what the person's browser is sent to, so a guard that quietly rewrote it would
- * be choosing a destination — and choosing where somebody lands holding a just-completed consent is
- * exactly the decision this seam keeps in one place.
+ * WHAT COMES BACK IS THE ADDRESS THAT WAS CHECKED, WHICH IS NOT ALWAYS THE STRING THAT WENT IN. The
+ * check reads a parsed address: the emptiness test trims, and parsing drops the spaces and control
+ * characters a URL cannot contain — so ` https://openbot.test/…`, an address ending in a newline and
+ * one with a tab inside its host all satisfy this guard while denoting something else entirely. A
+ * version that approved the parsed address and returned the raw one approved nothing: the padding
+ * travelled on to Composio as part of the callback, which is the person stranded on a vendor page
+ * that this function exists to prevent. Returning what was read is what makes the reading binding.
+ *
+ * THAT IS A READING OF THE ADDRESS AND NOT A CHOICE ABOUT IT. Where somebody lands holding a
+ * just-completed consent is a decision this seam keeps in one place, so the destination is still
+ * the caller's; a parsed address names the same place a browser handed the original would have gone
+ * — the padding was never part of the destination, only of the string. What this cannot do is guess
+ * at an address that means nothing, which is why the branch above refuses rather than repairs: a
+ * missing scheme is a setting to fix and not whitespace to drop.
  */
 export function brokerReturnUrl(returnUrl: string): string {
   if (returnUrl.trim() === "") {
@@ -247,23 +257,33 @@ export function brokerReturnUrl(returnUrl: string): string {
       "This deployment built no address for Composio to send you back to, so the connection was not begun rather than begun with nowhere to land. Set OPENBOT_APP_URL to the address this deployment's pages are served from, and connecting an app will have a return leg.",
     );
   }
-  if (!isWebAddress(returnUrl)) {
+  const address = webAddress(returnUrl);
+  if (address === null) {
     throw new BrokerReturnUrlError(
       "The address Composio would send you back to is not a web address, so a consent granted there would end on Composio's own page with no way back here. Set OPENBOT_APP_URL to this deployment's own origin including the scheme — https://openbot.example.com rather than openbot.example.com.",
     );
   }
-  return returnUrl;
+  return address.href;
 }
 
-/** Whether a browser on somebody else's origin could follow this: absolute, and http or https. */
-function isWebAddress(value: string): boolean {
+/**
+ * The address a browser on somebody else's origin could follow — absolute, and http or https — and
+ * null for anything else.
+ *
+ * It answers with the parsed address rather than a boolean so that the one caller can hand back what
+ * was actually examined. A predicate would leave the caller holding only the string it was given and
+ * no way to tell it apart from the address that string denotes.
+ */
+function webAddress(value: string): URL | null {
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    return false;
+    return null;
   }
-  return parsed.protocol === "https:" || parsed.protocol === "http:";
+  return parsed.protocol === "https:" || parsed.protocol === "http:"
+    ? parsed
+    : null;
 }
 
 /**
