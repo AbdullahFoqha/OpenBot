@@ -1364,6 +1364,324 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
 });
 
 /**
+ * ONE REMEDY PER VENDOR CONDITION, WHICH IS THE HALF THE TABLE ABOVE CANNOT ASSERT.
+ *
+ * That table asks whether a reader is told ANYTHING, and a seam that answered every named condition
+ * with one sentence would satisfy it completely. This file has already been bitten by exactly that:
+ * `rejects.toThrow(/linear/)` matched three authored refusals prescribing three different acts by
+ * three different people, so deleting a whole branch left the suite green. The app name is the part
+ * every sentence shares; the remedy is the part that makes a sentence worth writing.
+ *
+ * SO EACH ROW BELOW IS ASSERTED IN BOTH DIRECTIONS: the sentence a condition produces must carry ITS
+ * remedy and must carry NO OTHER ROW'S. Two conditions collapsed into one wording fail here twice
+ * over — the row that lost its remedy, and the row that acquired a second one.
+ *
+ * THE CALL SITE OF EACH ROW IS ONE THAT ACTUALLY RAISES IT, read off `@composio/core` 0.18.1 rather
+ * than chosen for convenience, so a row is also a record of where its condition comes from. The
+ * table above already establishes that the translation is not call-site-specific; this one
+ * establishes that the sentences are distinguishable, which is what stops the translation being a
+ * fallback with a vendor's name on it.
+ */
+describe("each vendor condition reaches the reader as its own remedy", () => {
+  /** The vendor's error as it arrives: a name, and a message nothing here reads. */
+  function raising(name: string): () => Promise<never> {
+    return async (): Promise<never> => {
+      throw Object.assign(new Error(`${name} came out of Composio.`), { name });
+    };
+  }
+
+  /** Minting this person's connect link, which is where three of the rows below come from. */
+  function whileLinking(raise: () => Promise<never>): Promise<unknown> {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: { link: raise },
+      }),
+      () => 1_000_000,
+    );
+    return broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl: RETURN_URL,
+    });
+  }
+
+  /** Creating this deployment's auth config, where the SDK parses what it is handed. */
+  function whileCreatingConfig(raise: () => Promise<never>): Promise<unknown> {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [] }), create: raise },
+      }),
+      () => 1_000_000,
+    );
+    return broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" });
+  }
+
+  const CALL = {
+    toolkit: "gmail",
+    slug: "GMAIL_FETCH_EMAILS",
+    userId: "user_1",
+    version: "20260903_00",
+  };
+
+  /** Resolving the tool before it is run, which is the call that reports a withdrawn action. */
+  function whileResolving(raise: () => Promise<never>): Promise<unknown> {
+    const { actions } = buildComposioClient(
+      fakeVendor({ tools: { getRawComposioToolBySlug: raise } }),
+      () => 1_000_000,
+    );
+    return actions.execute(CALL, {});
+  }
+
+  /** Running it, once the resolve has already agreed about which app it belongs to. */
+  function whileRunning(raise: () => Promise<never>): Promise<unknown> {
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          getRawComposioToolBySlug: async () => ({
+            slug: "GMAIL_FETCH_EMAILS",
+            toolkit: { slug: "gmail" },
+          }),
+          execute: raise,
+        },
+      }),
+      () => 1_000_000,
+    );
+    return actions.execute(CALL, {});
+  }
+
+  const CONDITIONS: {
+    name: string;
+    raisedBy: string;
+    remedy: RegExp;
+    ask: (raise: () => Promise<never>) => Promise<unknown>;
+  }[] = [
+    {
+      name: "ComposioMultipleConnectedAccountsError",
+      raisedBy: "connectedAccounts.link",
+      remedy: /disconnecting the account they already hold/,
+      ask: whileLinking,
+    },
+    {
+      name: "ComposioAclOnlyForSharedError",
+      raisedBy: "connectedAccounts.link",
+      remedy: /changing how linear is shared in Composio's own dashboard/,
+      ask: whileLinking,
+    },
+    {
+      name: "ComposioFailedToCreateConnectedAccountLink",
+      raisedBy: "connectedAccounts.link",
+      remedy: /no consent was spent/,
+      ask: whileLinking,
+    },
+    {
+      name: "ValidationError",
+      raisedBy: "authConfigs.create",
+      remedy: /upgrading this deployment's @composio\/core/,
+      ask: whileCreatingConfig,
+    },
+    {
+      name: "ComposioRequestCancelledError",
+      raisedBy: "tools.execute",
+      remedy: /asking for it again is what settles/,
+      ask: whileRunning,
+    },
+    {
+      name: "ComposioConnectedAccountNotFoundError",
+      raisedBy: "tools.execute",
+      remedy:
+        /connecting gmail again on this deployment's Connected accounts page/,
+      ask: whileRunning,
+    },
+    {
+      name: "ComposioToolNotFoundError",
+      raisedBy: "tools.getRawComposioToolBySlug",
+      remedy: /records what Composio publishes now/,
+      ask: whileResolving,
+    },
+    {
+      name: "ComposioToolVersionRequiredError",
+      raisedBy: "tools.execute",
+      remedy: /replaces "latest" with a version Composio will accept/,
+      ask: whileRunning,
+    },
+  ];
+
+  for (const condition of CONDITIONS) {
+    test(`${condition.name} out of ${condition.raisedBy} prescribes its own step`, async () => {
+      const failure = await failureOf(condition.ask(raising(condition.name)));
+      const sentence = brokerSentence(failure) ?? vendorSentence(failure);
+
+      expect(sentence).not.toBeNull();
+      expect(sentence).toMatch(condition.remedy);
+
+      // The other direction: a sentence that also prescribes somebody else's step is a sentence two
+      // conditions are sharing, which is the state this whole table exists to catch.
+      for (const other of CONDITIONS) {
+        if (other.name === condition.name) continue;
+        expect(sentence).not.toMatch(other.remedy);
+      }
+    });
+  }
+
+  /**
+   * The vendor's own words win where there are any, which is the limit on translating at all.
+   *
+   * `routes.ts` reads {@link brokerSentence} first and {@link vendorSentence} second, so a refusal
+   * authored here HIDES whatever Composio's own server said. Several of the SDK's classes are
+   * wrappers that carry the server's explanation underneath — `ComposioFailedToCreateConnectedAccountLink`
+   * is one, and it is on the table above — so translating one of those unconditionally would replace
+   * a specific server message with this deployment's general one. Where the vendor explained itself,
+   * the error is passed on untouched and the reader gets the vendor's sentence.
+   */
+  test("a condition whose vendor message is reachable is passed on rather than reworded", async () => {
+    const failure = await failureOf(
+      whileLinking(async (): Promise<never> => {
+        throw Object.assign(
+          new Error("Failed to create connected account link"),
+          {
+            name: "ComposioFailedToCreateConnectedAccountLink",
+            cause: {
+              error: {
+                error: {
+                  message:
+                    "The auth config linear (OpenBot) has no redirect URI registered.",
+                },
+              },
+            },
+          },
+        );
+      }),
+    );
+
+    expect(brokerSentence(failure)).toBeNull();
+    expect(vendorSentence(failure)).toBe(
+      "The auth config linear (OpenBot) has no redirect URI registered.",
+    );
+  });
+});
+
+/**
+ * WHAT THE LOOP THAT DELETES A SET OF THINGS DOES WITH WHAT IT CATCHES.
+ *
+ * `deleteAuthConfig` and `revoke` each ask Composio to end several objects that independently hold
+ * somebody's access, and both attempt all of them rather than stopping at the first refusal — which
+ * is the right shape and was reporting almost none of what it learned. Two things were wrong with
+ * it, and they are different failures rather than one.
+ *
+ * EVERY REASON AFTER THE FIRST WAS DISCARDED. The throw carried `cause: refused[0]` and nothing
+ * else, so a person with five accounts of which three refused left one reason behind and two gone —
+ * and the sentence a reader gets is a count, deliberately, so the reasons were the only place the
+ * detail lived at all.
+ *
+ * AND A BUG OF OURS WAS COUNTED AS A REFUSAL BY COMPOSIO. The catch took everything, so a
+ * `TypeError` out of this adapter's own code became one more "Composio refused the rest" — a
+ * sentence telling an operator to press disconnect again, about a fault that will do the same thing
+ * every time and that no amount of retrying reaches.
+ */
+describe("what the delete loop keeps of the failures it meets", () => {
+  test("every account Composio refused is carried, not only the first", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => ({
+            items: [{ id: "ca_1" }, { id: "ca_2" }, { id: "ca_3" }],
+          }),
+          delete: async (id: string) => {
+            if (id !== "ca_1") throw new Error(`Composio refused ${id}.`);
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const failure = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    // The sentence stays the count, which is what a reader can act on. The reasons are what a log
+    // reader needs, and there are two of them.
+    expect(brokerSentence(failure)).toMatch(/1 of this person's 3 accounts/);
+    const cause = failure.cause;
+    expect(cause).toBeInstanceOf(AggregateError);
+    expect(
+      (cause as AggregateError).errors.map((one) => (one as Error).message),
+    ).toEqual(["Composio refused ca_2.", "Composio refused ca_3."]);
+  });
+
+  test("a single refusal is still carried as itself rather than wrapped", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => ({ items: [{ id: "ca_1" }, { id: "ca_2" }] }),
+          delete: async (id: string) => {
+            if (id === "ca_2") throw new Error("Composio refused that one.");
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const failure = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    expect((failure.cause as Error).message).toBe("Composio refused that one.");
+  });
+
+  test("a fault in this adapter escapes rather than being counted as Composio refusing", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => ({ items: [{ id: "ca_1" }, { id: "ca_2" }] }),
+          delete: async (id: string) => {
+            if (id === "ca_2") {
+              throw new TypeError("held.slug is not a function");
+            }
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const failure = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    // Out as itself, and NOT as a count sentence telling somebody to press disconnect again about a
+    // fault that will do exactly the same thing the second time.
+    expect(failure).toBeInstanceOf(TypeError);
+    expect(failure.message).toBe("held.slug is not a function");
+    expect(brokerSentence(failure)).toBeNull();
+  });
+
+  test("the same two promises hold for the loop that removes an app's configs", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [OURS, OURS_SPARE] }),
+          delete: async (id: string) => {
+            throw new Error(`Composio refused ${id}.`);
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const failure = await failureOf(broker.deleteAuthConfig("linear"));
+
+    expect(brokerSentence(failure)).toMatch(
+      /0 of this deployment's 2 authorization configs/,
+    );
+    expect(
+      (failure.cause as AggregateError).errors.map(
+        (one) => (one as Error).message,
+      ),
+    ).toEqual(["Composio refused ac_ours.", "Composio refused ac_ours_spare."]);
+  });
+});
+
+/**
  * WHAT EACH VENDOR LISTING IS ALLOWED TO BE, given that this file's types only assert its shape.
  *
  * A TYPESCRIPT INTERFACE OVER A WIRE VALUE IS AN ASSERTION AND NOT A CHECK, which is the whole
