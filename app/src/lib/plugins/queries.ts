@@ -11,6 +11,15 @@ export type PluginTool = {
   ref: string;
   /** Whether it changes something. Anything not positively known to be a read is a write. */
   effect: "read" | "write";
+  /**
+   * Whether the vendor warns that it destroys something.
+   *
+   * Beside {@link effect} rather than folded into it: the rule engine judges reads and writes and
+   * gains nothing from a third value, while a person deciding whether to switch an action on is
+   * asking a different question. Recorded from the vendor's own labels, so false is an absence of a
+   * claim rather than a claim of safety.
+   */
+  destructive: boolean;
   grantedTo: string[];
 };
 
