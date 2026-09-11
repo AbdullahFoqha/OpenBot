@@ -3,11 +3,17 @@ import { Hono } from "hono";
 import type { BotAccessCheck } from "../agents/profile-policy";
 import type { AppVariables } from "../auth/guards";
 import { requireAdmin } from "../auth/guards";
-import { BrokerUnconfiguredError, type ComposioBroker } from "./broker";
+import {
+  type BrokerApp,
+  BrokerUnconfiguredError,
+  brokerSentence,
+  type ComposioBroker,
+} from "./broker";
 import { CATALOGUE, catalogueEntry } from "./catalogue";
-import { toolkitOf } from "./composio";
+import { toolkitOf, vendorSentence } from "./composio";
 import {
   authorizationUrlFor,
+  type ConnectOrigin,
   challengeFor,
   connectedAccountsUrlFor,
   createVerifier,
@@ -39,6 +45,52 @@ import {
  * this grant to belong to.
  */
 export type ConnectingPersonCheck = (userId: string) => Promise<boolean>;
+
+/**
+ * What somebody is told when the broker itself failed, and what is deliberately kept out of it.
+ *
+ * EVERY BROKERED ROUTE NEEDS THIS AND NONE OF THEM USED TO HAVE IT. A listing, a connect, a confirm
+ * and a disconnect all end in a call to another company's API, and an unhandled rejection out of any
+ * of them is a bare 500 with the vendor's thrown object on this deployment's console. That object is
+ * the whole HTTP response — headers, trace ids, rate-limit counters — and the person reading the 500
+ * gets none of it and no sentence either. A wrong `COMPOSIO_API_KEY` is the first failure a new
+ * operator meets, and it is the one this used to answer worst.
+ *
+ * `vendorSentence` IS THE SAME ONE THE TRANSPORT USES, for the same reason it exists there: the
+ * useful sentence — "Invalid API key", "No connected account found for user …" — is nested two
+ * levels inside `cause` beside everything that must not be shown, so this reaches in for that one
+ * string and takes nothing else. Null from it is a failure this deployment cannot explain, and the
+ * caller's own generic sentence is what a reader gets instead of the vendor's placeholder.
+ *
+ * NOTHING FROM THE REQUEST OR THE ANSWER TRAVELS WITH IT. Not the API key, which never leaves the
+ * adapter; not a connect link, which is a bearer capability handed to one browser; and not the
+ * thrown object, whether by spreading it, stringifying it or logging it.
+ *
+ * 502 RATHER THAN 500, because nothing here broke: this deployment asked a third party and the third
+ * party did not answer usefully, which is the same reading the dynamic-registration failure below
+ * already gives. {@link BrokerUnconfiguredError} is the one exception and keeps the 503 every other
+ * no-broker answer on these routes uses — nobody was asked at all, and the remedy is one environment
+ * variable long.
+ */
+function brokerRefusal(
+  error: unknown,
+  generic: string,
+): { error: string; status: 502 | 503 } {
+  const unconfigured = brokerSentence(error);
+  if (unconfigured) return { error: unconfigured, status: 503 };
+  return { error: vendorSentence(error) ?? generic, status: 502 };
+}
+
+/**
+ * What a reader is told when Composio would not answer with its directory.
+ *
+ * One constant because two routes make that call — browsing the catalogue and enabling an app out of
+ * it — and a reader meeting the same failure through two doors should not meet two sentences. It
+ * names the setting rather than quoting it: a key that was pasted with a space in it, or one for
+ * another project, is the likeliest reason Composio will not talk to this deployment at all.
+ */
+const DIRECTORY_UNAVAILABLE =
+  "Composio would not answer with its app directory, and said nothing about why. Check that COMPOSIO_API_KEY is this project's key, and check Composio's status if it persists.";
 
 /**
  * The Plugins surface: what this deployment has added, and which Bots may use it.
@@ -452,7 +504,15 @@ export function createPluginRoutes(
       );
     }
 
-    const directory = await composio.broker.listApps();
+    let directory: BrokerApp[];
+    try {
+      directory = await composio.broker.listApps();
+    } catch (error) {
+      // The vendor's own sentence where there is one, because "invalid api key" is the diagnosis
+      // and a 500 is not. See {@link brokerRefusal} for what is kept out of the answer.
+      const refusal = brokerRefusal(error, DIRECTORY_UNAVAILABLE);
+      return context.json({ error: refusal.error }, refusal.status);
+    }
     const term = (context.req.query("q") ?? "").trim().toLowerCase();
     const matched = term
       ? directory.filter((app) =>
@@ -500,11 +560,22 @@ export function createPluginRoutes(
       slug?: string;
     } | null;
     const slug = body?.slug?.trim();
-    const app = slug
-      ? (await composio.broker.listApps()).find(
-          (candidate) => candidate.slug === slug,
-        )
-      : undefined;
+    let directory: BrokerApp[] = [];
+    if (slug) {
+      try {
+        directory = await composio.broker.listApps();
+      } catch (error) {
+        /*
+         * The same failure the directory route answers, in the same words, because it is the same
+         * call. Unhandled it was the worst 500 of the three: an administrator pressing Add on a
+         * deployment whose key is wrong was told nothing at all, on the one screen where the key
+         * had just been set.
+         */
+        const refusal = brokerRefusal(error, DIRECTORY_UNAVAILABLE);
+        return context.json({ error: refusal.error }, refusal.status);
+      }
+    }
+    const app = directory.find((candidate) => candidate.slug === slug);
     if (!app) {
       return context.json(
         {
@@ -621,10 +692,35 @@ export function createPluginRoutes(
       (server) => server.id === serverId,
     );
     const toolkit = row ? toolkitOf(row.url) : null;
-    if (toolkit) {
+    if (row && toolkit) {
       if (!composio) {
         return context.json(
           { error: new BrokerUnconfiguredError().message },
+          503,
+        );
+      }
+
+      /*
+       * NO APP URL IS A REFUSAL, NOT A LINK WITH NO WAY BACK.
+       *
+       * The address below is where Composio sends this person once they have consented, and it has
+       * to be absolute: the consent screen is on another company's origin, so a relative path
+       * resolves against theirs. A deployment that cannot say where its own pages are cannot
+       * produce one — and minting the link anyway would leave somebody stranded on Composio's
+       * hosted page having just granted access, with no route back to the deployment that asked
+       * for it and nothing here knowing it happened.
+       *
+       * The OAuth flow below refuses for its missing `OPENBOT_PUBLIC_URL` in these same terms and
+       * for this same reason. `OPENBOT_APP_URL` is the setting here because the two addresses are
+       * genuinely different: the API is one origin and the browser app is another, and it is a
+       * page this person is coming back to rather than an endpoint.
+       */
+      if (!connect?.appUrl) {
+        return context.json(
+          {
+            error:
+              "This deployment has no app URL configured, so Composio would have nowhere to send you back to. Set OPENBOT_APP_URL.",
+          },
           503,
         );
       }
@@ -644,27 +740,66 @@ export function createPluginRoutes(
         userId: context.var.actor.id,
       });
       if (existing) {
-        // Named with the step to take rather than only refused: a second link would attach a
-        // second account behind a row that already says connected, and the way to a new one is
-        // through the connection they have.
+        /*
+         * Named with the step to take rather than only refused: a second link would attach a
+         * second account behind a row that already says connected, and the way to a new one is
+         * through the connection they have.
+         *
+         * THE APP'S TITLE, NOT THE ROW'S ID. `composio-linear` is this deployment's name for a
+         * table row; "Linear" is the name of the thing the person connected and the only one of
+         * the two they have ever seen on a screen. An internal key in a sentence addressed to a
+         * person is both unhelpful and a small leak of how the rows are keyed.
+         */
         return context.json(
           {
-            error: `You already have an account connected to ${serverId}. Disconnect it first if you want to connect a different one.`,
+            error: `You already have an account connected to ${row.title}. Disconnect it first if you want to connect a different one.`,
           },
           409,
         );
       }
 
       /*
+       * WHERE THE CONSENT COMES BACK TO, BUILT HERE AND NEVER READ OFF THE REQUEST.
+       *
+       * Composio sends the person to this address when they are done, so whoever chooses it
+       * chooses where somebody lands holding a just-completed consent. A url taken from the body,
+       * the query or a header would therefore be an open redirect with a consent screen in front
+       * of it — the exact thing {@link ConnectOrigin} exists to stop on the OAuth flow below, and
+       * it is narrowed here in the same way: the caller may name one of two PAGES, and the origin
+       * underneath them is this deployment's configured app URL in both cases.
+       *
+       * Both pages confirm on load, which is what makes either of them a correct destination: the
+       * return trip carries nothing signed, so arriving proves nothing, and the page asks Composio
+       * whether the account is really attached before anything here says it is.
+       */
+      const returnTo: ConnectOrigin =
+        context.req.query("returnTo") === "admin" ? "admin" : "settings";
+
+      /*
        * THE URL IS A BEARER CAPABILITY. Whoever opens it attaches an account to this person's
        * connection, so it is answered to the browser that asked and to nothing else: not logged,
        * not audited, not put in an error body. A redirect url in a log line is somebody else's
-       * mailbox for as long as it stays valid.
+       * mailbox for as long as it stays valid — which is why the failure below answers with the
+       * vendor's sentence and never with what was being minted when it failed.
        */
-      const { redirectUrl } = await composio.broker.authorize({
-        userId: context.var.actor.id,
-        toolkit,
-      });
+      let redirectUrl: string;
+      try {
+        ({ redirectUrl } = await composio.broker.authorize({
+          userId: context.var.actor.id,
+          toolkit,
+          returnUrl: connectedAccountsUrlFor(
+            connect.appUrl,
+            { serverId },
+            returnTo,
+          ),
+        }));
+      } catch (error) {
+        const refusal = brokerRefusal(
+          error,
+          `Composio would not begin a connection to ${row.title}, and said nothing about why. Try again, and ask an administrator to check this deployment's Composio key if it persists.`,
+        );
+        return context.json({ error: refusal.error }, refusal.status);
+      }
       return context.json({ authorizationUrl: redirectUrl });
     }
 
@@ -855,12 +990,30 @@ export function createPluginRoutes(
        * Composio said, and a shape invented at this layer would be a second opinion about a fact
        * only the vendor holds.
        */
-      return context.json(
-        await store.confirmBrokeredConnection({
-          toolkit: resolved.toolkit,
-          userId: context.var.actor.id,
-        }),
-      );
+      try {
+        return context.json(
+          await store.confirmBrokeredConnection({
+            toolkit: resolved.toolkit,
+            userId: context.var.actor.id,
+          }),
+        );
+      } catch (error) {
+        /*
+         * A BROKER THAT WOULD NOT ANSWER IS NOT A CONNECTION THAT IS ABSENT.
+         *
+         * This route is called on every page load, so the tempting answer to a failure is
+         * `{ connected: false }` — and that would be this deployment inventing a fact only Composio
+         * holds, drawing "Not connected" over a live account and, one step on, deleting the row
+         * that says otherwise. The store deletes on a NO from the vendor, and a failure is not a
+         * no. So the page is told the ask failed, and what it goes on showing is the last answer
+         * Composio gave rather than a guess about this one.
+         */
+        const refusal = brokerRefusal(
+          error,
+          "Composio would not say whether this account is connected, and gave no reason, so what is shown here is the last answer it gave rather than a fresh one. Try again, and ask an administrator to check this deployment's Composio key if it persists.",
+        );
+        return context.json({ error: refusal.error }, refusal.status);
+      }
     },
   );
 
@@ -896,14 +1049,32 @@ export function createPluginRoutes(
      * vendor. It is read once, from `context.var.actor`, and used for both the owner and the actor
      * — nothing in the body or the query is looked at at all.
      */
-    return context.json(
-      await store.disconnectBrokered({
-        toolkit: resolved.toolkit,
-        userId: context.var.actor.id,
-        by: context.var.actor.id,
-        reason: "self",
-      }),
-    );
+    try {
+      return context.json(
+        await store.disconnectBrokered({
+          toolkit: resolved.toolkit,
+          userId: context.var.actor.id,
+          by: context.var.actor.id,
+          reason: "self",
+        }),
+      );
+    } catch (error) {
+      /*
+       * REPEATING IT IS THE RECOVERY, AND THE SENTENCE SAYS SO RATHER THAN GUESSING HOW FAR IT GOT.
+       *
+       * The revoke runs before anything here is deleted, which is what makes a second press safe:
+       * whatever this failed at, the state it leaves is access dead or access untouched, never
+       * access live with nothing here able to reach it. Claiming "nothing was changed" would be a
+       * guess — a delete that succeeded and an audit write that did not is the same throw — and the
+       * one thing a person needs is the button to press, not this deployment's theory of where it
+       * stopped.
+       */
+      const refusal = brokerRefusal(
+        error,
+        "Composio would not end this account, and gave no reason. Press Disconnect again: the revoke at Composio runs before anything here is deleted, so repeating it is safe and is the whole recovery. Ask an administrator to check this deployment's Composio key if it persists.",
+      );
+      return context.json({ error: refusal.error }, refusal.status);
+    }
   });
 
   /**

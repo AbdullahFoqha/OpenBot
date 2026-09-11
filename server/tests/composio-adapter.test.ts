@@ -48,7 +48,6 @@ function fakeVendor(parts: {
     },
     toolkits: {
       get: refuse("toolkits.get"),
-      authorize: refuse("toolkits.authorize"),
       ...parts.toolkits,
     },
     authConfigs: {
@@ -59,6 +58,7 @@ function fakeVendor(parts: {
     },
     connectedAccounts: {
       list: refuse("connectedAccounts.list"),
+      link: refuse("connectedAccounts.link"),
       delete: refuse("connectedAccounts.delete"),
       ...parts.connectedAccounts,
     },
@@ -215,5 +215,103 @@ describe("executing an action", () => {
     await expect(refused).rejects.toThrow(/slack/);
     await expect(refused).rejects.toThrow(/gmail/);
     expect(executed).toEqual([]);
+  });
+});
+
+/**
+ * Minting one person's connect link, which is the call that decides whether consent comes back.
+ *
+ * `connectedAccounts.link` RATHER THAN `toolkits.authorize`, and the difference is the whole
+ * subject of these two tests. `toolkits.authorize` takes a user id, a toolkit and an optional auth
+ * config id and has nowhere to put a callback, so every consent it started ended on Composio's own
+ * hosted page: the person had granted access and the only way back to this deployment was to find
+ * it again by hand. `link` carries the callback, and it is also the vendor's own named replacement
+ * for `initiate` on Composio-managed OAuth, which is exactly what `ensureAuthConfig` creates here.
+ *
+ * The auth config is READ rather than created, because this deployment already made it when an
+ * administrator enabled the app — named for this deployment, visible in an operator's dashboard.
+ * `toolkits.authorize` would have created one on demand at Composio's defaults, which is the
+ * behaviour enabling-time creation exists to replace.
+ */
+describe("beginning one person's connection", () => {
+  test("the link carries the page this deployment sends them back to", async () => {
+    const linked: unknown[] = [];
+    const listed: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async (query: unknown) => {
+            listed.push(query);
+            return {
+              items: [{ id: "ac_this_deployments", name: "Linear (OpenBot)" }],
+            };
+          },
+        },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+    );
+
+    const begun = await broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl:
+        "https://openbot.test/settings/connected-accounts/composio-linear",
+    });
+
+    // The config this deployment already holds for the app, found by the listing the key itself
+    // scopes — and no `authConfigs.create`, which would refuse in `fakeVendor` if it were reached.
+    expect(listed).toEqual([{ toolkit: "linear", limit: LISTING_LIMIT }]);
+    expect(linked).toEqual([
+      [
+        "user_1",
+        "ac_this_deployments",
+        {
+          callbackUrl:
+            "https://openbot.test/settings/connected-accounts/composio-linear",
+        },
+      ],
+    ]);
+    expect(begun).toEqual({
+      redirectUrl: "https://backend.composio.dev/s/a-link",
+    });
+  });
+
+  test("an app with no auth config is a refusal naming an administrator's step", async () => {
+    /*
+     * The state is real rather than defensive: an app enabled before this deployment created
+     * configs at all, or a config deleted by hand in Composio's dashboard. Creating one here
+     * instead would mint it unnamed, at the vendor's managed defaults, at the moment somebody
+     * pressed Connect — and nothing would be minted for the person to visit either way, so the
+     * honest answer names the app and the step that fixes it.
+     */
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [] }) },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+    );
+
+    const refused = broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl:
+        "https://openbot.test/settings/connected-accounts/composio-linear",
+    });
+
+    await expect(refused).rejects.toThrow(/linear/);
+    // And nothing was begun at the vendor: a link against a config chosen by nobody would attach
+    // this person's account to a configuration this deployment cannot see or tighten.
+    expect(linked).toEqual([]);
   });
 });

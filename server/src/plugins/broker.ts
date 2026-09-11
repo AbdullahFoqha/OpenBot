@@ -75,6 +75,22 @@ export type ComposioBroker = {
   authorize(request: {
     userId: string;
     toolkit: string;
+    /**
+     * Where the vendor sends this person once the consent screen is done with them.
+     *
+     * REQUIRED, BECAUSE A CONSENT WITH NO RETURN LEG STRANDS SOMEBODY. Without it the flow ends on
+     * Composio's own hosted page: the person has consented, nothing here knows it, and the only
+     * way back is for them to find this deployment again by hand. An optional field would have
+     * made that the default for whichever call site forgot to pass one, which is exactly the state
+     * this parameter exists to end.
+     *
+     * IT IS AN ADDRESS THIS DEPLOYMENT BUILT AND NEVER ONE A CALLER CHOSE. Whoever names it names
+     * where a person lands holding a just-completed consent, so a value taken from a request body,
+     * a query or a header would be an open redirect with a consent screen in front of it. The one
+     * caller builds it from the deployment's configured app URL and narrows the page within it to
+     * a known name, the same way this repository's own OAuth `returnTo` is narrowed.
+     */
+    returnUrl: string;
   }): Promise<{ redirectUrl: string }>;
   /** Whether this person currently has an account attached to this app at the vendor. */
   isConnected(request: { userId: string; toolkit: string }): Promise<boolean>;

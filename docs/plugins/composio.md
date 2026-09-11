@@ -57,11 +57,16 @@ accidental.
 from a caller and was written into a row's url would become the app every future call runs in.
 
 **The authorization config is created here, not on somebody's first click, and it is created
-first.** Left to itself, the link-minting call would create one on demand, at Composio's managed
-defaults, the first time any person pressed Connect. Creating it at enable time, named for this
-deployment, makes it an object an operator can see in their Composio dashboard from the moment the
-app exists — and tighten there, without a code change. It comes before anything is written here, so
-a failure leaves no row behind and pressing the button again is the whole recovery.
+first.** The SDK's own one-call shortcut would have made one on demand, at Composio's managed
+defaults and under a name of its choosing, the first time any person pressed Connect. Creating it at
+enable time, named for this deployment, makes it an object an operator can see in their Composio
+dashboard from the moment the app exists — and tighten there, without a code change. It comes before
+anything is written here, so a failure leaves no row behind and pressing the button again is the
+whole recovery.
+
+Connecting an account is then a link minted **against that config**, which is why nothing mints a
+config later: an app whose config was deleted at the dashboard refuses at Connect, naming the
+administrator's step, rather than quietly acquiring a second one that nobody here named or can find.
 
 Then one ordinary `mcp_servers` row — id `composio-<slug>`, url `composio://<slug>`, provenance
 `composio`, vendor Composio, title from the directory, and no credential of any kind — and then the
@@ -89,7 +94,18 @@ never as green.
 
 At `/settings/connected-accounts`, a brokered app appears beside the OAuth connectors once an
 administrator has enabled it. Open it and press **Connect**. That leaves OpenBot for Composio's
-consent screen and returns to the same page.
+consent screen and returns to the same page — or, for an administrator who started from the app's
+own page under `/admin/plugins`, back to that page, because leaving a page mid-task and being
+returned to a different one is the round trip this exists to remove.
+
+**The address they come back to is built here, and a caller has no say in it.** It is this
+deployment's `OPENBOT_APP_URL` plus one of two known pages, so what a request can choose is which
+page and never which site: an address taken from a body or a query would be an open redirect with a
+consent screen in front of it, which is the same reason this deployment's own OAuth flow narrows its
+`returnTo` to a name. A deployment with no app URL configured has no absolute address to hand over
+— the consent screen is on Composio's origin, so a relative one resolves against theirs — and
+**Connect** refuses there, naming the setting, rather than minting a link that would strand somebody
+on Composio's page having just granted access to their mailbox.
 
 **The link is yours alone.** It is minted for the session's own id and can be asked for on nobody
 else's behalf. It is a bearer capability — whoever opens it binds *their* account to the id it was
@@ -101,13 +117,21 @@ signed in it, so the row that lets calls through is written only after Composio 
 is live. The page asks on return, and asks again on load, so a row that drifted heals. Composio is
 the source of truth and the row here is a cache of it.
 
+**A failure at Composio arrives as Composio's own sentence.** A wrong key, a revoked one, an app
+whose authorization config was deleted at the dashboard: each of those comes back as the one
+sentence the vendor wrote — *Invalid API key provided.* — with everything that travelled beside it
+left where it was. The key never appears anywhere, nor the connect link, nor the vendor's thrown
+object, which is an entire HTTP response including headers and trace ids. Where the vendor reported
+a failure and said nothing about it, the sentence is this deployment's own and names the step to
+take rather than echoing a placeholder.
+
 **One account per person per app, and the second is refused.** Composio would happily hold several
 accounts for one person and one app, but the call that runs an action names the person and not the
 account — so with two Gmail accounts connected, which mailbox a Bot reads would be Composio's
 choice, and neither the table here nor the audit row could say which one it was. Connect therefore
-refuses while a live connection for that app already exists, and names the way to switch: *You have
-already connected Slack. To use a different account, disconnect this one first.* It is per app and
-nothing more — Gmail and Linear and Notion connected alongside each other are untouched.
+refuses while a live connection for that app already exists, and names the way to switch: *You
+already have an account connected to Slack. Disconnect it first if you want to connect a different
+one.* The app's own title, never the row's id. It is per app and nothing more — Gmail and Linear and Notion connected alongside each other are untouched.
 
 ### Disconnecting
 

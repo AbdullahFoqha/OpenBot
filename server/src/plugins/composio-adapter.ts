@@ -112,10 +112,6 @@ export type ComposioVendor = {
   };
   toolkits: {
     get(query: { limit: number; sortBy: "usage" }): Promise<VendorToolkit[]>;
-    authorize(
-      userId: string,
-      toolkit: string,
-    ): Promise<{ redirectUrl?: string | null }>;
   };
   authConfigs: {
     list(query: {
@@ -142,6 +138,34 @@ export type ComposioVendor = {
       statuses: "ACTIVE"[];
       limit: number;
     }): Promise<{ items: { id: string }[] }>;
+    /**
+     * Mint one person's connect link against one auth config, with the page to come back to.
+     *
+     * `link` RATHER THAN `initiate`, AND RATHER THAN `toolkits.authorize`. All three end at a
+     * redirect url, and only the choice between them decides whether this deployment keeps working.
+     * `toolkits.authorize` takes a user id, a toolkit and an optional auth config id and has no
+     * parameter for a callback at all (`@composio/core` 0.18.1, `src/models/Toolkits.ts:333-338`),
+     * which is why consent used to end on Composio's hosted page — the address below has nowhere
+     * to travel on that call. `initiate` does carry one (`:249`), but the endpoint under it is
+     * retired for Composio-managed OAuth on redirectable schemes — cutover 2026-05-08 for new
+     * organizations and 2026-07-03 for the rest, after which it throws
+     * `ComposioLegacyConnectedAccountsEndpointRetiredError` (`src/models/ConnectedAccounts.ts:146-160`)
+     * — and `use_composio_managed_auth` is exactly what {@link ComposioBroker.ensureAuthConfig}
+     * creates. `link` is the vendor's own named replacement for that combination, carries the
+     * callback, and answers in the same shape.
+     *
+     * TAKING THE AUTH CONFIG ID IS NOT A COST HERE. It is the one thing `toolkits.authorize` was
+     * doing for us, and it did it by listing the configs and creating one at Composio's managed
+     * defaults where it found none — which this deployment already does for itself, at enable
+     * time, named so an operator can find it in their dashboard. The listing below is that same
+     * read; the creation is not repeated, because an app with no config is a state to report
+     * rather than one to paper over.
+     */
+    link(
+      userId: string,
+      authConfigId: string,
+      options: { callbackUrl: string },
+    ): Promise<{ redirectUrl?: string | null }>;
     delete(id: string): Promise<unknown>;
   };
 };
@@ -361,8 +385,54 @@ export function buildComposioClient(vendor: ComposioVendor): {
       await vendor.authConfigs.delete(config.id);
     },
 
-    async authorize({ userId, toolkit }): Promise<{ redirectUrl: string }> {
-      const request = await vendor.toolkits.authorize(userId, toolkit);
+    async authorize({
+      userId,
+      toolkit,
+      returnUrl,
+    }): Promise<{ redirectUrl: string }> {
+      /*
+       * THE CONFIG THIS DEPLOYMENT ALREADY MADE, AND NO SECOND ONE MADE HERE.
+       *
+       * `ensureAuthConfig` creates it when an administrator enables the app, which is what makes
+       * this a read. Creating one here instead would mint it at the moment somebody presses
+       * Connect, unnamed for this deployment and invisible in the dashboard until the first person
+       * happened to try — and where a config already existed for an app enabled twice, a second
+       * one would split one app's connections across two configs, so removing "the" config later
+       * would drop half of them.
+       *
+       * NONE IS A STATE WITH A REMEDY, NOT A NULL TO WORK AROUND. It is the app enabled before
+       * this deployment created configs at all, or a config deleted by hand in Composio's
+       * dashboard. Neither is something a person pressing Connect can fix, so the sentence names
+       * the app and the administrator's step rather than leaving them at a link that would attach
+       * their account to a configuration nobody here chose.
+       */
+      const [config] = await authConfigsFor(toolkit);
+      if (!config) {
+        throw new Error(
+          `This deployment has no authorization config at Composio for ${toolkit}, so there is nothing to connect an account against. An administrator removing the app on its Plugins page and adding it again creates one.`,
+        );
+      }
+
+      /*
+       * THE RETURN ADDRESS IS THE WHOLE POINT OF THIS CALL, and it is the caller's rather than
+       * this file's: the adapter knows Composio, and where a person belongs afterwards is a fact
+       * about this deployment's own pages. It is never logged and never quoted in the refusal
+       * below, for the reason the url itself is not.
+       *
+       * NO `allowMultiple`, WHICH LEAVES THE VENDOR ENFORCING THE RULE THIS DEPLOYMENT ALREADY
+       * STATES. One person holds one account per app here, because the call that runs an action
+       * names the person and not the account — so with two accounts attached, which mailbox a Bot
+       * reads would be Composio's choice and nothing here could say which one it had been. The
+       * route refuses a second connection before it ever reaches this method, and that refusal is
+       * the sentence a person reads; this is the same rule one layer further down, where the
+       * vendor is the only party that can still see an account this deployment's rows have lost
+       * track of. `toolkits.authorize` passed `allowMultiple: true` unconditionally — the SDK
+       * calls it a "magic function" for exactly that — which is the opposite of what this
+       * deployment wants.
+       */
+      const request = await vendor.connectedAccounts.link(userId, config.id, {
+        callbackUrl: returnUrl,
+      });
       const redirectUrl = request.redirectUrl;
       if (!redirectUrl) {
         /*
