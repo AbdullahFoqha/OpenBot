@@ -158,10 +158,13 @@ find the connection after the person is gone.
 
 The authorization config keeps Composio's default scopes. Narrowing them properly would mean
 choosing scopes before anybody has been granted anything, which is backwards, so it is not done
-pre-emptively. Stated plainly, and stated in these words on the app's own page:
+pre-emptively. Stated plainly:
 
 > **The vendor-side grant is as wide as Composio's own app asks for, and this deployment's grants
 > are the entire narrowing.**
+
+This page is where that is stated. The app's own screen does not repeat it — worth knowing, because
+an operator who reads only the screen will not meet it.
 
 This is the position Notion is already in. What keeps a Bot's reach small is which actions are
 switched on for it, and nothing at the vendor stands behind that.
