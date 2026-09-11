@@ -285,7 +285,12 @@ export function effectOf(tags: readonly string[] | undefined): {
   return { effect: "write", destructive: false };
 }
 
-/** A JSON Schema node, or null for anything that is not one. */
+/**
+ * A plain object — a JSON Schema node, a listed action, an execute envelope — or null for anything
+ * that is not one, which is the only question three separate readers in this file have of a value
+ * the vendor sent. An array answers null, because `typeof [] === "object"` is the trap every one of
+ * them would otherwise fall into on its own.
+ */
 function schemaNode(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -454,6 +459,43 @@ export async function listTools(connection: {
   ) {
     throw new Error(
       `Composio did not answer with an action list for ${toolkit}: what came back was not a list of actions at all. Nothing was refreshed and the actions already recorded for this app are kept.`,
+    );
+  }
+
+  /*
+   * AN ACTION WITH NO SLUG BREAKS THE LISTING RATHER THAN BEING DROPPED FROM IT.
+   *
+   * The slug is the action's whole identity here: it becomes `name` in `mcp_tools`, which is NOT
+   * NULL and half the primary key, it is what a grant records, and it is the `slug` {@link callTool}
+   * sends back to Composio. `ToolSchema` spells it required, so an element without one is not an
+   * action the vendor published — and left to the map below it becomes a tool named `undefined`
+   * that fails the insert, taking down the refresh of an app whose other sixty actions were fine.
+   *
+   * SKIPPING IT WOULD BE THE WRONG REPAIR, and this file's own distinction between an empty answer
+   * and a broken one says why. Dropping the element makes this a SHORT listing, and `refreshTools`
+   * commits a listing as the complete truth about the app: the replace is a delete and an insert,
+   * so every recorded action missing from it is deleted with its `effect`, `destructive` and
+   * `version` — and `version` is the one no refresh can reconstruct where the vendor publishes
+   * none. That is the fragment committed as complete that the full-page refusal below exists to
+   * prevent, arriving one element at a time; and here nobody could even be told which action went
+   * missing, because the thing that names it is the thing that is absent.
+   *
+   * NOR IS IT THE FILE FILTER'S CASE, which drops actions and is right to. Those are well-formed
+   * actions the vendor published in full that this deployment cannot serve — a standing decision
+   * about a known action, taken the same way on every refresh. This is an answer that could not be
+   * read, which is the criterion the element check above already throws on, one field further in.
+   *
+   * BLANK COUNTS AS ABSENT, for the reason the version below is trimmed: `callTool` would send the
+   * padding to Composio as the action's name, and no `mcp_tools` row keyed on whitespace is a name
+   * anybody meant to grant.
+   */
+  if (
+    actions.some(
+      (action) => typeof action.slug !== "string" || action.slug.trim() === "",
+    )
+  ) {
+    throw new Error(
+      `Composio's action list for ${toolkit} contained an action with no slug, which is the name this deployment would have to record it under and send back to call it. Nothing was refreshed and the actions already recorded for this app are kept rather than replaced by a listing this one could not be read from.`,
     );
   }
 
@@ -696,13 +738,37 @@ function resultOf(data: ComposioResult["data"] | undefined): McpCallResult {
  * vendor reporting anything: the schema makes it impossible from the real client, and reading it as
  * a failure would turn a projection looser than the schema into a refusal of a call that worked.
  *
+ * AN `error` THAT IS NOT A SENTENCE IS NOT SILENCE, and reading the field through a `typeof` that
+ * collapsed everything else to `""` made the two indistinguishable. `{ message: … }`, or the list
+ * of issues a gateway puts there, arriving beside `successful: true` came out of here as null: the
+ * call was handed to the model as content, `store.ts` audited `mcp.call_succeeded`, and the field
+ * the vendor put its complaint in was shown to nobody. Which branch it takes turns on the flag,
+ * because the two say different things. Beside `successful: false` the vendor has already reported
+ * the failure and only its reason is unreadable, which is what {@link unexplained} is for. Beside
+ * anything else nothing here knows whether the action ran at all — the third kind of failure
+ * {@link callTool} names, ours rather than the vendor's, and so worded in our own words.
+ *
  * Null when there is nothing to report, so the caller can tell "succeeded" from "failed silently".
  */
 function reportedFailure(
   answer: ComposioResult,
   toolName: string,
 ): string | null {
-  const sentence = typeof answer.error === "string" ? answer.error.trim() : "";
+  // Read as `unknown` because the type is this module's projection and the value is the vendor's:
+  // `ToolExecuteResponseSchema` spells this field a nullable string, and a field that is neither is
+  // exactly the case below.
+  const reported: unknown = answer.error;
+  if (
+    reported !== null &&
+    reported !== undefined &&
+    typeof reported !== "string"
+  ) {
+    return answer.successful === false
+      ? unexplained(toolName)
+      : `${toolName} was sent to Composio and Composio answered, but this deployment could not read what it said about the call: the answer's error was neither a sentence nor null, which is all Composio's own schema permits it to be, so nothing here can tell whether the action ran.`;
+  }
+
+  const sentence = typeof reported === "string" ? reported.trim() : "";
   if (answer.successful !== false && sentence === "") return null;
   return sentence === "" || VENDOR_PLACEHOLDER.test(sentence)
     ? unexplained(toolName)
@@ -813,8 +879,17 @@ export async function callTool(
    *
    * A vendor fault it is not, so it does not get the vendor's words. This is the third kind of
    * failure the comment above names: Composio answered and this deployment could not read it.
+   *
+   * THE QUESTION IS ASKED THROUGH {@link schemaNode} RATHER THAN WRITTEN OUT AGAIN HERE, and what
+   * the difference costs is an array. A hand-written `typeof answer === "object"` admits one:
+   * `[]`, or an envelope unwrapped one level too far, read `error` and `successful` as undefined,
+   * reported nothing, and came back `isError: false` saying "The action returned nothing." So the
+   * one shape this guard exists to refuse was the one shape that reached the model as a call that
+   * worked and found nothing, and `store.ts` wrote a success beside it. The listing above asks its
+   * elements this identical question through that predicate; there is one right answer to it and
+   * one place to keep it.
    */
-  if (typeof answer !== "object" || answer === null) {
+  if (schemaNode(answer) === null) {
     return failure(
       `${toolName} was sent to Composio and its client resolved, but this deployment could not read what it resolved with: it was not the { data, error, successful } envelope Composio's own schema requires.`,
     );

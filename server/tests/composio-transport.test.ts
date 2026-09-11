@@ -798,6 +798,41 @@ describe("listing an app's actions", () => {
     }
   });
 
+  test("an action with no slug breaks the listing rather than being dropped from it", async () => {
+    /*
+     * The slug is the action's whole identity: `name` in `mcp_tools`, which is NOT NULL and half
+     * the primary key, the string a grant records, and the `slug` `callTool` sends back to call it.
+     * An element without one reached the map and became a tool named `undefined`, so one malformed
+     * action in a listing of sixty took the entire app's refresh down on the insert.
+     *
+     * REFUSED RATHER THAN SKIPPED, which is what this asserts. Skipping would hand `refreshTools` a
+     * SHORT listing, and it commits a listing as the complete truth about the app: the replace is a
+     * delete and an insert, so every recorded action missing from it is deleted along with its
+     * `version`, under a refresh that reported success. Nobody could even be told which action went
+     * missing, because the thing that names it is the thing that is not there.
+     */
+    for (const slug of [undefined, null, "", "   ", 7]) {
+      useComposioClient(
+        recording({
+          listActions: async () =>
+            [
+              GMAIL_READ,
+              { slug, description: "Nameless.", tags: ["readOnlyHint"] },
+            ] as unknown as ComposioAction[],
+        }).client,
+      );
+
+      const outcome = await listTools({ url: "composio://gmail" }).then(
+        () => "the listing was committed",
+        (error: unknown) => (error as Error).message,
+      );
+
+      // The success arm says nothing about a slug, so this is the refusal and not a message match.
+      expect(outcome).toContain("slug");
+      expect(outcome).toContain("gmail");
+    }
+  });
+
   test("a version made only of whitespace is recorded as no version at all", async () => {
     /*
      * TRIMMED ON THE WAY IN BECAUSE IT IS TRIMMED ON THE WAY OUT. `callTool` trims the recorded
@@ -1337,6 +1372,95 @@ describe("calling one action", () => {
 
     expect(result.isError).toBe(false);
     expect(result.text).toBe(JSON.stringify({ messages: [] }, null, 2));
+  });
+
+  test("a list where the envelope should be is refused, not called an empty success", async () => {
+    /*
+     * `typeof [] === "object"`, so an array cleared a guard written as a bare `typeof` test and was
+     * then read as an envelope: `error` and `successful` came off it as undefined, so nothing was
+     * reported, and `data` came off it as undefined, so `resultOf` answered "The action returned
+     * nothing." An answer this deployment could not read reached the model as a call that worked
+     * and found nothing, and `store.ts` wrote `mcp.call_succeeded` beside it — which is the exact
+     * outcome the third kind of failure exists to keep off the trail.
+     *
+     * Not a hypothetical shape: an envelope unwrapped one level too far, or a client that answers
+     * the batch form, is a list where this expects a record.
+     */
+    for (const shape of [[], [{ data: { messages: [] }, successful: true }]]) {
+      useComposioClient(
+        recording({
+          execute: async () => shape as unknown as ComposioResult,
+        }).client,
+      );
+
+      const result = await callTool(
+        { url: "composio://gmail", actorId: "user_asker" },
+        "GMAIL_FETCH_EMAILS",
+        { __version: "20260903_00" },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("GMAIL_FETCH_EMAILS");
+      expect(result.text).not.toContain("returned nothing");
+    }
+  });
+
+  test("an error that is not a sentence is not read as silence", async () => {
+    /*
+     * `ToolExecuteResponseSchema` spells `error` a nullable string, so an object — or the issue
+     * list a gateway leaves there — is a field this deployment cannot read. Collapsed to `""` by a
+     * `typeof` test, it was indistinguishable from the vendor saying nothing went wrong: the data
+     * was handed to the model as content and the call was audited as a success, with the one field
+     * carrying the complaint shown to nobody.
+     *
+     * THE FLAG DECIDES WHICH SENTENCE, because the two states differ. Beside `successful: false`
+     * the vendor has already reported the failure and only its reason is unreadable, which is the
+     * actionable connection sentence. Beside a claimed success nothing here knows whether the
+     * action ran, and that failure is ours rather than the vendor's, so it says so in our words.
+     */
+    const unreadable = { message: "Quota exceeded.", code: 429 };
+
+    useComposioClient(
+      recording({
+        execute: async () =>
+          ({
+            data: { messages: [{ id: "m1" }] },
+            error: unreadable,
+            successful: true,
+          }) as unknown as ComposioResult,
+      }).client,
+    );
+
+    const claimed = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(claimed.isError).toBe(true);
+    expect(claimed.text).toContain("could not read");
+    // The data must not be handed over as content beside a complaint nobody could read.
+    expect(claimed.text).not.toContain("m1");
+
+    useComposioClient(
+      recording({
+        execute: async () =>
+          ({
+            data: {},
+            error: unreadable,
+            successful: false,
+          }) as unknown as ComposioResult,
+      }).client,
+    );
+
+    const reported = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(reported.isError).toBe(true);
+    expect(reported.text).toContain("Plugins page");
   });
 
   test("an answer that is not an envelope refuses rather than throwing", async () => {
