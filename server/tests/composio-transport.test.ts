@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { BrokerRefusalError } from "../src/plugins/broker";
 import {
   type ComposioAction,
   type ComposioActions,
@@ -1069,11 +1070,28 @@ describe("listing an app's actions", () => {
     expect(outcome).not.toContain("committed");
     expect(outcome).toContain("gmail");
     expect(outcome).toMatch(/file/i);
+    // The COUNT, which is the only thing separating this refusal from the empty answer asserted
+    // below. Both are listings with nothing left in them; a sentence that did not say how many
+    // actions the app really published would send an operator looking for the wrong fault.
+    expect(outcome).toContain("2");
 
-    // AND THE VENDOR'S OWN EMPTY ANSWER IS STILL AN ANSWER. `[]` from a vendor that was asked and
-    // advertises nothing is what every other transport means by it, and `refreshTools` is right to
-    // commit it. The refusal above is about a listing this deployment emptied, not one that
-    // arrived empty.
+    /*
+     * AND THE VENDOR'S OWN EMPTY ANSWER IS STILL AN ANSWER, which is a decision this file shares
+     * with `store.ts` rather than one it makes alone.
+     *
+     * `@composio/core` does manufacture an empty listing out of a response it could not read —
+     * `getRawComposioTools` ends `if (!tools) { return []; }` (0.18.1,
+     * `src/models/Tools.ts:553-557`) — so the hazard of committing `[]` is real. It is answered at
+     * the layer that does the committing: `refreshTools` has its own empty-listing guard, which
+     * keeps every recorded action with its `effect`, `destructive` and `version` whenever an app
+     * that holds actions lists none, and stamps no refresh
+     * (`plugin-store.integration.test.ts`, "a refresh the vendor answered with no actions at all").
+     *
+     * Refusing here as well would buy nothing that guard does not hold, and would cost the case it
+     * is careful to allow: an app that genuinely advertises nothing stays recordable instead of
+     * reading as broken for good. The refusal above is about a listing this deployment emptied,
+     * not one that arrived empty.
+     */
     useComposioClient(recording({ listActions: async () => [] }).client);
     expect(await listTools({ url: "composio://gmail" })).toEqual([]);
   });
@@ -1621,6 +1639,61 @@ describe("calling one action", () => {
     }
   });
 
+  test("an object that is not the envelope is refused, not called an empty success", async () => {
+    /*
+     * THE HOLE THE ARRAY FIX LEFT, WHICH IS EVERY OTHER OBJECT. The guard above this one asked
+     * whether an object had arrived, so it caught `[]` and admitted the whole of the rest of the
+     * world — and the two shapes it was written about walked straight through it.
+     *
+     * An envelope unwrapped ONE level, which is what a client reaching one field too far resolves,
+     * is the action's own `data` standing where the envelope belongs: `error` and `successful`
+     * come off it as absent, so nothing is reported, and `data` comes off it as absent, so
+     * `resultOf` answers "The action returned nothing." A bare `{}` does the same by having
+     * nothing on it at all. Both reached the model as a call that worked and found nothing, and
+     * `store.ts` wrote `mcp.call_succeeded` beside each — while the refusal that never fired
+     * claimed the `{ data, error, successful }` envelope had been checked for.
+     *
+     * THE PARTIAL ONES ARE HERE FOR THE SAME REASON THE WHOLE ONES ARE. An answer carrying two of
+     * the three fields is not an envelope either, and each of them lands on the identical false
+     * success: no `data` serializes to nothing, and no `successful` reports nothing.
+     */
+    const shapes: Record<string, unknown> = {
+      "an envelope unwrapped one level": { messages: [{ id: "m1" }] },
+      "a bare object": {},
+      "an envelope with no data": { error: null, successful: true },
+      "an envelope with no successful": {
+        data: { messages: [{ id: "m1" }] },
+        error: null,
+      },
+      "an envelope whose successful is present as undefined": {
+        data: {},
+        error: null,
+        successful: undefined,
+      },
+    };
+
+    for (const [shape, answer] of Object.entries(shapes)) {
+      useComposioClient(
+        recording({
+          execute: async () => answer as ComposioResult,
+        }).client,
+      );
+
+      const result = await callTool(
+        { url: "composio://gmail", actorId: "user_asker" },
+        "GMAIL_FETCH_EMAILS",
+        { __version: "20260903_00" },
+      );
+
+      expect(`${shape}: ${result.isError}`).toBe(`${shape}: true`);
+      expect(result.text).toContain("GMAIL_FETCH_EMAILS");
+      // The two halves of the false success this guard exists to stop: the sentence that reads as
+      // a call that worked, and the vendor's data handed over as content beside it.
+      expect(result.text).not.toContain("returned nothing");
+      expect(result.text).not.toContain("m1");
+    }
+  });
+
   test("an error that is not a sentence is not read as silence", async () => {
     /*
      * `ToolExecuteResponseSchema` spells `error` a nullable string, so an object — or the issue
@@ -1677,6 +1750,80 @@ describe("calling one action", () => {
 
     expect(reported.isError).toBe(true);
     expect(reported.text).toContain("Plugins page");
+  });
+
+  test("a successful flag that is not a boolean is not read as a success", async () => {
+    /*
+     * `successful !== false` ASKED ONE QUESTION OF A FIELD WITH THREE ANSWERS. The schema spells
+     * it a required boolean, but the value is the vendor's and the type is this module's
+     * projection — and every shape below is none of them literally `false`, so each one passed as
+     * a success: the reported failure was handed to the model as content and `store.ts` audited
+     * `mcp.call_succeeded` beside it. This is the same defect the `error` field beside it was
+     * fixed for, on the field that decides the outcome outright.
+     *
+     * `"false"` IS THE ONE THAT PROVES FALSINESS IS NOT THE REPAIR. A non-empty string is truthy,
+     * so a plain `!answer.successful` reads the vendor's literal word "false" as a success just as
+     * the old check did, and `0` — which no schema permits and no reader can interpret — it would
+     * read as a considered no. What is wanted is neither: a field this deployment cannot read is
+     * the third kind of failure, and it says so in this file's own words rather than guessing a
+     * value for it.
+     */
+    for (const successful of ["false", 0, null, "true", {}]) {
+      useComposioClient(
+        recording({
+          execute: async () =>
+            ({
+              data: { messages: [{ id: "m1" }] },
+              error: null,
+              successful,
+            }) as unknown as ComposioResult,
+        }).client,
+      );
+
+      const result = await callTool(
+        { url: "composio://gmail", actorId: "user_asker" },
+        "GMAIL_FETCH_EMAILS",
+        { __version: "20260903_00" },
+      );
+
+      const named = JSON.stringify(successful);
+      expect(`${named}: ${result.isError}`).toBe(`${named}: true`);
+      expect(result.text).toContain("GMAIL_FETCH_EMAILS");
+      // Not the vendor's words: nobody reported this failure, so the sentence must not read as
+      // though Composio had. And the data must not travel beside it as content.
+      expect(result.text).toMatch(/could not read/i);
+      expect(result.text).not.toContain("m1");
+    }
+  });
+
+  test("an unreadable flag loses to the sentence Composio did send", async () => {
+    /*
+     * THE SHAPE CHECK ABOVE MUST NOT COST A READER THE ONE USEFUL SENTENCE. A malformed flag
+     * beside a real complaint is a failure either way, and "this deployment could not read the
+     * flag" is the less actionable of the two things that could be said about it. So the vendor's
+     * own words still win, and the check is reached only where the alternative would be calling
+     * the answer a success.
+     */
+    useComposioClient(
+      recording({
+        execute: async () =>
+          ({
+            data: {},
+            error: "Gmail rejected the query: invalid search syntax.",
+            successful: "false",
+          }) as unknown as ComposioResult,
+      }).client,
+    );
+
+    const result = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("invalid search syntax");
+    expect(result.text).not.toMatch(/could not read/i);
   });
 
   test("an answer that is not an envelope refuses rather than throwing", async () => {
@@ -1787,6 +1934,80 @@ describe("calling one action", () => {
     expect(result.isError).toBe(true);
     expect(result.text).not.toMatch(/^error executing the tool/i);
     expect(result.text).toMatch(/Plugins page/);
+  });
+
+  test("a refusal this deployment authored beats whatever the vendor said", async () => {
+    /*
+     * THE ORDER `routes.ts` USES, WHICH THIS PATH HAD BACKWARDS. `brokerRefusal` there reads
+     * `brokerSentence` first and falls back to `vendorSentence`; this catch read `vendorSentence`
+     * first. Both meet the same throws — `./composio-adapter`'s `askVendor` raises a
+     * `BrokerRefusalError` out of the execute path as readily as out of a listing — so one vendor
+     * condition was answered with two different sentences depending on which door the reader came
+     * through, and on this one the authored remedy lost.
+     *
+     * AND IT LOST TO A READ ONE LEVEL SHALLOW. `vendorRefusal` authors a refusal only where
+     * `vendorSentence` of the ORIGINAL error was null, so the vendor keeps the last word wherever
+     * it had one. Asking the same question of the WRAPPER is a different question: its `cause` is
+     * the original, so the reach for `cause.error.error.message` lands one level in from where it
+     * landed before and finds whatever sits there — below, a bare "Invalid request" that the
+     * adapter had already judged not to be an explanation.
+     *
+     * What that costs is the whole point of translating the condition: a sentence naming the step
+     * that clears it, replaced by three words naming nothing.
+     */
+    const authored =
+      'Composio refuses a call whose toolkit version is "latest", and that is the version travelling with this one, so GMAIL_FETCH_EMAILS was not run. A dated version is recorded when an app\'s actions are listed, so refreshing gmail\'s tools on its Plugins page replaces "latest" with a version Composio will accept.';
+
+    useComposioClient(
+      recording({
+        execute: async () => {
+          throw new BrokerRefusalError(authored, {
+            cause: { error: { error: { message: "Invalid request" } } },
+          });
+        },
+      }).client,
+    );
+
+    const result = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(result.isError).toBe(true);
+    // Pinned whole rather than by a fragment: what this asserts is that the authored sentence
+    // arrives as its author wrote it, and a substring check would pass on a sentence that had
+    // been joined to the vendor's or cut short of the remedy.
+    expect(result.text).toBe(authored);
+    expect(result.text).not.toContain("Invalid request");
+  });
+
+  test("a failure this deployment cannot explain still reaches for the vendor's words", async () => {
+    // The other half of the precedence, and the reason it is `brokerSentence` rather than
+    // `error.message`. `./broker` raises its class only where the sentence names the step that
+    // fixes it; a failure it knows nothing about stays a plain `Error`, and for those the vendor's
+    // own nested sentence is still worth far more than a generic top-level message.
+    useComposioClient(
+      recording({
+        execute: async () => {
+          throw Object.assign(
+            new Error("Error executing the tool GMAIL_FETCH_EMAILS"),
+            nested(
+              "No connected account found for user ID u1 for toolkit gmail",
+            ),
+          );
+        },
+      }).client,
+    );
+
+    const result = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("No connected account found");
   });
 
   test("an answer that serializes to nothing at all is refused in this file's own words", async () => {

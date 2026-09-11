@@ -1,3 +1,4 @@
+import { brokerSentence } from "./broker";
 import { type ListedTool, MAX_RESULT_CHARS, type McpCallResult } from "./mcp";
 
 /**
@@ -386,6 +387,16 @@ function stagesAFile(schema: unknown): boolean {
  * `callTool` refuses to run without and which only a listing can put back. So the two "asked
  * nobody" cases throw, and they throw SEPARATELY, because one sends an operator to this
  * deployment's configuration and the other to the row's url.
+ *
+ * WHAT IS DELIBERATELY NOT REFUSED IS THE VENDOR'S OWN EMPTY PAGE, and it is worth saying why,
+ * because `@composio/core` does manufacture one: `getRawComposioTools` ends `if (!tools) { return
+ * []; }` (0.18.1, `src/models/Tools.ts:553-557`), so a response it could not read arrives here as
+ * the same `[]` an app with no actions would send. That is a real hazard and it is answered a
+ * layer down rather than here — `store.ts`'s own empty-listing guard keeps every recorded action,
+ * its `effect`, its `destructive` and its `version` whenever an app that HAS actions lists none,
+ * writes the sentence saying so, and stamps no refresh. Refusing here as well would buy nothing
+ * that guard does not already hold, and would cost the case it is careful to allow: an app that
+ * genuinely advertises nothing stays recordable, rather than reading as broken for good.
  */
 export async function listTools(connection: {
   url: string;
@@ -544,6 +555,11 @@ export async function listTools(connection: {
      * with more of them answer identically here. Committed as complete, the second one has every
      * action past the cut deleted from `mcp_tools` under a refresh that reported success — the same
      * loss the empty answer used to cause, arriving by a different route.
+     *
+     * AND THE ONE `store.ts` CANNOT CATCH FOR US, which is why this refusal is not redundant with
+     * the empty-listing guard there. That guard keys on a listing with NOTHING in it; a full page
+     * is a listing with a thousand things in it, indistinguishable from a complete one, and it
+     * commits as the whole truth about the app.
      */
     throw new Error(
       `Composio answered with ${actions.length} actions for ${toolkit}, which is the largest page this deployment's @composio/core can ask for, so there may be more that it cannot see. The actions already recorded are kept rather than replaced by a listing that might be a fragment.`,
@@ -589,7 +605,13 @@ export async function listTools(connection: {
    * full page above all refuse; arriving through this filter does not make it a different event.
    *
    * A vendor answer that was genuinely empty is left alone, because that one IS the vendor
-   * advertising nothing and is the sentence `refreshTools` should record.
+   * advertising nothing and is the sentence `refreshTools` should record. Which is also the one
+   * case `store.ts` settles rather than this file: its own empty-listing guard keeps what is held
+   * whenever an app that HAS actions recorded answers with none, and lets the empty answer commit
+   * where there is nothing to lose. What that guard cannot do is tell an app that listed nothing
+   * from an app whose every action this deployment dropped, and the sentence it writes says the
+   * first. So the emptying that happens HERE has to be refused HERE, where the count that makes
+   * it true is still in hand.
    */
   if (actions.length > 0 && offered.length === 0) {
     throw new Error(
@@ -772,6 +794,53 @@ const failure = (message: string): McpCallResult => ({
 });
 
 /**
+ * The three fields a resolved answer has to carry to be the envelope at all.
+ *
+ * Named as a list because the refusal below quotes it: the sentence tells a reader that a
+ * `{ data, error, successful }` envelope was required, and the only way that claim stays true as
+ * the check changes is if the claim and the check read the same names.
+ */
+const ENVELOPE_FIELDS = ["data", "error", "successful"] as const;
+
+/**
+ * What is missing before a resolved value can be read as Composio's envelope, or null for one.
+ *
+ * ASKED AS "IS IT THE ENVELOPE" RATHER THAN "IS IT AN OBJECT", which is the correction, and the
+ * third one this guard has needed. Written as a bare `typeof` it admitted arrays; written as
+ * {@link schemaNode} it admitted every other object in the world. Both fixes widened the coverage
+ * of a question that was the wrong question: the refusal has always told the reader that the
+ * `{ data, error, successful }` envelope was required, and nothing anywhere was checking for one.
+ * So a one-level-unwrapped envelope — the action's own `data` in the envelope's place, which is
+ * what a client that reaches one field too far resolves — and a bare `{}` both cleared it, read
+ * `error` and `successful` as absent, reported nothing, and came back `isError: false` saying "The
+ * action returned nothing." `store.ts` wrote `mcp.call_succeeded` beside each one. A shape this
+ * deployment could not read reaching a model as a call that worked and found nothing is the exact
+ * outcome the third kind of failure exists to keep off the audit trail, and it survived two fixes
+ * because each of them asked for a wider class of the wrong thing.
+ *
+ * ABSENCE IS THE QUESTION HERE AND TYPE IS NOT, which is the line between this and
+ * {@link reportedFailure}. This one settles whether the right OBJECT arrived — whether what
+ * resolved is the envelope or something else entirely. What the vendor put IN each field, and
+ * whether it is readable, is a separate question asked once the envelope is in hand, and it is
+ * asked there because the answer differs per field: an unreadable `error` and an unreadable
+ * `successful` produce different sentences, and neither is "this is not an envelope".
+ *
+ * A FIELD PRESENT AS `undefined` COUNTS AS ABSENT, because no reader downstream can tell the two
+ * apart and neither can the schema: `ToolExecuteResponseSchema` spells all three REQUIRED
+ * (`@composio/core` 0.18.1), so a key holding nothing is as far from that shape as no key at all.
+ * `error` is nullable and `null` is therefore present, which is the one distinction that matters.
+ */
+function envelopeGap(answer: unknown): string | null {
+  const node = schemaNode(answer);
+  if (node === null) return "what came back was not one";
+
+  const absent = ENVELOPE_FIELDS.filter((field) => node[field] === undefined);
+  return absent.length === 0
+    ? null
+    : `what came back carried no ${absent.join(" and no ")}`;
+}
+
+/**
  * The serializations that mean the action had nothing to say.
  *
  * `{}` is in here because `data` is a required RECORD: an action that matched nothing answers with an
@@ -843,9 +912,28 @@ function resultOf(data: ComposioResult["data"] | undefined): McpCallResult {
  * it matches {@link vendorSentence}, because a blank sentence beside an explicit `successful: true`
  * would otherwise become a refusal saying only that the call failed and nobody said why.
  *
- * AND `successful !== false` RATHER THAN A FALSY `successful`, because an absent field is not the
- * vendor reporting anything: the schema makes it impossible from the real client, and reading it as
- * a failure would turn a projection looser than the schema into a refusal of a call that worked.
+ * AND THE FLAG IS READ FOR ITS SHAPE BEFORE IT IS READ FOR ITS VALUE, which is the half this
+ * function was missing for as long as the `error` beside it had it. `successful !== false` asked
+ * one question of a field with three answers: `"false"`, `0` and `null` are none of them `false`,
+ * so each one passed as a success, and a reported failure was handed to the model as content and
+ * written to the audit trail as `mcp.call_succeeded`. Falsiness is not the repair either — it
+ * answers `"false"` correctly by accident, since a non-empty string is truthy, and would still
+ * take `0` for a considered "no" rather than for a field nobody here can read.
+ *
+ * SO A NON-BOOLEAN IS THE THIRD KIND OF FAILURE, exactly as an unreadable `error` is, and it gets
+ * the wording that kind is owed: nothing was reported, so nothing can be passed on as the vendor's
+ * report, and what this deployment has to say is that it cannot tell whether the action ran. The
+ * old comment here argued that an ABSENT flag must not be read as a failure, which was right and
+ * is now settled one step earlier — {@link envelopeGap} refuses an answer that carries no
+ * `successful` at all, as not being the envelope. What is left to this function is a field that
+ * arrived, and a field that arrived saying something unreadable is the vendor speaking, not the
+ * vendor silent.
+ *
+ * THE VENDOR'S OWN SENTENCE STILL COMES FIRST, which is why the shape check sits below the
+ * sentence rather than above it. `{ error: "Gmail rejected the query", successful: "false" }` is a
+ * failure whichever way the flag is read, and the reader is better served by what Composio said
+ * about it than by this file's remark that the flag was malformed. The check is reached only where
+ * the alternative would be calling the answer a success.
  *
  * AN `error` THAT IS NOT A SENTENCE IS NOT SILENCE, and reading the field through a `typeof` that
  * collapsed everything else to `""` made the two indistinguishable. `{ message: … }`, or the list
@@ -863,25 +951,29 @@ function reportedFailure(
   answer: ComposioResult,
   toolName: string,
 ): string | null {
-  // Read as `unknown` because the type is this module's projection and the value is the vendor's:
-  // `ToolExecuteResponseSchema` spells this field a nullable string, and a field that is neither is
-  // exactly the case below.
+  // Both fields are read as `unknown` because the types are this module's projection and the values
+  // are the vendor's: `ToolExecuteResponseSchema` spells `error` a nullable string and `successful`
+  // a boolean, and a field that is neither is exactly what the two shape checks below are for.
+  // Neither can be absent — {@link envelopeGap} settled that before this was called.
   const reported: unknown = answer.error;
-  if (
-    reported !== null &&
-    reported !== undefined &&
-    typeof reported !== "string"
-  ) {
-    return answer.successful === false
+  const outcome: unknown = answer.successful;
+
+  if (reported !== null && typeof reported !== "string") {
+    return outcome === false
       ? unexplained(toolName)
       : `${toolName} was sent to Composio and Composio answered, but this deployment could not read what it said about the call: the answer's error was neither a sentence nor null, which is all Composio's own schema permits it to be, so nothing here can tell whether the action ran.`;
   }
 
-  const sentence = typeof reported === "string" ? reported.trim() : "";
-  if (answer.successful !== false && sentence === "") return null;
-  return sentence === "" || VENDOR_PLACEHOLDER.test(sentence)
-    ? unexplained(toolName)
-    : sentence;
+  const sentence = reported === null ? "" : reported.trim();
+  if (sentence !== "") {
+    return VENDOR_PLACEHOLDER.test(sentence) ? unexplained(toolName) : sentence;
+  }
+
+  if (typeof outcome !== "boolean") {
+    return `${toolName} was sent to Composio and Composio answered, but this deployment could not read whether the call worked: the answer's successful was neither true nor false, which is all Composio's own schema permits it to be, so nothing here can tell whether the action ran.`;
+  }
+
+  return outcome === false ? unexplained(toolName) : null;
 }
 
 /**
@@ -968,6 +1060,35 @@ export async function callTool(
     );
   } catch (error) {
     /*
+     * A SENTENCE THIS DEPLOYMENT AUTHORED BEATS ANYTHING THE VENDOR SAID, and the order was
+     * inverted here against the one `routes.ts` uses on the identical class of error.
+     *
+     * `brokerRefusal` in that file reads `brokerSentence` first and falls back to `vendorSentence`
+     * (`routes.ts:89-91`); this catch read `vendorSentence` first and reached `error.message` only
+     * where that found nothing. Both see the same throws — `./composio-adapter`'s `askVendor`
+     * raises a {@link BrokerRefusalError} out of the execute path as readily as out of a listing —
+     * so one vendor condition was being answered with two different sentences depending on which
+     * door the reader came through, and on this door the authored one lost.
+     *
+     * WHAT IT LOST TO IS WORSE THAN A TIE. `vendorRefusal` authors a refusal only where
+     * `vendorSentence(error)` was null — that is its documented limit, so the vendor gets the last
+     * word wherever it had one. Reading `vendorSentence` again on the WRAPPER is therefore not
+     * reading the same thing twice: the wrapper's `cause` is the original error, so the reach for
+     * `cause.error.error.message` lands one level shallower than it did on the original and can
+     * come back with a string the adapter had already judged not to be the vendor's explanation.
+     * A remedy written for the exact condition — "disconnect the account they already hold", "a
+     * dated version is recorded when an app's actions are listed" — was being replaced by whatever
+     * that shallower read happened to find.
+     *
+     * THE CLASS IS THE PROMISE, which is what makes preferring it safe. `./broker` raises one only
+     * where the sentence names the step that fixes it and is safe to show anybody who could have
+     * made the request; a failure it cannot explain stays a plain `Error` and falls through to the
+     * vendor's own words below, exactly as before.
+     */
+    const authored = brokerSentence(error);
+    if (authored !== null) return failure(authored);
+
+    /*
      * THE SDK'S OWN PARSE THROWS THROUGH HERE, and its message is not a sentence.
      *
      * `./composio-adapter` resolves the tool before running it — `getRawComposioToolBySlug`, which
@@ -1015,18 +1136,15 @@ export async function callTool(
    * A vendor fault it is not, so it does not get the vendor's words. This is the third kind of
    * failure the comment above names: Composio answered and this deployment could not read it.
    *
-   * THE QUESTION IS ASKED THROUGH {@link schemaNode} RATHER THAN WRITTEN OUT AGAIN HERE, and what
-   * the difference costs is an array. A hand-written `typeof answer === "object"` admits one:
-   * `[]`, or an envelope unwrapped one level too far, read `error` and `successful` as undefined,
-   * reported nothing, and came back `isError: false` saying "The action returned nothing." So the
-   * one shape this guard exists to refuse was the one shape that reached the model as a call that
-   * worked and found nothing, and `store.ts` wrote a success beside it. The listing above asks its
-   * elements this identical question through that predicate; there is one right answer to it and
-   * one place to keep it.
+   * THE QUESTION IS ASKED THROUGH {@link envelopeGap}, which is the one that names what is wrong
+   * as well as that something is. Two earlier versions of this guard asked only whether an object
+   * had arrived and let every object through, including the two this refusal was written about;
+   * see that function for why the shape of the question was the defect rather than its reach.
    */
-  if (schemaNode(answer) === null) {
+  const gap = envelopeGap(answer);
+  if (gap !== null) {
     return failure(
-      `${toolName} was sent to Composio and its client resolved, but this deployment could not read what it resolved with: it was not the { data, error, successful } envelope Composio's own schema requires.`,
+      `${toolName} was sent to Composio and its client resolved, but this deployment could not read what it resolved with: Composio's own schema requires a { data, error, successful } envelope and ${gap}, so nothing here can tell whether the action ran. That is a change in what the vendor or this deployment's @composio/core answers with rather than a setting on this connection — upgrading the package is the fix.`,
     );
   }
 
