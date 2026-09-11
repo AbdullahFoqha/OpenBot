@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { BrokerRefusalError, brokerSentence } from "../src/plugins/broker";
-import { LISTING_LIMIT } from "../src/plugins/composio";
+import {
+  type ComposioBroker,
+  BrokerRefusalError,
+  brokerSentence,
+} from "../src/plugins/broker";
+import {
+  type ComposioActions,
+  LISTING_LIMIT,
+  vendorSentence,
+} from "../src/plugins/composio";
 import { buildComposioClient } from "../src/plugins/composio-adapter";
 
 /**
@@ -66,6 +74,90 @@ function fakeVendor(parts: {
   };
 }
 
+/**
+ * The page every listing here asks for, WRITTEN OUT rather than imported.
+ *
+ * AN ASSERTION THAT IMPORTS THE CONSTANT IT IS ABOUT CANNOT FAIL WHEN THAT CONSTANT MOVES, because
+ * both sides move together: each `limit` assertion below asked for whatever page the adapter had
+ * just decided to ask for, and `LISTING_LIMIT` 1000 -> 20 left all of them passing. The sibling
+ * `composio-transport.test.ts` writes its two numbers out for exactly this reason and documents it
+ * at length; this file imported one and called it pinned.
+ *
+ * So the literal lives here, and the imported constant is read in exactly one test below — which is
+ * where the argument for the number belongs: 1000 is the vendor's stated page ceiling and therefore
+ * the whole listing.
+ */
+const WHOLE_LISTING = 1000;
+
+/** The page this deployment sends somebody back to once the consent screen is done with them. */
+const RETURN_URL = "https://openbot.test/settings/connected-accounts/x";
+
+/**
+ * The three auth configs this file reasons about, named once rather than spelled at each fixture.
+ *
+ * Two of them are ours and one is an operator's dashboard work, and every decision the adapter
+ * makes about an app's configs is a decision about which of the three it is looking at. Naming
+ * them is what lets a fixture be written OUT of the order its assertion expects — see {@link MIXED}
+ * — instead of being an array whose index quietly carries the answer.
+ */
+const BY_HAND = { id: "ac_by_hand", name: "Linear", status: "ENABLED" };
+const OURS = { id: "ac_ours", name: "Linear (OpenBot)", status: "ENABLED" };
+/** The spare from a lost enable race: two administrators both found nothing and both created. */
+const OURS_SPARE = {
+  id: "ac_ours_spare",
+  name: "Linear (OpenBot)",
+  status: "ENABLED",
+};
+
+/**
+ * The three sentences `authorize` can refuse with, told apart by the remedy each one prescribes.
+ *
+ * `rejects.toThrow(/linear/)` MATCHES ALL THREE, WHICH IS NOT A DETAIL. Deleting the no-config
+ * branch outright left this suite at 24 pass / 0 fail, because the call then fell through to the
+ * disabled branch and that sentence names the app too. The three remedies are three different acts
+ * by three different people — an administrator adding the app again, an operator enabling the
+ * config in Composio's own dashboard, and nobody at all because the app is not connected by
+ * visiting a page — so a test that cannot tell the sentences apart cannot tell a correct
+ * classification from a wrong one, which is the whole thing these refusals exist to get right.
+ *
+ * Each is the fragment of its own sentence that no other one contains, and each test below asserts
+ * its own AND the absence of the others.
+ */
+const NO_CONFIG_REMEDY =
+  /removing the app on its Plugins page and adding it again creates one/;
+const DISABLED_REMEDY = /can enable it in Composio's dashboard/;
+const NO_PAGE_REMEDY =
+  /connected by entering a credential rather than by visiting a page/;
+
+/**
+ * The error a call raised, or a failure saying it answered where the test required a refusal.
+ *
+ * `rejects.toThrow(...)` cannot be followed by a second question about the SAME error — which kind
+ * it was, what else its sentence does not say — so every refusal assertion that wanted more than
+ * one fact about one throw had to settle for the first. This hands the error over instead.
+ */
+async function failureOf(work: Promise<unknown>): Promise<Error> {
+  const raised = await work.then(
+    () => null,
+    (error: unknown) => error,
+  );
+  if (raised === null) {
+    throw new Error(
+      "The call answered where this test requires it to have refused.",
+    );
+  }
+  return raised as Error;
+}
+
+describe("the page size this file is written against", () => {
+  test("the module's ceiling is still the number every assertion here spells out", () => {
+    // The one place the imported constant is read. Changing `LISTING_LIMIT` reddens exactly this
+    // test, which is where the argument for the number lives, rather than silently moving every
+    // assertion in the file to whatever the module has just decided.
+    expect(LISTING_LIMIT).toBe(WHOLE_LISTING);
+  });
+});
+
 describe("listing an app's actions", () => {
   test("the caller's page reaches the vendor, so the vendor's default never applies", async () => {
     const asked: unknown[] = [];
@@ -91,7 +183,7 @@ describe("listing an app's actions", () => {
     );
 
     const listed = await actions.listActions("gmail", {
-      limit: LISTING_LIMIT,
+      limit: WHOLE_LISTING,
     });
 
     // An omitted limit is not "no opinion": Composio's page defaults to 20, and
@@ -99,7 +191,7 @@ describe("listing an app's actions", () => {
     // limit, no tags and no search (`@composio/core` 0.18.1, `src/models/Tools.ts:505-515`), so the
     // short answer is also a filtered one and nothing in it says so. Passing the limit through is
     // what turns that flag off, which is why the assertion is on the query and not on the answer.
-    expect(asked).toEqual([{ toolkits: ["gmail"], limit: LISTING_LIMIT }]);
+    expect(asked).toEqual([{ toolkits: ["gmail"], limit: WHOLE_LISTING }]);
     expect(listed).toEqual([
       {
         slug: "GMAIL_FETCH_EMAILS",
@@ -156,7 +248,7 @@ describe("the app catalogue", () => {
     // anybody actually connects are at the top. No search term: the SDK's list params have no such
     // field, so one passed here would be stripped before the request and the caller would be
     // filtering against a list nobody filtered.
-    expect(asked).toEqual([{ limit: LISTING_LIMIT, sortBy: "usage" }]);
+    expect(asked).toEqual([{ limit: WHOLE_LISTING, sortBy: "usage" }]);
     expect(apps).toEqual([
       {
         slug: "gmail",
@@ -368,8 +460,15 @@ describe("executing an action", () => {
 
     // Both apps are named, because a reader holding only one of them cannot tell whether the url
     // is wrong or the recorded action is.
-    await expect(refused).rejects.toThrow(/slack/);
-    await expect(refused).rejects.toThrow(/gmail/);
+    const refusal = await failureOf(refused);
+    expect(refusal.message).toMatch(/slack/);
+    expect(refusal.message).toMatch(/gmail/);
+    // AND THE STEP, because a sentence that names both apps and stops there leaves the reader
+    // holding a contradiction with nothing to do about it. The url this action was recorded under
+    // has changed, and refreshing the app's tools is what reconciles the two.
+    expect(refusal.message).toMatch(
+      /Refreshing this app's tools on its Plugins page/,
+    );
     expect(executed).toEqual([]);
   });
 });
@@ -429,7 +528,7 @@ describe("beginning one person's connection", () => {
     // would refuse in `fakeVendor` if it were reached. The listing asks for disabled configs too,
     // because a config it cannot see is one `ensureAuthConfig` would create a second of.
     expect(listed).toEqual([
-      { toolkit: "linear", limit: LISTING_LIMIT, showDisabled: true },
+      { toolkit: "linear", limit: WHOLE_LISTING, showDisabled: true },
     ]);
     expect(linked).toEqual([
       [
@@ -474,7 +573,15 @@ describe("beginning one person's connection", () => {
         "https://openbot.test/settings/connected-accounts/composio-linear",
     });
 
-    await expect(refused).rejects.toThrow(/linear/);
+    const refusal = await failureOf(refused);
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(/linear/);
+    // THE REMEDY AND NOT THE APP'S NAME. All three of this method's refusals name the app, so
+    // `/linear/` passes whichever branch was taken and the branch under test could be deleted
+    // outright without reddening anything. What distinguishes this state is what fixes it.
+    expect(refusal.message).toMatch(NO_CONFIG_REMEDY);
+    expect(refusal.message).not.toMatch(DISABLED_REMEDY);
+    expect(refusal.message).not.toMatch(NO_PAGE_REMEDY);
     // And nothing was begun at the vendor: a link against a config chosen by nobody would attach
     // this person's account to a configuration this deployment cannot see or tighten.
     expect(linked).toEqual([]);
@@ -492,11 +599,18 @@ describe("beginning one person's connection", () => {
  * this, and was then read by nobody.
  */
 describe("telling this deployment's auth configs from anybody else's", () => {
-  /** What a listing of one app's configs looks like when an operator has been in the dashboard. */
-  const MIXED = [
-    { id: "ac_by_hand", name: "Linear", status: "ENABLED" },
-    { id: "ac_ours", name: "Linear (OpenBot)", status: "ENABLED" },
-  ];
+  /**
+   * What a listing of one app's configs looks like when an operator has been in the dashboard.
+   *
+   * SPELLED OUT OF THE ORDER THE ASSERTIONS EXPECT, which is what makes the sort the thing under
+   * test rather than scenery. Composio documents no order for this listing; `configsMadeHere`
+   * filters to ours and then sorts on the id, and every fixture this file used to hold was already
+   * id-ordered — so the sort could be replaced with a plain copy and all 24 tests stayed green.
+   * Here the spare arrives FIRST and sorts SECOND, so a filter alone answers `ac_ours_spare` where
+   * every assertion below names `ac_ours`, and the delete's order is the sort's rather than the
+   * vendor's.
+   */
+  const MIXED = [OURS_SPARE, BY_HAND, OURS];
 
   test("a connection is begun against the config this deployment made, not the first row", async () => {
     const linked: unknown[] = [];
@@ -535,7 +649,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     const { broker } = buildComposioClient(
       fakeVendor({
         authConfigs: {
-          list: async () => ({ items: [MIXED[0]] }),
+          list: async () => ({ items: [BY_HAND] }),
         },
         connectedAccounts: {
           link: async (...call: unknown[]) => {
@@ -552,7 +666,13 @@ describe("telling this deployment's auth configs from anybody else's", () => {
       returnUrl: "https://openbot.test/settings/connected-accounts/x",
     });
 
-    await expect(refused).rejects.toThrow(/linear/);
+    const refusal = await failureOf(refused);
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    // The same state as an app with no configs at all — none of OURS — so the same remedy, and
+    // not the disabled one: the config that exists here is enabled, and enabling it again is
+    // advice that would send an operator to a dashboard to change nothing.
+    expect(refusal.message).toMatch(NO_CONFIG_REMEDY);
+    expect(refusal.message).not.toMatch(DISABLED_REMEDY);
     expect(linked).toEqual([]);
   });
 
@@ -561,18 +681,10 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     const { broker } = buildComposioClient(
       fakeVendor({
         authConfigs: {
-          list: async () => ({
-            items: [
-              ...MIXED,
-              // The spare from a lost enable race: two administrators both found nothing and both
-              // created. Both are ours, so both go — leaving one behind would leave live grants.
-              {
-                id: "ac_ours_spare",
-                name: "Linear (OpenBot)",
-                status: "ENABLED",
-              },
-            ],
-          }),
+          // Both of ours go — leaving one behind would leave live grants — and the hand-made
+          // one stands. The listing arrives spare-first, so the order asserted below is the sort's
+          // and not the vendor's.
+          list: async () => ({ items: MIXED }),
           delete: async (...call: unknown[]) => {
             deleted.push(call);
           },
@@ -588,6 +700,37 @@ describe("telling this deployment's auth configs from anybody else's", () => {
       ["ac_ours", { revoke_on_delete: true }],
       ["ac_ours_spare", { revoke_on_delete: true }],
     ]);
+  });
+
+  test("a config left standing is a failure, and the count is the message", async () => {
+    /*
+     * THE TWIN OF THE PARTIAL REVOKE, WHICH HAD TWO TESTS WHILE THIS HAD NONE — so this throw
+     * could be deleted with the whole suite green. The caller is `removeServer`, which deletes the
+     * app's row once this returns: a config left standing is a live grant that the removal was
+     * supposed to end, and nothing in this deployment can find it again afterwards.
+     *
+     * The count is asserted rather than the fact of a refusal, because the count is the whole
+     * remedy: an operator who reads that one of two went knows that pressing remove again finishes
+     * the job rather than repeats it.
+     */
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: MIXED }),
+          delete: async (id: string) => {
+            if (id === "ac_ours_spare") {
+              throw new Error("Composio refused that one.");
+            }
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(broker.deleteAuthConfig("linear"));
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(
+      /removed 1 of this deployment's 2 authorization configs for linear/,
+    );
   });
 
   test("a disabled config of ours stops a second one being created", async () => {
@@ -641,8 +784,13 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     });
 
     // Sending somebody to consent against a disabled config spends their consent and attaches
-    // nothing, and nothing on the page they are on can fix it.
-    await expect(refused).rejects.toThrow(/disabled/);
+    // nothing, and nothing on the page they are on can fix it. The act that DOES fix it is an
+    // operator's in Composio's own dashboard, which is the one thing the no-config sentence next
+    // door never says — so that is what this asserts.
+    const refusal = await failureOf(refused);
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(DISABLED_REMEDY);
+    expect(refusal.message).not.toMatch(NO_CONFIG_REMEDY);
     expect(linked).toEqual([]);
   });
 
@@ -651,7 +799,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     const { broker } = buildComposioClient(
       fakeVendor({
         authConfigs: {
-          list: async () => ({ items: [MIXED[0]] }),
+          list: async () => ({ items: [BY_HAND] }),
           create: async (...call: unknown[]) => {
             created.push(call);
           },
@@ -740,7 +888,7 @@ describe("withdrawing one person's grants", () => {
           "INACTIVE",
         ],
         accountType: "ALL",
-        limit: LISTING_LIMIT,
+        limit: WHOLE_LISTING,
       },
     ]);
   });
@@ -770,7 +918,7 @@ describe("withdrawing one person's grants", () => {
         toolkitSlugs: ["gmail"],
         statuses: ["ACTIVE"],
         accountType: "ALL",
-        limit: LISTING_LIMIT,
+        limit: WHOLE_LISTING,
       },
     ]);
   });
@@ -847,7 +995,10 @@ describe("refusals a route can tell from an outage", () => {
       })
       .catch((raised: unknown) => raised);
 
-    expect(brokerSentence(error)).toMatch(/An administrator/);
+    // `/An administrator/` opens two of this method's three refusals, so it recognised the class
+    // and not the branch. The remedy is what a reader is being handed.
+    expect(brokerSentence(error)).toMatch(NO_CONFIG_REMEDY);
+    expect(brokerSentence(error)).not.toMatch(DISABLED_REMEDY);
   });
 
   test("a consent with nowhere to send anybody is recognised too", async () => {
@@ -875,7 +1026,9 @@ describe("refusals a route can tell from an outage", () => {
       })
       .catch((raised: unknown) => raised);
 
-    expect(brokerSentence(error)).toMatch(/no page to visit/);
+    expect(brokerSentence(error)).toMatch(NO_PAGE_REMEDY);
+    expect(brokerSentence(error)).not.toMatch(NO_CONFIG_REMEDY);
+    expect(brokerSentence(error)).not.toMatch(DISABLED_REMEDY);
   });
 });
 
@@ -890,7 +1043,7 @@ describe("a catalogue that might be a fragment", () => {
         toolkits: {
           get: async () => {
             calls += 1;
-            return Array.from({ length: LISTING_LIMIT }, (_, index) => ({
+            return Array.from({ length: WHOLE_LISTING }, (_, index) => ({
               slug: `app_${index}`,
               name: `App ${index}`,
               meta: {},
@@ -953,4 +1106,439 @@ describe("a catalogue that might be a fragment", () => {
       },
     ]);
   });
+});
+
+/**
+ * WHAT ESCAPES THE SEAM WHEN THE VENDOR THROWS, asked of every method the seam has.
+ *
+ * ONE TABLE RATHER THAN A TEST PER DISCOVERY, because the defect this is about has been found four
+ * times in four methods and each finding was fixed where it was pointed at. `routes.ts` answers a
+ * thrown broker error by reaching into it for the vendor's own sentence and, finding none, telling
+ * the reader that Composio said nothing about why and that an administrator should check this
+ * deployment's Composio key. That is the right thing to say about a socket that hung up and the
+ * wrong thing to say about every failure the vendor actually explained — and which of the two a
+ * reader gets is decided by whether the `await vendor.*` that threw happened to sit inside
+ * something that translates. TypeScript has no checked exceptions, so nothing enumerates the calls
+ * that do and nothing notices a new one that does not.
+ *
+ * THE PROPERTY, STATED ONCE: an error leaving this seam must leave the route something to say —
+ * either a {@link BrokerRefusalError}, whose sentence this deployment wrote and whose remedy is
+ * already in it, or a vendor error whose own sentence {@link vendorSentence} can reach. Anything
+ * else reaches the reader as "check your Composio key", so anything else has to be named below as
+ * a failure that genuinely deserves that answer.
+ *
+ * THE ALLOW-LIST IS ASSERTED IN BOTH DIRECTIONS, which is what stops it becoming a list of
+ * excuses. An entry on it must actually arrive unexplained; the day a method starts translating
+ * the failure named there, its entry reddens and has to be deleted rather than quietly outliving
+ * the state it describes.
+ *
+ * THE METHOD LIST IS THE SEAM'S OWN. It is read off the objects {@link buildComposioClient}
+ * returns rather than copied into this file, and typed as `keyof ComposioBroker | keyof
+ * ComposioActions`, so a method added to either seam with no entry here fails the completeness
+ * test below instead of being covered by nobody.
+ */
+describe("what a vendor failure becomes on its way out of the seam", () => {
+  /**
+   * The two ways a vendor call fails, which are two different questions and not one.
+   *
+   * An OUTAGE carries nothing: a socket, a 502 from an edge, a timeout. Nobody wrote a sentence
+   * about it, so there is none to find and "Composio did not say why" is the honest answer.
+   *
+   * A NAMED CONDITION is the opposite case and the one that keeps being missed. `@composio/core`
+   * raises its own error classes — `ComposioMultipleConnectedAccountsError` and the four others
+   * down the same door: `ComposioAclOnlyForSharedError`,
+   * `ComposioFailedToCreateConnectedAccountLink`, `ValidationError`,
+   * `ComposioRequestCancelledError` — and each one is the vendor saying WHICH condition happened,
+   * in a message it wrote for a reader. None of it is nested where {@link vendorSentence} looks, so
+   * a seam that lets one through unexamined converts an explanation into "check the key".
+   */
+  const THROWN = [
+    {
+      kind: "an outage",
+      raise: () => new Error("socket hang up"),
+    },
+    {
+      kind: "a named vendor condition",
+      raise: () =>
+        Object.assign(
+          new Error(
+            "Multiple connected accounts found for user user_1 and toolkit linear.",
+          ),
+          { name: "ComposioMultipleConnectedAccountsError" },
+        ),
+    },
+  ];
+
+  type SeamMethod = keyof ComposioBroker | keyof ComposioActions;
+
+  /**
+   * The failures this seam is allowed to hand on unexplained, one entry per state and each with
+   * its reason written down.
+   *
+   * Every one of them is the same claim: the vendor call that failed said nothing this deployment
+   * could pass on, so "Composio did not answer and an administrator should check the key and their
+   * status page" is genuinely the best thing a reader can be told. That claim is true of a bare
+   * `Error` out of a listing and it is NOT true of anything the vendor named.
+   */
+  const GENUINE_OUTAGES: {
+    method: SeamMethod;
+    kind: string;
+    because: string;
+  }[] = [
+    {
+      method: "listApps",
+      kind: "an outage",
+      because:
+        "The catalogue did not answer. There is no app and no person in the question, so the only remedy is the deployment's key or the vendor's status page.",
+    },
+    {
+      method: "ensureAuthConfig",
+      kind: "an outage",
+      because:
+        "Creating the config failed with nothing said. An administrator pressed Add; the app is not enabled, and what to check is the key.",
+    },
+    {
+      method: "authorize",
+      kind: "an outage",
+      because:
+        "Minting the link failed with nothing said. Nobody was sent anywhere and nothing was attached, so trying again is the whole of the advice.",
+    },
+    {
+      method: "isConnected",
+      kind: "an outage",
+      because:
+        "The account listing did not answer. This is a gate rather than a page, and its caller refuses the run either way.",
+    },
+    {
+      method: "listActions",
+      kind: "an outage",
+      because:
+        "The action listing did not answer. `./composio`'s own `listingSentence` names the app in what it records, so what is missing here is the vendor's reason and not the subject.",
+    },
+    {
+      method: "execute",
+      kind: "an outage",
+      because:
+        "The call itself failed with nothing said. `callTool` already refuses to pass the vendor's placeholder on and names the app instead.",
+    },
+  ];
+  const UNEXPLAINABLE = new Set(
+    GENUINE_OUTAGES.map((outage) => `${outage.method}/${outage.kind}`),
+  );
+
+  /**
+   * Every method of the seam, with the vendor call that decides its answer aimed at the throw.
+   *
+   * THE CALL THAT DECIDES RATHER THAN THE FIRST ONE. Several of these read a listing before they
+   * do the thing they are named for, and a vendor whose every method threw would have each of them
+   * fail at that first read — so the table would be eight tests of one listing and F1, which lives
+   * behind an auth-config listing that succeeds, would be unreachable. Each entry below answers
+   * everything on the way in and throws at the step the method exists to perform.
+   */
+  const SEAM_CASES: {
+    method: SeamMethod;
+    vendor: (raise: () => Promise<never>) => Parameters<typeof fakeVendor>[0];
+    ask: (client: ReturnType<typeof buildComposioClient>) => Promise<unknown>;
+  }[] = [
+    {
+      method: "listApps",
+      vendor: (raise) => ({ toolkits: { get: raise } }),
+      ask: ({ broker }) => broker.listApps(),
+    },
+    {
+      method: "ensureAuthConfig",
+      vendor: (raise) => ({
+        authConfigs: { list: async () => ({ items: [] }), create: raise },
+      }),
+      ask: ({ broker }) =>
+        broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" }),
+    },
+    {
+      method: "deleteAuthConfig",
+      vendor: (raise) => ({
+        authConfigs: { list: async () => ({ items: [OURS] }), delete: raise },
+      }),
+      ask: ({ broker }) => broker.deleteAuthConfig("linear"),
+    },
+    {
+      method: "authorize",
+      vendor: (raise) => ({
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: { link: raise },
+      }),
+      ask: ({ broker }) =>
+        broker.authorize({
+          userId: "user_1",
+          toolkit: "linear",
+          returnUrl: RETURN_URL,
+        }),
+    },
+    {
+      method: "isConnected",
+      vendor: (raise) => ({ connectedAccounts: { list: raise } }),
+      ask: ({ broker }) =>
+        broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
+    },
+    {
+      method: "revoke",
+      vendor: (raise) => ({
+        connectedAccounts: {
+          list: async () => ({ items: [{ id: "ca_1" }] }),
+          delete: raise,
+        },
+      }),
+      ask: ({ broker }) =>
+        broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    },
+    {
+      method: "listActions",
+      vendor: (raise) => ({ tools: { getRawComposioTools: raise } }),
+      ask: ({ actions }) =>
+        actions.listActions("gmail", { limit: WHOLE_LISTING }),
+    },
+    {
+      method: "execute",
+      vendor: (raise) => ({
+        tools: {
+          getRawComposioToolBySlug: async () => ({
+            slug: "GMAIL_FETCH_EMAILS",
+            toolkit: { slug: "gmail" },
+          }),
+          execute: raise,
+        },
+      }),
+      ask: ({ actions }) =>
+        actions.execute(
+          {
+            toolkit: "gmail",
+            slug: "GMAIL_FETCH_EMAILS",
+            userId: "user_1",
+            version: "20260903_00",
+          },
+          {},
+        ),
+    },
+  ];
+
+  test("every method the seam offers has an entry in the table", () => {
+    // Read off the built objects rather than listed here a second time: a method added to either
+    // projection arrives in this set, and the table that does not cover it fails here rather than
+    // being the one door nobody thought to probe.
+    const seam = buildComposioClient(fakeVendor({}));
+    expect(
+      [...Object.keys(seam.broker), ...Object.keys(seam.actions)].sort(),
+    ).toEqual(SEAM_CASES.map((seamCase) => seamCase.method).sort());
+  });
+
+  for (const seamCase of SEAM_CASES) {
+    for (const thrown of THROWN) {
+      const allowed = UNEXPLAINABLE.has(`${seamCase.method}/${thrown.kind}`);
+      test(`${seamCase.method} meeting ${thrown.kind} leaves the route ${
+        allowed
+          ? "nothing to say, and that is named as an outage"
+          : "a sentence"
+      }`, async () => {
+        const client = buildComposioClient(
+          fakeVendor(
+            seamCase.vendor(async () => {
+              throw thrown.raise();
+            }),
+          ),
+          () => 1_000_000,
+        );
+
+        const escaped = await failureOf(seamCase.ask(client));
+        const sentence = brokerSentence(escaped) ?? vendorSentence(escaped);
+
+        if (allowed) {
+          // The allow-list's other direction. This entry claims the reader cannot be told anything
+          // useful here; the day that stops being true, this line is what says so.
+          expect(sentence).toBeNull();
+          return;
+        }
+        expect(sentence).not.toBeNull();
+        expect(sentence?.trim()).not.toBe("");
+      });
+    }
+  }
+});
+
+/**
+ * WHAT EACH VENDOR LISTING IS ALLOWED TO BE, given that this file's types only assert its shape.
+ *
+ * A TYPESCRIPT INTERFACE OVER A WIRE VALUE IS AN ASSERTION AND NOT A CHECK, which is the whole
+ * reason this table exists. `ComposioVendor` declares these four listings with required fields, and
+ * the SDK that fills them in is warn-only: `@composio/core`'s own `transform()` logs a `safeParse`
+ * failure and then returns the unvalidated object, so the shapes below are what actually arrives
+ * rather than what could theoretically arrive. Each one has been observed reaching the adapter — a
+ * toolkit with no name, an auth config whose name is null, a connected account with no id, a
+ * category list containing null.
+ *
+ * WHAT A MALFORMED ANSWER MUST NOT BECOME IS A CRASH REPORT. `f.toLowerCase is not a function` and
+ * `null is not an object` are what these produce today: the first as an unhandled 500 on a live
+ * route, the rest as a 502 telling an administrator to check a key that is perfectly good. So each
+ * case asserts that the call refuses, and that the refusal is a sentence rather than the name of a
+ * method that was not there.
+ *
+ * ASSERTED AS A PROPERTY AND NOT AS A WORDING, because the fix does not exist yet and a test that
+ * pinned the sentence would pin whichever one got written. What is required is that a reader be
+ * told something, and that nothing be sent to the vendor on the strength of a field the answer did
+ * not carry.
+ */
+describe("a vendor listing that is not the shape it is declared to be", () => {
+  /** A recorder for what went out AFTER the malformed answer came back, which must be nothing. */
+  type Probe = {
+    parts: Parameters<typeof fakeVendor>[0];
+    sent: unknown[];
+  };
+
+  const MALFORMED_LISTINGS: {
+    listing: string;
+    answers: { shape: string; answer: unknown }[];
+    probe: (answer: unknown) => Probe;
+    ask: (client: ReturnType<typeof buildComposioClient>) => Promise<unknown>;
+    /** Whether the refusal has to be one a route passes through as this deployment's own. */
+    authored: boolean;
+  }[] = [
+    {
+      listing: "the app catalogue",
+      answers: [
+        { shape: "nothing at all", answer: null },
+        {
+          shape: "an envelope where a bare list belongs",
+          answer: { items: [] },
+        },
+        { shape: "a row that is not an object", answer: ["gmail"] },
+        {
+          shape: "a row with no slug",
+          answer: [{ name: "Gmail", meta: {} }],
+        },
+      ],
+      probe: (answer) => ({
+        parts: { toolkits: { get: async () => answer } },
+        sent: [],
+      }),
+      ask: ({ broker }) => broker.listApps(),
+      authored: true,
+    },
+    {
+      listing: "this app's auth configs",
+      answers: [
+        { shape: "nothing at all", answer: null },
+        { shape: "a bare list where an envelope belongs", answer: [] },
+        {
+          shape: "a row that is not an object",
+          answer: { items: ["ac_ours"] },
+        },
+        {
+          shape: "a row with no name",
+          answer: { items: [{ id: "ac_ours", status: "ENABLED" }] },
+        },
+      ],
+      probe: (answer) => {
+        const sent: unknown[] = [];
+        return {
+          parts: {
+            authConfigs: { list: async () => answer },
+            connectedAccounts: {
+              link: async (...call: unknown[]) => {
+                sent.push(call);
+                return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+              },
+            },
+          },
+          sent,
+        };
+      },
+      ask: ({ broker }) =>
+        broker.authorize({
+          userId: "user_1",
+          toolkit: "linear",
+          returnUrl: RETURN_URL,
+        }),
+      authored: true,
+    },
+    {
+      listing: "this person's accounts",
+      answers: [
+        { shape: "nothing at all", answer: null },
+        { shape: "a bare list where an envelope belongs", answer: [] },
+        { shape: "a row that is not an object", answer: { items: ["ca_1"] } },
+        { shape: "a row with no id", answer: { items: [{}] } },
+      ],
+      probe: (answer) => {
+        const sent: unknown[] = [];
+        return {
+          parts: {
+            connectedAccounts: {
+              list: async () => answer,
+              delete: async (...call: unknown[]) => {
+                sent.push(call);
+              },
+            },
+          },
+          sent,
+        };
+      },
+      ask: ({ broker }) =>
+        broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+      authored: true,
+    },
+    {
+      listing: "this app's actions",
+      answers: [
+        { shape: "nothing at all", answer: null },
+        {
+          shape: "an envelope where a bare list belongs",
+          answer: { items: [] },
+        },
+        {
+          shape: "a row that is not an object",
+          answer: ["GMAIL_FETCH_EMAILS"],
+        },
+        {
+          shape: "a row with no slug",
+          answer: [{ description: "Fetch emails from Gmail." }],
+        },
+      ],
+      probe: (answer) => ({
+        parts: { tools: { getRawComposioTools: async () => answer } },
+        sent: [],
+      }),
+      ask: ({ actions }) =>
+        actions.listActions("gmail", { limit: WHOLE_LISTING }),
+      // `./composio` authors this one's sentence, not `./broker`: a listing failure is recorded in
+      // the app's `lastError` rather than answered to a route, so what is required here is a
+      // sentence and not a class.
+      authored: false,
+    },
+  ];
+
+  /** What a failure must never read like: the name of a method that was not there. */
+  const A_CRASH =
+    /is not a function|is not an object|is not iterable|undefined is not|cannot read propert/i;
+
+  for (const listing of MALFORMED_LISTINGS) {
+    for (const { shape, answer } of listing.answers) {
+      test(`${listing.listing} answered with ${shape} is refused in a sentence`, async () => {
+        const probe = listing.probe(answer);
+        const client = buildComposioClient(
+          fakeVendor(probe.parts),
+          () => 1_000_000,
+        );
+
+        const failure = await failureOf(listing.ask(client));
+
+        expect(failure.message).not.toMatch(A_CRASH);
+        expect(failure.message.trim()).not.toBe("");
+        if (listing.authored) {
+          expect(brokerSentence(failure)).not.toBeNull();
+        }
+        // Nothing was sent to the vendor on the strength of a field the answer did not carry: an
+        // id-less account reaching the delete is a request to withdraw `undefined`, which the
+        // vendor is free to read as anything at all.
+        expect(probe.sent).toEqual([]);
+      });
+    }
+  }
 });

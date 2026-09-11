@@ -346,9 +346,14 @@ describe("listing an app's actions", () => {
   });
 
   test("an action arrives with its schema, its effect and its version", async () => {
+    // RECORDED AND ASSERTED AFTERWARDS, NOT CHECKED INSIDE THE STUB. `listTools` wraps this call in
+    // the try that turns a throw into `listingSentence`'s sentence, so a failed `expect` in there
+    // is not a failed test: it is swallowed and re-emerges as a refusal about Composio, which this
+    // test would then report as a listing failure rather than as the wrong app being asked for.
+    const asked: string[] = [];
     const { client } = recording({
       listActions: async (toolkit) => {
-        expect(toolkit).toBe("gmail");
+        asked.push(toolkit);
         return [GMAIL_READ];
       },
     });
@@ -367,6 +372,7 @@ describe("listing an app's actions", () => {
         version: "20260903_00",
       },
     ]);
+    expect(asked).toEqual(["gmail"]);
   });
 
   test("an action that stages a file is not offered at all", async () => {
@@ -781,7 +787,16 @@ describe("listing an app's actions", () => {
      */
     // `[null]` is the same failure one level down: it clears `Array.isArray` and then reaches
     // `action.inputParameters` in the filter, which is outside that try as well.
-    for (const shape of [null, undefined, { items: [] }, "gmail", [null]]) {
+    // NOT `"gmail"` AS THE SCALAR, which is what this loop used to carry: the assertion below is
+    // that the sentence names the app, and a shape that IS the app's name satisfies it whether the
+    // name came from the url or from the malformed answer being echoed back.
+    for (const shape of [
+      null,
+      undefined,
+      { items: [] },
+      "an action list",
+      [null],
+    ]) {
       useComposioClient(
         recording({
           listActions: async () => shape as unknown as ComposioAction[],

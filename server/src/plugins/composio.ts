@@ -599,7 +599,7 @@ export function vendorSentence(error: unknown): string | null {
  * for. Matched on its opening rather than on the whole string, because the slug varies and the
  * punctuation after it has not been stable across vendor versions.
  */
-const VENDOR_PLACEHOLDER = /^error executing the tool\b/i;
+export const VENDOR_PLACEHOLDER = /^error executing the tool\b/i;
 
 /**
  * What to say when the vendor reported a failure and said nothing about it.
@@ -609,7 +609,7 @@ const VENDOR_PLACEHOLDER = /^error executing the tool\b/i;
  * call or invent a reason. The likely cause by a wide margin is a connection that has lapsed, which
  * is a person's own two-click fix on the page named here.
  */
-function unexplained(toolName: string): string {
+export function unexplained(toolName: string): string {
   return `${toolName} failed and Composio did not say why. Check that this app is still connected on its Plugins page, then try again.`;
 }
 
