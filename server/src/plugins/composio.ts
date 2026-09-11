@@ -536,13 +536,67 @@ export async function listTools(connection: {
    * a write — a classification nobody can see is wrong, on a row an administrator grants from.
    * Defaulting either shape to "write" would make the same silent answer deliberate, so both are
    * refused here while a sentence can still name the action.
+   *
+   * AND THE LABELS THEMSELVES ARE READ, SO THEY HAVE TO BE LABELS. This guard checked the CONTAINER
+   * and trusted its CONTENTS, and that is the third distinct way this one field has been found
+   * unheld. {@link effectOf} decides by `Set.has("destructiveHint")`, which is an identity
+   * comparison: no object, nested array or number in that set can ever match it, whatever it spells.
+   * So `[{ name: "destructiveHint" }]` and `[["destructiveHint"]]` — the two shapes a listing
+   * carries when a vendor changes how it spells a label — are not an unreadable field that throws.
+   * They are a DESTRUCTIVE action recorded as `destructive: false`, on the row that decides whether
+   * a Bot is stopped before it runs the action at all, and nothing about the row looks wrong.
+   *
+   * That is the string case's silent wrong answer again, one level in and failing the dangerous
+   * way round rather than the cautious one, so it is answered the same way and in the same breath.
+   * ASKED OF EVERY ELEMENT rather than of any, because a list that is mostly labels with one
+   * malformed entry is the shape a vendor actually sends, and it is the one a looser check passes.
    */
   const oddTags = actions.find(
-    (action) => action.tags !== undefined && !Array.isArray(action.tags),
+    (action) =>
+      action.tags !== undefined &&
+      (!Array.isArray(action.tags) ||
+        action.tags.some((label) => typeof label !== "string")),
   );
   if (oddTags) {
     throw new Error(
       `Composio's action list for ${toolkit} described ${oddTags.slug.trim()}'s tags as something other than a list of labels, and those labels are the only thing that says whether an action reads or writes and whether it destroys anything. Nothing was refreshed and the actions already recorded for this app are kept rather than replaced by a listing whose effects could not be read.`,
+    );
+  }
+
+  /*
+   * AND THE VERSION BESIDE THEM, WHICH IS READ IN THE SAME MAP AND WAS HELD BY NOBODY.
+   *
+   * `action.version?.trim()` is the read, and `?.` guards null and undefined and nothing else — so a
+   * number, an object, a list or a boolean throws `action.version?.trim is not a function` out of a
+   * map that sits OUTSIDE the try wrapping the vendor's call. That engine sentence is exactly what
+   * `refreshTools` writes into the row's `lastError` for an administrator to read, which is the
+   * failure the labels guard above exists to prevent, on the field immediately next to it.
+   *
+   * REFUSED RATHER THAN READ AS NO VERSION, which is the other candidate repair and is the wrong
+   * one for the reason every refusal on this path is a refusal. Recording the action with no
+   * version makes it permanently uncallable and sends its reader to a refresh that writes the same
+   * unreadable field back — the loop {@link callTool}'s version refusal already names — and
+   * committing the listing at all is a delete and an insert that takes the `version` of every OTHER
+   * action on the app with it, which no later refresh reconstructs where Composio publishes none.
+   *
+   * `null` IS NOT ONE OF THESE, and that is deliberate rather than an oversight in the check. "This
+   * action has no version" is a real and common state with an answer already — the action is listed
+   * with no version key — and `null` is how JSON spells it. The `?.` in the map has always read it
+   * that way; refusing it here would turn a healthy refresh into a total failure for every app that
+   * publishes one, which is the loss this guard is written to avoid rather than to cause.
+   *
+   * Both fields are read as `unknown` for the reason {@link reportedFailure} reads its two that way:
+   * the types above are this module's projection and the values are the vendor's.
+   */
+  const oddVersion = actions.find((action) => {
+    const version: unknown = action.version;
+    return (
+      version !== undefined && version !== null && typeof version !== "string"
+    );
+  });
+  if (oddVersion) {
+    throw new Error(
+      `Composio's action list for ${toolkit} described ${oddVersion.slug.trim()}'s version as something other than a version string, and the version is what this deployment has to send back to call the action at all. Nothing was refreshed and the actions already recorded for this app are kept rather than replaced by a listing whose versions could not be read.`,
     );
   }
 
@@ -628,6 +682,11 @@ export async function listTools(connection: {
      * permanently uncallable — and the refusal its caller reads names a refresh, which records
      * the same blank again. Recording exactly what `callTool` will send is what closes that
      * loop; a blank becomes no version, which is the state whose refusal says so truthfully.
+     *
+     * WHAT THE `?.` GUARDS IS ABSENCE AND NOT TYPE, which is why this line is no longer the only
+     * thing standing between the vendor's field and a `trim` that is not a function. A version
+     * that is neither absent nor a string is refused above, beside the labels, where a sentence
+     * can still name the action; here it cannot arrive.
      */
     const version = action.version?.trim();
     return {
@@ -706,16 +765,46 @@ export function vendorSentence(error: unknown): string | null {
   const thrown = schemaNode(error);
   for (const carrier of [thrown, schemaNode(thrown?.cause)]) {
     const body = schemaNode(carrier?.error);
-    const sentence = sentenceOf(schemaNode(body?.error)?.message);
+    const sentence = passableSentence(schemaNode(body?.error)?.message);
     if (sentence !== null) return sentence;
   }
   return null;
 }
 
-/** One candidate field, judged the one way every depth is judged. See {@link vendorSentence}. */
-function sentenceOf(message: unknown): string | null {
+/**
+ * THE ONE DOOR. Whether a candidate string is worth showing anybody, and the trimmed string if so.
+ *
+ * EVERY READER OF A CANDIDATE SENTENCE IN THIS MODULE ASKS THROUGH HERE, and that is the whole
+ * point of it rather than a tidiness. There are four places a string is picked up and handed to a
+ * model, to an administrator reading `lastError` off the Plugins page, or to `store.ts`'s audit
+ * row: the two depths {@link vendorSentence} reaches, the message a failure was THROWN with, the
+ * `error` field of a resolved envelope, and the reason a serialization failed. Each of them used to
+ * make this judgement itself, and the judgement then drifted — which is not a hypothesis. A first
+ * extraction moved the blank and the placeholder rules into one place and left the `error` field
+ * reading `VENDOR_PLACEHOLDER` inline; {@link VENDOR_RESPONSE_DUMP} was then added to the extracted
+ * side only, so a status code followed by an entire response body was refused where it was thrown
+ * and passed on where it was reported. The fix for that is not a third copy of the rule. It is that
+ * there is nowhere left to put one.
+ *
+ * THREE REFUSALS, AND THEY ARE THE SAME REFUSAL. A blank string, "Error executing the tool X" and
+ * "502 {…}" are one condition wearing three shapes: the vendor emitted something where an
+ * explanation belongs and none of it explains anything. What each caller does about a null differs
+ * — one falls through to the next depth, one to this deployment's own words — and that is the part
+ * that belongs to the caller. What is NOT worth passing on does not vary by door, and the moment it
+ * is allowed to, the guard is decoration.
+ *
+ * A NON-STRING IS NOT A SENTENCE, which is why the parameter is `unknown` rather than `string`. The
+ * types in this file are its own projection of somebody else's JSON; a `message` that is a number,
+ * an object or a list reaches a reader as `1810` or `[object Object]`, and collapsing all of those
+ * to the blank case here is what stops each caller inventing its own `typeof`.
+ */
+function passableSentence(message: unknown): string | null {
   const sentence = typeof message === "string" ? message.trim() : "";
-  return sentence === "" || VENDOR_PLACEHOLDER.test(sentence) ? null : sentence;
+  return sentence === "" ||
+    VENDOR_PLACEHOLDER.test(sentence) ||
+    VENDOR_RESPONSE_DUMP.test(sentence)
+    ? null
+    : sentence;
 }
 
 /**
@@ -751,14 +840,15 @@ export const VENDOR_RESPONSE_DUMP = /^\d{3} [[{]/;
  * differently: a guard that grew a third refusal on one path and not the other would put the
  * vendor's response dump in front of a model or an operator depending on which door they arrived
  * through, which is the divergence `callTool`'s catch already had to be corrected for once.
+ *
+ * WHICH IS WHY THE JUDGEMENT ITSELF IS NOT HERE ANY MORE. This function once held all three
+ * refusals, and holding them is what let it drift from the other readers — the dump rule was added
+ * to this copy and to no other, so the escape it closed here stayed open on the envelope's `error`
+ * field and at both depths {@link vendorSentence} reads. All this owes its callers now is WHICH
+ * string is the candidate on a throw; {@link passableSentence} settles what any candidate is worth.
  */
 function thrownSentence(error: unknown): string | null {
-  const thrown = error instanceof Error ? error.message.trim() : "";
-  return thrown === "" ||
-    VENDOR_PLACEHOLDER.test(thrown) ||
-    VENDOR_RESPONSE_DUMP.test(thrown)
-    ? null
-    : thrown;
+  return passableSentence(error instanceof Error ? error.message : null);
 }
 
 /**
@@ -1044,9 +1134,24 @@ function reportedFailure(
       : `${toolName} was sent to Composio and Composio answered, but this deployment could not read what it said about the call: the answer's error was neither a sentence nor null, which is all Composio's own schema permits it to be, so nothing here can tell whether the action ran.`;
   }
 
+  /*
+   * THE SAME DOOR THE THROWN MESSAGE GOES THROUGH, which is the correction, and it is the one this
+   * whole extraction was made for. This branch tested {@link VENDOR_PLACEHOLDER} inline while
+   * {@link thrownSentence} had grown {@link VENDOR_RESPONSE_DUMP} beside it — so one condition, an
+   * unreadable non-explanation in the `error` field, was answered two different ways depending on
+   * whether Composio threw it or reported it in a 200, and on this side a status code followed by
+   * the whole response body went to the model as the vendor's report and into `store.ts`'s audit
+   * row beside it.
+   *
+   * THE PRESENCE TEST STAYS SEPARATE FROM THE JUDGEMENT, because the two answer different
+   * questions and only one of them is the door's. A blank `error` means the vendor reported NO
+   * failure and the flag below decides the outcome; a non-blank one this deployment will not pass
+   * on means the vendor reported a failure it cannot explain, which is exactly {@link unexplained}.
+   * Collapsing both to null here would turn the second into a success.
+   */
   const sentence = reported === null ? "" : reported.trim();
   if (sentence !== "") {
-    return VENDOR_PLACEHOLDER.test(sentence) ? unexplained(toolName) : sentence;
+    return passableSentence(sentence) ?? unexplained(toolName);
   }
 
   if (typeof outcome !== "boolean") {
@@ -1230,10 +1335,32 @@ export async function callTool(
   try {
     return resultOf(answer.data);
   } catch (error) {
+    /*
+     * THE LAST PATH THAT REACHED A MODEL WITHOUT PASSING THE DOOR. This quoted a raw `error.message`
+     * into the sentence `store.ts` records, asking nothing of it — the one refusal in this module
+     * that read a candidate string and judged it nowhere.
+     *
+     * WHAT IT CAN BE HANDED IS NOT ONLY OURS. `resultOf`'s own throw is this file's sentence and
+     * the engine's circular-reference and length errors are the engine's, but `JSON.stringify`
+     * calls `toJSON` on whatever the vendor put in `data`, so a throw out of there arrives wearing
+     * whatever the vendor's object felt like throwing — the same class of string refused four lines
+     * above, arriving through the one reader that was not asking.
+     *
+     * A REASON IT WILL NOT QUOTE STILL LEAVES A FINISHED SENTENCE, which is why the fallback is a
+     * clause rather than nothing. What this refusal has to carry is which of the two events it was:
+     * the action ran, Composio answered, and it is this deployment that could not read the answer.
+     * That claim is ours and holds whether or not there is a reason worth repeating.
+     *
+     * `String(error)` KEEPS THE NON-`Error` THROW READABLE, which {@link thrownSentence} does not
+     * do and should not: there the alternative is the vendor's own sentence one level in, and here
+     * there is no other candidate at all.
+     */
+    const why =
+      passableSentence(
+        error instanceof Error ? error.message : String(error),
+      ) ?? "the reason it failed with is not one this deployment will pass on";
     return failure(
-      `${toolName} ran and Composio answered, but this deployment could not turn that answer into text: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `${toolName} ran and Composio answered, but this deployment could not turn that answer into text: ${why}`,
     );
   }
 }
