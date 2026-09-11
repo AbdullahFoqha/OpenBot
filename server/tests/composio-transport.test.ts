@@ -94,6 +94,40 @@ function nested(message: unknown): unknown {
   return { cause: { error: { error: { message } } } };
 }
 
+/**
+ * The SAME failure with nothing wrapped around it, which is how several of these calls arrive.
+ *
+ * `@composio/client`'s `APIError` hangs the response body on `.error` and sets no `cause` at all,
+ * and builds its own `message` as the status code followed by that body JSON-stringified whole
+ * where the body has no top-level `message` — `${"${status}"} ${"${JSON.stringify(error)}"}`
+ * (`@composio/client` 0.1.0-alpha.76, `src/core/error.ts:9-45`). Composio's body puts its sentence
+ * at `error.message`, so that fallback is what every one of these throws carries in `.message`.
+ *
+ * It reaches this transport unwrapped from five calls: `@composio/core` 0.18.1 awaits
+ * `this.client.authConfigs.list`, `this.client.connectedAccounts.list` and `this.client.tools.list`
+ * with no try around them (`src/models/AuthConfigs.ts`, `src/models/ConnectedAccounts.ts`,
+ * `src/models/Tools.ts:552-555`), and `./composio-adapter` calls both raw deletes on the client
+ * itself. So the sentence sits one level shallower here than in {@link nested}, and the dump is
+ * what escaped in its place.
+ */
+function unwrapped(message: unknown): Error {
+  const body = { error: { message } };
+  return Object.assign(new Error(`404 ${JSON.stringify(body)}`), {
+    status: 404,
+    headers: { "x-request-id": "must-not-appear" },
+    error: body,
+  });
+}
+
+/** The same client error for a body with no sentence anywhere in it: status code, then the lot. */
+function dumped(body: Record<string, unknown>): Error {
+  return Object.assign(new Error(`502 ${JSON.stringify(body)}`), {
+    status: 502,
+    headers: { "x-request-id": "must-not-appear" },
+    error: body,
+  });
+}
+
 function recording(answers: Partial<ComposioActions> = {}): {
   client: ComposioActions;
   calls: Recorded[];
@@ -333,6 +367,55 @@ describe("finding the vendor's own sentence", () => {
         nested("No connected account found; error executing the tool X."),
       ),
     ).toBe("No connected account found; error executing the tool X.");
+  });
+
+  test("the sentence is found where a client error with no wrapper puts it", () => {
+    /*
+     * ONE DEPTH WAS READ AND TWO ARE THROWN. See {@link unwrapped}: five of this transport's calls
+     * surface `@composio/client`'s own `APIError`, which carries the body on `.error` and no
+     * `cause`, so `cause.error.error.message` found nothing on any of them and the vendor's
+     * readable sentence was skipped in favour of a status code and the whole response body.
+     */
+    expect(
+      vendorSentence(
+        unwrapped(
+          "No connected account found for user ID u1 for toolkit gmail",
+        ),
+      ),
+    ).toBe("No connected account found for user ID u1 for toolkit gmail");
+  });
+
+  test("every judgement this function makes applies at the shallower depth too", () => {
+    /*
+     * THE POINT OF THE JUDGEMENT LIVING HERE. It was moved into this function so that no caller
+     * could reach a sentence without it; a second depth read without it would be that bypass
+     * rebuilt. Each of these is the assertion its {@link nested} sibling above makes, asked of the
+     * place a client error actually puts the field.
+     */
+    expect(
+      vendorSentence(unwrapped("Error executing the tool GMAIL_FETCH_EMAILS")),
+    ).toBeNull();
+    expect(
+      vendorSentence(unwrapped("  error executing the tool X\n")),
+    ).toBeNull();
+    expect(vendorSentence(unwrapped(""))).toBeNull();
+    expect(vendorSentence(unwrapped("   "))).toBeNull();
+    expect(vendorSentence(unwrapped(1810))).toBeNull();
+    expect(vendorSentence(unwrapped(null))).toBeNull();
+    expect(vendorSentence(unwrapped({ text: "a nested sentence" }))).toBeNull();
+    expect(vendorSentence(unwrapped(["a sentence in a list"]))).toBeNull();
+    expect(vendorSentence(unwrapped("  Gmail rejected the query.\n"))).toBe(
+      "Gmail rejected the query.",
+    );
+  });
+
+  test("a body with no sentence in it yields nothing rather than the body", () => {
+    // The shape `dumped` is named for: nothing at `error.message`, so there is no sentence to find
+    // and the function must say so rather than reaching for whatever else the body holds.
+    expect(
+      vendorSentence(dumped({ detail: "something went wrong" })),
+    ).toBeNull();
+    expect(vendorSentence(dumped({}))).toBeNull();
   });
 });
 
@@ -812,6 +895,163 @@ describe("listing an app's actions", () => {
 
     expect(message).not.toMatch(/error executing the tool/i);
     expect(message).toContain("gmail");
+  });
+
+  test("a listing refusal this deployment authored beats whatever the vendor said", async () => {
+    /*
+     * THE RULE THIS PATH NEVER ASKED ABOUT. `routes.ts` reads `brokerSentence` first and
+     * `vendorSentence` second, and `callTool`'s own catch was corrected to the same order; this one
+     * consulted `brokerSentence` nowhere at all. `./composio-adapter`'s `askVendor` wraps the raw
+     * tool listing exactly as it wraps the execute, so a `BrokerRefusalError` arrives here as
+     * readily as it arrives there — and an authored sentence is the only one that names the step
+     * that clears the condition.
+     *
+     * WHAT IT LOST TO IS A READ ONE LEVEL SHALLOW, the same way it did on the call path.
+     * `vendorRefusal` authors only where `vendorSentence` of the ORIGINAL was null, so asking the
+     * WRAPPER the same question lands somewhere the adapter never judged and comes back with
+     * whatever sits there — below, two words naming nothing, in place of a remedy.
+     */
+    const authored =
+      'Composio refuses a call whose toolkit version is "latest", and that is the version travelling with this one, so gmail\'s action list was not refreshed and the tools already held are untouched. A dated version is recorded when an app\'s actions are listed, so refreshing gmail\'s tools on its Plugins page replaces "latest" with a version Composio will accept.';
+
+    useComposioClient(
+      recording({
+        listActions: async () => {
+          throw new BrokerRefusalError(authored, {
+            cause: { error: { error: { message: "Invalid request" } } },
+          });
+        },
+      }).client,
+    );
+
+    const message = await listTools({ url: "composio://gmail" }).then(
+      () => "",
+      (error: unknown) => (error as Error).message,
+    );
+
+    // Pinned whole rather than by a fragment, for the reason its sibling on the call path is: a
+    // substring check passes on a sentence joined to the vendor's or cut short of the remedy.
+    expect(message).toBe(authored);
+    expect(message).not.toContain("Invalid request");
+  });
+
+  test("a listing that failed with no wrapper still carries the vendor's sentence", async () => {
+    /*
+     * `./composio-adapter`'s listing calls `getRawComposioTools`, which awaits
+     * `this.client.tools.list` with no try around it, so what lands here is `@composio/client`'s
+     * own error — see {@link unwrapped}. `refreshTools` writes this string into the row's
+     * `lastError` for an administrator to read off the Plugins page, and what it used to write was
+     * a status code followed by the entire response body.
+     */
+    useComposioClient(
+      recording({
+        listActions: async () => {
+          throw unwrapped("Composio holds no auth config for gmail.");
+        },
+      }).client,
+    );
+
+    const message = await listTools({ url: "composio://gmail" }).then(
+      () => "",
+      (error: unknown) => (error as Error).message,
+    );
+
+    expect(message).toBe("Composio holds no auth config for gmail.");
+    // The error carries the whole HTTP response beside the sentence. None of it belongs on an
+    // admin page, in an audit row, or in a model's context.
+    expect(message).not.toContain("must-not-appear");
+    expect(message).not.toContain("x-request-id");
+  });
+
+  test("a listing failure whose body says nothing is not answered with the body", async () => {
+    /*
+     * WHAT ESCAPES WHEN THERE IS NO SENTENCE HAS TO BE WORTH SHOWING. `APIError` builds its message
+     * by JSON-stringifying the whole body behind the status code where the body has no top-level
+     * `message`, so the fallback to the thrown message handed an operator a response dump — the
+     * same thing the Zod-dump refusal above exists to stop, arriving through a different door.
+     */
+    useComposioClient(
+      recording({
+        listActions: async () => {
+          throw dumped({
+            detail: [{ loc: ["body", "toolkit"], msg: "unrecognised" }],
+            request_id: "must-not-appear",
+          });
+        },
+      }).client,
+    );
+
+    const message = await listTools({ url: "composio://gmail" }).then(
+      () => "",
+      (error: unknown) => (error as Error).message,
+    );
+
+    expect(message).not.toContain("must-not-appear");
+    expect(message).not.toContain("unrecognised");
+    expect(message).not.toContain("{");
+    expect(message).toContain("gmail");
+  });
+
+  test("a destructive action is listed as destructive", async () => {
+    /*
+     * THE ONE CLASSIFICATION THAT MATTERS MOST, AND NOTHING STOOD OVER IT. `effectOf` is asserted
+     * on both answers directly, but every assertion that reached this mapping asserted
+     * `destructive: false` — so hardcoding `destructive: false` here left the whole suite green,
+     * and the field a Bot is gated on before it runs a dangerous action was pinned by nobody.
+     *
+     * `store.ts` records it on the `mcp_tools` row and a grant is what a person approves against
+     * it: an action recorded as safe that deletes a mailbox is approved once and run for ever.
+     */
+    useComposioClient(
+      recording({
+        listActions: async () => [
+          GMAIL_READ,
+          {
+            slug: "GMAIL_DELETE_MESSAGE",
+            description: "Delete a message.",
+            tags: ["destructiveHint"],
+            version: "20260903_00",
+          },
+        ],
+      }).client,
+    );
+
+    const listed = await listTools({ url: "composio://gmail" });
+
+    // Both rows, so the assertion fails on a mapping that hardcodes EITHER answer rather than
+    // reading the labels.
+    expect(
+      listed.map((tool) => `${tool.name}: ${tool.effect}/${tool.destructive}`),
+    ).toEqual([
+      "GMAIL_FETCH_EMAILS: read/false",
+      "GMAIL_DELETE_MESSAGE: write/true",
+    ]);
+  });
+
+  test("an action Composio described in no words is listed with an empty description", async () => {
+    /*
+     * `description` is optional on the vendor's tool and `ListedTool`'s is not, so the mapping has
+     * to supply something. Nothing asserted which: `?? "no description available"`, `?? tool.name`
+     * and `?? null` all left the suite green, and the last of those is a row `store.ts` writes as
+     * NULL against a NOT NULL column.
+     *
+     * The empty string is the honest answer — the vendor said nothing, so this deployment says
+     * nothing rather than inventing a sentence a model will read as the action's own.
+     */
+    useComposioClient(
+      recording({
+        listActions: async () => [
+          { slug: "GMAIL_ODD", tags: ["readOnlyHint"], version: "20260903_00" },
+        ],
+      }).client,
+    );
+
+    const [tool] = await listTools({ url: "composio://gmail" });
+
+    expect(tool?.description).toBe("");
+    // Asserted separately from `toEqual`, which treats a key holding `undefined` as a key that is
+    // not there and would accept the fallback being dropped altogether.
+    expect(Object.keys(tool ?? {})).toContain("description");
   });
 
   test("an answer that is not a list of actions throws a sentence, not a TypeError", async () => {
@@ -1436,6 +1676,98 @@ describe("calling one action", () => {
       expect(result.isError).toBe(true);
       expect(result.text).toBe("composio unreachable");
       expect(result.truncated).toBe(false);
+    }
+  });
+
+  test("a thrown client error with no wrapper is reported with its sentence", async () => {
+    /*
+     * The same correction as the listing's, on the path where the string reaches a model rather
+     * than an admin page. See {@link unwrapped} for which calls throw this shape; what used to be
+     * handed on for them was a status code followed by the whole response body, which is both the
+     * request id this file already refuses to pass on and somebody's context window spent on it.
+     */
+    useComposioClient(
+      recording({
+        execute: async () => {
+          throw unwrapped("Gmail rejected the query: invalid search syntax.");
+        },
+      }).client,
+    );
+
+    const result = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe(
+      "Gmail rejected the query: invalid search syntax.",
+    );
+    expect(result.text).not.toContain("must-not-appear");
+    expect(result.text).not.toContain("x-request-id");
+  });
+
+  test("a failure whose body says nothing is not answered with the body", async () => {
+    // The dump reaching a model, rather than an operator. `unexplained` is the right answer here
+    // for the reason it is the right answer to the placeholder: neither says anything the reader
+    // can act on, and one of them costs a context window to say it.
+    useComposioClient(
+      recording({
+        execute: async () => {
+          throw dumped({
+            detail: [{ loc: ["body", "arguments"], msg: "unrecognised" }],
+            request_id: "must-not-appear",
+          });
+        },
+      }).client,
+    );
+
+    const result = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.text).not.toContain("must-not-appear");
+    expect(result.text).not.toContain("unrecognised");
+    expect(result.text).not.toContain("{");
+    expect(result.text).toMatch(/Plugins page/);
+    expect(result.text).toContain("GMAIL_FETCH_EMAILS");
+  });
+
+  test("a result the exact size of the cap is not cut, and one character more is", async () => {
+    /*
+     * THE BOUNDARY, WHICH IS THE ONLY PLACE A CAP CAN BE WRONG. Every other test here measures a
+     * string far over the limit or far under it, so `<=` and `<` answered both of them the same
+     * way — and the off-by-one is the version that reports `truncated: true` beside text nothing
+     * was taken from, which is a lie in the field whose whole job is telling a model that what it
+     * is reading stops early.
+     */
+    for (const [length, cut] of [
+      [RESULT_CAP, false],
+      [RESULT_CAP + 1, true],
+    ] as const) {
+      useComposioClient(
+        recording({
+          execute: async () => {
+            throw new Error("x".repeat(length));
+          },
+        }).client,
+      );
+
+      const result = await callTool(
+        { url: "composio://gmail", actorId: "user_asker" },
+        "GMAIL_FETCH_EMAILS",
+        { __version: "20260903_00" },
+      );
+
+      expect(`${length}: ${result.truncated}`).toBe(`${length}: ${cut}`);
+      expect(`${length}: ${result.text.length}`).toBe(
+        `${length}: ${cut ? CAPPED_LENGTH : RESULT_CAP}`,
+      );
+      expect(result.text.endsWith(TRUNCATION_MARKER)).toBe(cut);
     }
   });
 
