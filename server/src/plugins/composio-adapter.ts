@@ -164,6 +164,351 @@ type VendorAccountStatus =
   | "INACTIVE"
   | "REVOKED";
 
+/*
+ * WHY EVERY LISTING BELOW IS READ OUT OF `unknown` AND NOT OUT OF THE TYPES ABOVE.
+ *
+ * The declarations on {@link ComposioVendor} say what the SDK MEANS to send, and each row type says
+ * at length why that is not the same as what arrives: `transform()` validates with `safeParse`,
+ * logs a warning where it fails, and returns the unvalidated object anyway (`@composio/core`
+ * 0.18.1, `src/utils/transform.ts:26-36`). So the declarations are kept — they are the contract a
+ * version bump is read against, and they are what makes an unchecked read fail to compile — and the
+ * value itself is checked here before any field is taken off it.
+ *
+ * REFUSING RATHER THAN FILLING IN, WHICH IS THE WHOLE OF THE ARGUMENT. A `?? ""`, a `String(x)` or
+ * a cast does not make a malformed answer safe; it converts a fault this deployment could have
+ * reported into an answer it gives wrongly, and the wrong answers are not small ones — an app with
+ * no name in an administrator's picker, an action with no slug put in front of a model, and the one
+ * that was actually happening: a delete sent with `undefined` where an account id belongs,
+ * answered by Composio however it likes, after which the audit trail records that a person's access
+ * was withdrawn and nothing had been. Every reader below therefore answers null on anything it
+ * cannot read, and every caller turns that null into a sentence naming what Composio sent.
+ */
+
+/**
+ * The remedy every shape refusal here ends with, because it is the same act in every one of them.
+ *
+ * None of these is a misconfiguration. The key is right, the request is right and the answer
+ * arrived; what changed is the shape of it, which is a thing nobody operating this deployment can
+ * correct from any page it has. Saying so is the difference between an operator reading their own
+ * settings for an hour and an operator upgrading a package.
+ */
+const VENDOR_SHAPE_REMEDY =
+  "That is a change in what Composio answers rather than a setting an operator can correct, so upgrading this deployment's @composio/core is what fixes it.";
+
+/**
+ * WHAT COMPOSIO PUT SOMEWHERE, NAMED IN A SENTENCE A READER CAN ACT ON.
+ *
+ * Every refusal below says what arrived where something else belonged, because "Composio's answer
+ * was not a shape this deployment reads" sends whoever is holding the page looking through a vendor
+ * dashboard with nothing to look for.
+ *
+ * THE VALUE IS NEVER QUOTED, AND THAT IS THE POINT OF THE FUNCTION RATHER THAN AN INTERPOLATION. A
+ * listing row carries a person's mailbox address, an account handle and whatever else the vendor
+ * chose to put on it, and a refusal from here is read off an admin page, written into an app's
+ * `lastError` and put in front of a model. The shape is the part that is safe to say and is also
+ * the only part that helps: a reader who knows a list arrived where an object belongs knows which
+ * vendor change they are looking at.
+ */
+function sent(value: unknown): string {
+  if (value === undefined) return "nothing";
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "a list";
+  if (value === "") return "an empty string";
+  if (typeof value === "object") return "an object";
+  return `a ${typeof value}`;
+}
+
+/**
+ * A vendor status named as itself, because an enum value is the one wire value worth quoting.
+ *
+ * {@link sent} withholds what it is given for a reason that does not reach here: an auth config's
+ * status is one of a closed set of vendor enum names, carries nobody's data, and IS the finding —
+ * "Composio called it PENDING" is something an operator can search their dashboard and the vendor's
+ * changelog for, where "Composio sent a string" is something they can only shrug at.
+ */
+function named(value: unknown): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text === "" ? sent(value) : `"${text}"`;
+}
+
+/**
+ * One listing row as its fields, and a type predicate so that nothing below needs a cast.
+ *
+ * Arrays are excluded deliberately. `typeof [] === "object"` and every field read off one answers
+ * `undefined`, so a listing of lists would otherwise arrive here as a listing of rows that are
+ * missing every field — which is a worse sentence for the same fault.
+ */
+function hasFields(row: unknown): row is Record<string, unknown> {
+  return typeof row === "object" && row !== null && !Array.isArray(row);
+}
+
+/**
+ * The rows inside an envelope the vendor answers with, or null where it answered something else.
+ *
+ * THE TWO CONTAINER SHAPES ARE NOT INTERCHANGEABLE AND COMPOSIO USES BOTH. Toolkits and tools come
+ * back as bare arrays; auth configs and connected accounts come back as `{ items, nextCursor }`. So
+ * one where the other belongs is a vendor change rather than a quirk to absorb — and it is the
+ * change that hides best, because `[].items` is `undefined` rather than an error and a bare list
+ * where an envelope belongs therefore used to read as an envelope with nothing in it: no configs to
+ * connect against, no accounts to withdraw, and a confident answer either way.
+ */
+function itemsOf(answer: unknown): unknown[] | null {
+  if (!hasFields(answer)) return null;
+  const items = answer.items;
+  return Array.isArray(items) ? items : null;
+}
+
+/**
+ * One field as the non-empty string it has to be, or null where the vendor sent anything else.
+ *
+ * EMPTY COUNTS AS ABSENT because every caller of this reads an identifier — a slug, an id, a name
+ * this file matches a suffix against — and an empty identifier is unusable in exactly the way a
+ * missing one is, while being the one that reads as present at every glance.
+ */
+function textOf(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+/** Whether a field is the list of strings it is declared to be, all the way through. */
+function isTextList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((entry) => typeof entry === "string")
+  );
+}
+
+/**
+ * One catalogue row checked into the app an administrator picks from, or a refusal saying why not.
+ *
+ * A ROW THIS FILE CANNOT READ STOPS THE WHOLE CATALOGUE, for the reason the full-page guard in
+ * {@link buildComposioClient} gives at length: the directory is held for ten minutes and both the
+ * picker and the enable route read the held copy, so a row quietly dropped is an app missing from a
+ * search and an app whose Add button reports that Composio does not publish it. One refusal an
+ * operator can act on is worth more than several hundred rows, one of which is a guess.
+ *
+ * THE ABSENCES THAT ARE REAL ANSWERS ARE STILL ANSWERS. Composio genuinely publishes toolkits with
+ * no description, no logo, no category and no count, and each of those is a fact about the app
+ * rather than a fault in the answer — so an absent one becomes the value that reads honestly on a
+ * screen, exactly as it did before. What is refused is the other thing: a field that is PRESENT and
+ * is not what it is declared to be. A count that arrived as the string "63" is not a count, and
+ * `Number(x)` over it would turn a vendor change into a plausible figure nobody would question.
+ */
+function appOf(row: unknown, position: number): BrokerApp {
+  const at = `row ${position + 1} of Composio's app catalogue`;
+  if (!hasFields(row)) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row)} as ${at}, where an app belongs, so the directory was not shown. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const slug = textOf(row.slug);
+  if (slug === null) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row.slug)} where the slug of ${at} belongs. The slug is the only name this deployment has for an app — it is what enabling one records and what every later call names — so the directory was not shown, rather than shown with an app nothing could be done with. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const name = textOf(row.name);
+  if (name === null) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row.name)} where the name of ${at} belongs, and ${slug} is a slug rather than a title, so there is nothing to show an administrator choosing between apps. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const meta = row.meta;
+  if (!hasFields(meta)) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(meta)} where ${slug}'s meta belongs, which is where its description, logo, categories and action count all live. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const description = meta.description ?? "";
+  if (typeof description !== "string") {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(meta.description)} where ${slug}'s description belongs. An app that publishes none is ordinary and reads as a gap on the page; an app whose description is not text is an answer this deployment cannot show. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const logo = meta.logo ?? null;
+  if (typeof logo !== "string" && logo !== null) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(meta.logo)} where ${slug}'s logo belongs, and this deployment puts that value in an image address. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const published = meta.categories ?? [];
+  if (!Array.isArray(published)) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(meta.categories)} where ${slug}'s categories belong. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+  const categories = published.map((entry: unknown, index: number) => {
+    const label = hasFields(entry) ? textOf(entry.name) : null;
+    if (label === null) {
+      throw new BrokerRefusalError(
+        `Composio sent ${sent(hasFields(entry) ? entry.name : entry)} where the name of ${slug}'s category ${index + 1} belongs. The catalogue shows an app's categories as the words a person chooses by, so a category with no name is a blank one of those. ${VENDOR_SHAPE_REMEDY}`,
+      );
+    }
+    return label;
+  });
+
+  const actionCount = meta.toolsCount ?? 0;
+  if (typeof actionCount !== "number" || !Number.isFinite(actionCount)) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(meta.toolsCount)} where ${slug}'s action count belongs. The count is shown BEFORE anybody enables an app, because it is the difference between a small addition and a rewrite of what a model sees, so a figure derived from a value that is not a number is the one number here nobody would think to question. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  return { slug, name, description, logo, categories, actionCount };
+}
+
+/**
+ * One auth config with the two fields every decision here turns on, checked.
+ *
+ * `status` IS CARRIED ACROSS UNCHECKED ON PURPOSE, which is the one field of the three this reader
+ * does not settle. {@link ComposioBroker.authorize} is its only reader and it has three answers to
+ * give rather than two — enabled, disabled, and a word the vendor has invented since — so a check
+ * here could only collapse the third into one of the first two, which is the exact defect being
+ * closed. It is left as `unknown` so the reader has to say what it does with it.
+ */
+type CheckedAuthConfig = {
+  id: string;
+  name: string;
+  status: unknown;
+};
+
+/**
+ * One auth-config row checked into something worth deciding on, or a refusal saying why not.
+ *
+ * EVERY ROW IS CHECKED AND NOT ONLY THE ONES THAT TURN OUT TO BE OURS, because which ones are ours
+ * is precisely what the name decides. A row whose name cannot be read cannot be sorted into "made
+ * here" or "somebody's dashboard work", and both of the guesses are damaging in opposite
+ * directions: read as somebody else's, {@link ComposioBroker.ensureAuthConfig} creates a second
+ * config beside it and splits one app's connections in two; read as ours,
+ * {@link ComposioBroker.deleteAuthConfig} deletes an object nobody here chose and every account
+ * anybody had connected against it.
+ */
+function configOf(
+  row: unknown,
+  position: number,
+  toolkit: string,
+): CheckedAuthConfig {
+  const at = `row ${position + 1} of Composio's authorization configs for ${toolkit}`;
+  if (!hasFields(row)) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row)} as ${at}, where a config belongs. This listing is what decides whether a config is created, connected against or deleted, so a row it cannot read is not a row it may pass over. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const id = textOf(row.id);
+  if (id === null) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row.id)} where the id of ${at} belongs, and the id is the whole of what a deletion names. Nothing was sent, because a delete without one asks Composio to remove whatever it cares to while this deployment records that the app was withdrawn. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const name = textOf(row.name);
+  if (name === null) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row.name)} where the name of ${at} belongs, and the name is the only thing that says whether this deployment made a config or an operator built it by hand in Composio's dashboard. Neither guess is safe: one splits this app's connections across two configs, and the other deletes a config nobody here chose along with every account connected against it. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  return { id, name, status: row.status };
+}
+
+/**
+ * One connected-account row checked down to the only field anything here reads.
+ *
+ * THIS IS THE MOST LOAD-BEARING OF THESE READERS AND THE ONE WHOSE ABSENCE WAS DOING REAL DAMAGE.
+ * {@link ComposioBroker.revoke} deletes by id and then answers `true`, and `store.ts` writes that
+ * answer into the audit trail as this person's access having been withdrawn before deleting the one
+ * row in this deployment that names which app they had connected. An id-less account reaching the
+ * delete is a request to withdraw `undefined` — which the vendor is free to read as anything at all
+ * — followed by a `true`, a trail entry, and a live grant with nothing left pointing at it.
+ */
+function accountIdOf(row: unknown, position: number, toolkit: string): string {
+  const at = `row ${position + 1} of Composio's ${toolkit} accounts for this person`;
+  if (!hasFields(row)) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row)} as ${at}, where an account belongs. Whether this person is connected and what there is to withdraw are both read off this listing, so a row it cannot read is answered with neither. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const id = textOf(row.id);
+  if (id === null) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row.id)} where the id of ${at} belongs, and the id is the whole of what a withdrawal names. Nothing was sent, because a delete without one is a request this deployment cannot describe, after which the audit trail would record that this person's access had ended while their grant stood. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  return id;
+}
+
+/**
+ * One tool row checked into the action this deployment holds, or a refusal saying why not.
+ *
+ * CHECKED DESPITE {@link VendorTool}'s ARGUMENT THAT THIS ONE ROW IS VALIDATED. That argument is
+ * sound about the SDK — `transformToolCases` ends in a throwing `ToolSchema.parse` rather than the
+ * warn-only `transform()` everything else here goes through — and it is an argument about the
+ * vendor's code rather than about this deployment's. A schema is one version away from being
+ * relaxed, and the difference in cost between the two sides is not close: the check is a few
+ * comparisons per action, and what it stands between is `inputParameters` going in front of a model
+ * as the vendor's own schema when it is not a schema at all.
+ *
+ * A PLAIN `Error` RATHER THAN A `BrokerRefusalError`, because this listing's failures are not
+ * answered to a route. `./composio` records them in an app's `lastError` for an administrator to
+ * read on its Plugins page, and `listingSentence` passes an authored message through untouched.
+ */
+function actionOf(
+  row: unknown,
+  position: number,
+  toolkit: string,
+): ComposioAction {
+  const at = `row ${position + 1} of Composio's action list for ${toolkit}`;
+  if (!hasFields(row)) {
+    throw new Error(
+      `Composio sent ${sent(row)} as ${at}, where an action belongs, so the list was not refreshed and the tools already held are untouched. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const slug = textOf(row.slug);
+  if (slug === null) {
+    throw new Error(
+      `Composio sent ${sent(row.slug)} where the slug of ${at} belongs, and the slug is what calling the action names, so the list was not refreshed and the tools already held are untouched. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const description = row.description;
+  if (description !== undefined && typeof description !== "string") {
+    throw new Error(
+      `Composio sent ${sent(description)} where ${slug}'s description belongs, and that description is what a model reads to decide whether to call it. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const inputParameters = row.inputParameters;
+  if (inputParameters !== undefined && !hasFields(inputParameters)) {
+    throw new Error(
+      `Composio sent ${sent(inputParameters)} where ${slug}'s input schema belongs. That value is put in front of a model as Composio's own JSON Schema for the action, so a thing that is not an object cannot be shown as one. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const tags = row.tags;
+  if (tags !== undefined && !isTextList(tags)) {
+    throw new Error(
+      `Composio sent ${sent(tags)} where ${slug}'s tags belong, and this deployment reads those to decide whether an action only reads or also writes. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  const version = row.version;
+  if (version !== undefined && typeof version !== "string") {
+    throw new Error(
+      `Composio sent ${sent(version)} where ${slug}'s version belongs, and the version travels with every call made to the action. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+
+  return { slug, description, inputParameters, tags, version };
+}
+
 /**
  * What this adapter needs of `@composio/core`'s client, written as a shape rather than as a class.
  *
@@ -390,8 +735,15 @@ const CONFIG_SUFFIX = "(OpenBot)";
  * part this file writes. Trailing whitespace is tolerated for the same reason it is tolerated
  * anywhere a human-edited string is compared: a name that picked up a space in a dashboard is the
  * same config.
+ *
+ * IT TAKES A {@link CheckedAuthConfig} AND NOT A {@link VendorAuthConfig}, which is what makes this
+ * one line honest. A predicate cannot refuse — it answers true or false — so reading a name the
+ * vendor may not have sent here could only ever have meant silently answering `false`, and `false`
+ * from this function means "somebody else's config": untouched by a removal, and satisfying the
+ * check that stops a second one being created. {@link configOf} is where the absence becomes a
+ * sentence instead, upstream of every caller.
  */
-function madeHere(config: VendorAuthConfig): boolean {
+function madeHere(config: CheckedAuthConfig): boolean {
   return config.name.trimEnd().endsWith(CONFIG_SUFFIX);
 }
 
@@ -513,15 +865,28 @@ export function buildComposioClient(
     userId: string,
     toolkit: string,
     statuses: VendorAccountStatus[],
-  ) => {
-    const answer = await vendor.connectedAccounts.list({
+  ): Promise<string[]> => {
+    const answered: unknown = await vendor.connectedAccounts.list({
       userIds: [userId],
       toolkitSlugs: [toolkit],
       statuses,
       accountType: "ALL",
       limit: LISTING_LIMIT,
     });
-    return answer.items;
+    /*
+     * CHECKED HERE RATHER THAN AT EITHER CALLER, so that the two questions cannot drift on this.
+     * `isConnected` answers a boolean and `revoke` deletes by id, and an unreadable listing is the
+     * wrong answer to both of them for the same reason — `false` claims somebody has no account for
+     * an app when nobody looked, and a delete without an id claims a withdrawal that never went
+     * out. The ids are all either caller takes, so the listing hands back ids and nothing else.
+     */
+    const items = itemsOf(answered);
+    if (items === null) {
+      throw new BrokerRefusalError(
+        `Composio answered this person's ${toolkit} accounts with ${sent(answered)} where a list of them belongs, so neither whether they are connected nor what there is to withdraw could be read. ${VENDOR_SHAPE_REMEDY}`,
+      );
+    }
+    return items.map((row, position) => accountIdOf(row, position, toolkit));
   };
 
   /**
@@ -538,13 +903,29 @@ export function buildComposioClient(
    * being fixed here is two calls resolving different rows; a total order on the id makes the
    * choice this file makes a stable one, whoever asks and whenever.
    */
-  const configsMadeHere = async (toolkit: string) => {
-    const answer = await vendor.authConfigs.list({
+  const configsMadeHere = async (
+    toolkit: string,
+  ): Promise<CheckedAuthConfig[]> => {
+    const answered: unknown = await vendor.authConfigs.list({
       toolkit,
       limit: LISTING_LIMIT,
       showDisabled: true,
     });
-    return answer.items
+    /*
+     * CHECKED BEFORE THE FILTER AND NOT AFTER IT, which is the order the whole guard turns on. The
+     * filter's question IS the name, so a row checked only once it had been kept would be a row
+     * sorted by a field nobody had read — see {@link madeHere} for what each of the two guesses
+     * costs. Every row therefore passes {@link configOf} first, including the ones that turn out to
+     * belong to an operator's own dashboard work.
+     */
+    const items = itemsOf(answered);
+    if (items === null) {
+      throw new BrokerRefusalError(
+        `Composio answered this deployment's authorization configs for ${toolkit} with ${sent(answered)} where a list of them belongs, so whether one exists is not something this deployment can tell. ${VENDOR_SHAPE_REMEDY}`,
+      );
+    }
+    return items
+      .map((row, position) => configOf(row, position, toolkit))
       .filter(madeHere)
       .sort((one, other) => one.id.localeCompare(other.id));
   };
@@ -607,10 +988,24 @@ export function buildComposioClient(
    * catalogue is this deployment's own job, over the rows below.
    */
   const fetchDirectory = async (): Promise<BrokerApp[]> => {
-    const toolkits = await vendor.toolkits.get({
+    const answered: unknown = await vendor.toolkits.get({
       limit: LISTING_LIMIT,
       sortBy: "usage",
     });
+
+    /*
+     * THE CONTAINER IS SETTLED BEFORE ITS LENGTH IS MEASURED, which is why this sits above the
+     * truncation guard rather than beside the row checks below. `null.length` and `{}.length` are a
+     * crash and an `undefined` respectively, and the second of those is the worse one: it compares
+     * false against the ceiling, sails past the guard, and reaches a `.map` that throws a sentence
+     * naming a vendor method instead of naming the fault.
+     */
+    const toolkits = Array.isArray(answered) ? answered : null;
+    if (toolkits === null) {
+      throw new BrokerRefusalError(
+        `Composio answered the app catalogue with ${sent(answered)} where a list of apps belongs, so there was no directory to show. ${VENDOR_SHAPE_REMEDY}`,
+      );
+    }
 
     if (toolkits.length >= LISTING_LIMIT) {
       /*
@@ -638,30 +1033,24 @@ export function buildComposioClient(
       );
     }
 
-    return toolkits.map((toolkit) => ({
-      slug: toolkit.slug,
-      name: toolkit.name,
-      /*
-       * Each absence becomes the value that reads honestly on an administrator's screen. An empty
-       * description shows as no description; a null logo is the field's documented way of saying
-       * the vendor published none, which renders as a gap rather than as a broken image.
-       *
-       * The categories are the DISPLAY names rather than the slugs, because this list is read by a
-       * person choosing an app and "Productivity" is what they are choosing by.
-       *
-       * A MISSING COUNT BECOMES ZERO, WHICH IS THE ONE IMPERFECT ANSWER HERE. `actionCount` is a
-       * number and the shape offers no way to say "not published", so a toolkit that publishes no
-       * count reads as an app with no actions. It is the conservative direction — it understates
-       * the size of a change rather than overstating it — and Composio publishes a count for every
-       * toolkit measured, so this is a guard against the vendor rather than a routine case.
-       */
-      description: toolkit.meta.description ?? "",
-      logo: toolkit.meta.logo ?? null,
-      categories: (toolkit.meta.categories ?? []).map(
-        (category) => category.name,
-      ),
-      actionCount: toolkit.meta.toolsCount ?? 0,
-    }));
+    /*
+     * Each absence becomes the value that reads honestly on an administrator's screen, and each
+     * PRESENT field that is not what it is declared to be becomes a refusal — see {@link appOf},
+     * where both halves of that and every sentence live. An empty description shows as no
+     * description; a null logo is the field's documented way of saying the vendor published none,
+     * which renders as a gap rather than as a broken image.
+     *
+     * The categories are the DISPLAY names rather than the slugs, because this list is read by a
+     * person choosing an app and "Productivity" is what they are choosing by.
+     *
+     * A MISSING COUNT BECOMES ZERO, WHICH IS THE ONE IMPERFECT ANSWER HERE. `actionCount` is a
+     * number and the shape offers no way to say "not published", so a toolkit that publishes no
+     * count reads as an app with no actions. It is the conservative direction — it understates
+     * the size of a change rather than overstating it — and Composio publishes a count for every
+     * toolkit measured, so this is a guard against the vendor rather than a routine case. A count
+     * that arrives as something other than a number is the different case and is refused.
+     */
+    return toolkits.map(appOf);
   };
 
   const actions: ComposioActions = {
@@ -671,22 +1060,25 @@ export function buildComposioClient(
        * `page` required precisely so that no layer could quietly supply one. See the module
        * comment on what an omitted limit does beyond truncating.
        */
-      const tools = await vendor.tools.getRawComposioTools({
+      const answered: unknown = await vendor.tools.getRawComposioTools({
         toolkits: [toolkit],
         limit: page.limit,
       });
+
+      const tools = Array.isArray(answered) ? answered : null;
+      if (tools === null) {
+        throw new Error(
+          `Composio answered ${toolkit}'s action list with ${sent(answered)} where a list of actions belongs, so the list was not refreshed and the tools already held are untouched. ${VENDOR_SHAPE_REMEDY}`,
+        );
+      }
+
       /*
        * Mapped field by field rather than spread, so what crosses the seam is the four things
        * `./composio` documents and not whatever else the vendor's tool object happens to carry.
-       * `inputParameters` in particular goes straight in front of a model.
+       * `inputParameters` in particular goes straight in front of a model — which is also why
+       * {@link actionOf} checks it rather than passing it on as whatever arrived.
        */
-      return tools.map((tool) => ({
-        slug: tool.slug,
-        description: tool.description,
-        inputParameters: tool.inputParameters,
-        tags: tool.tags,
-        version: tool.version,
-      }));
+      return tools.map((row, position) => actionOf(row, position, toolkit));
     },
 
     async execute(call, args): Promise<ComposioResult> {
@@ -917,6 +1309,35 @@ export function buildComposioClient(
        */
       const config = ours.find((held) => held.status === "ENABLED");
       if (!config) {
+        /*
+         * "DISABLED" IS A CLAIM, AND IT IS ONLY THIS DEPLOYMENT'S TO MAKE WHEN COMPOSIO MADE IT.
+         *
+         * The test above is `=== "ENABLED"`, so everything that is not that word fell through here
+         * — and that is three different states wearing one sentence. A config Composio calls
+         * DISABLED is genuinely disabled and the remedy below is genuinely the remedy. A config
+         * with no status at all, or one carrying a word this deployment's `@composio/core` has
+         * never heard of, is a config whose state is UNKNOWN, and telling an operator it is
+         * disabled sends them to a dashboard to enable something that may already be enabled — and
+         * where it is, they are left with a page insisting on a fact they can see is false and
+         * nothing else to try.
+         *
+         * BOTH ARE STILL A REFUSAL, WHICH IS THE PART THAT DOES NOT CHANGE. Nothing here mints a
+         * link against a config it cannot show is enabled: consent spent against a config that
+         * turns out to be disabled attaches nothing and cannot be spent again without asking the
+         * person to go round the loop a second time. What the status decides is which sentence a
+         * person reads, not whether they are sent.
+         *
+         * The status is quoted where there is one, for the reason {@link named} gives: it is a
+         * closed set of vendor enum names, it carries nobody's data, and it is the one fact an
+         * operator can search a dashboard and a changelog for.
+         */
+        const unreadable = ours.filter((held) => held.status !== "DISABLED");
+        const first = unreadable[0];
+        if (first !== undefined) {
+          throw new BrokerRefusalError(
+            `Composio describes ${unreadable.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${named(first.status)}, which is neither ENABLED nor DISABLED, so whether a connection begun against one could complete is not something this deployment can tell. No link was made, because consent spent against a config that turns out to be disabled attaches nothing. ${VENDOR_SHAPE_REMEDY}`,
+          );
+        }
         throw new BrokerRefusalError(
           `Every authorization config this deployment holds at Composio for ${toolkit} is disabled, so a connection begun against one could not complete. An administrator can enable it in Composio's dashboard, or remove the app on its Plugins page and add it again.`,
         );
@@ -984,8 +1405,8 @@ export function buildComposioClient(
        * than the one behind `isConnected`.
        */
       const accounts = await accountsFor(userId, toolkit, REVOCABLE);
-      const refused = await askForEach(accounts, (account) =>
-        vendor.connectedAccounts.delete(account.id, { revoke_on_delete: true }),
+      const refused = await askForEach(accounts, (id) =>
+        vendor.connectedAccounts.delete(id, { revoke_on_delete: true }),
       );
 
       if (refused.length > 0) {
