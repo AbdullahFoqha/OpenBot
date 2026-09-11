@@ -96,6 +96,15 @@ export type ComposioBroker = {
      * a query or a header would be an open redirect with a consent screen in front of it. The one
      * caller builds it from the deployment's configured app URL and narrows the page within it to
      * a known name, the same way this repository's own OAuth `returnTo` is narrowed.
+     *
+     * AND `string` IS THE WHOLE OF WHAT THE TYPE CAN PROMISE, WHICH IS WHY
+     * {@link brokerReturnUrl} EXISTS. "Required" above means "not optional", and `""`, `"   "` and
+     * `openbot.example.com/settings/...` are all required values: they satisfy this field and
+     * reach the vendor as a callback nobody returns through. Nor can a narrower type fix it — the
+     * address is assembled at run time from an environment variable, so the caller holds a
+     * `string` and every type an ordinary `string` is assignable to admits the empty one too. The
+     * promise this comment makes is therefore kept by the guard below, and a caller hands its
+     * address through that before it hands it here.
      */
     returnUrl: string;
   }): Promise<{ redirectUrl: string }>;
@@ -179,6 +188,78 @@ export class BrokerUnconfiguredError extends BrokerRefusalError {
     );
     this.name = "BrokerUnconfiguredError";
   }
+}
+
+/**
+ * A return address that could not bring anybody back, refused before a consent is spent on it.
+ *
+ * ITS OWN CLASS BECAUSE ITS REMEDY IS ITS OWN. Every other refusal in this file is about Composio —
+ * a key that is not set, a config this deployment never made, a consent the vendor answered with no
+ * page. This one is about this deployment's own address for itself, and the person who can act on it
+ * is an operator with `OPENBOT_APP_URL` in front of them. A caller that could not tell the two apart
+ * would send somebody to check a Composio key that is perfectly fine.
+ *
+ * A {@link BrokerRefusalError} because it keeps that class's promise about the message: the sentence
+ * is written here, names the step that fixes it, and carries no url. Which matters more than usual
+ * for this one — the value it is refusing is the thing a bad message would be tempted to quote, and
+ * an address is the half of a connect link that says which deployment and which person it is for.
+ */
+export class BrokerReturnUrlError extends BrokerRefusalError {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrokerReturnUrlError";
+  }
+}
+
+/**
+ * The address a person comes back to, checked to be one, or a refusal instead of a link.
+ *
+ * BEFORE THE CONSENT RATHER THAN AFTER IT, which is the entire value of doing this at all. Past this
+ * point the next thing that happens is a vendor page and somebody granting a third party access to
+ * their mailbox; a callback that is not a callback is only discovered once they have, by which time
+ * the thing that would tell them what went wrong is on the deployment they can no longer reach. So a
+ * caller that has no usable address gets a refusal in place of a link, and nobody spends a consent.
+ *
+ * TWO REFUSALS, BECAUSE THEY ARE TWO DIFFERENT MISTAKES. An empty address is a caller that built
+ * none — the guard in front of this one did not run, or ran against the wrong value. An address that
+ * is not a web page is a configured one that cannot work: `OPENBOT_APP_URL` set to
+ * `openbot.example.com`, which no browser can resolve from Composio's origin, or to `localhost:3001`,
+ * where `localhost:` is read as the scheme. Both are reachable from the settings this deployment
+ * actually ships — the variable is an environment string and nothing between it and the vendor looks
+ * at it — and both end with the same person on the same hosted page with nowhere to go.
+ *
+ * IT NAMES THE SETTING AND NOT THE VALUE. The setting is the remedy, and it is the same one whether
+ * the address arrived empty or malformed; the value is a page address for one person's connection
+ * and belongs in no message, no log and no audit row, for the reason the connect url does not.
+ *
+ * The address is returned unchanged rather than normalised. Whatever a caller passes is what the
+ * vendor is told and what the person's browser is sent to, so a guard that quietly rewrote it would
+ * be choosing a destination — and choosing where somebody lands holding a just-completed consent is
+ * exactly the decision this seam keeps in one place.
+ */
+export function brokerReturnUrl(returnUrl: string): string {
+  if (returnUrl.trim() === "") {
+    throw new BrokerReturnUrlError(
+      "This deployment built no address for Composio to send you back to, so the connection was not begun rather than begun with nowhere to land. Set OPENBOT_APP_URL to the address this deployment's pages are served from, and connecting an app will have a return leg.",
+    );
+  }
+  if (!isWebAddress(returnUrl)) {
+    throw new BrokerReturnUrlError(
+      "The address Composio would send you back to is not a web address, so a consent granted there would end on Composio's own page with no way back here. Set OPENBOT_APP_URL to this deployment's own origin including the scheme — https://openbot.example.com rather than openbot.example.com.",
+    );
+  }
+  return returnUrl;
+}
+
+/** Whether a browser on somebody else's origin could follow this: absolute, and http or https. */
+function isWebAddress(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "https:" || parsed.protocol === "http:";
 }
 
 /**
