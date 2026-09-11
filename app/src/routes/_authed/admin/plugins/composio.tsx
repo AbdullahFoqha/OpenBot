@@ -102,7 +102,14 @@ function RouteComponent() {
         {/* Pending, error, empty, rows — pending first, so no sentence asserts anything mid-fetch. */}
         {apps.isPending ? null : apps.error ? (
           <p className="mt-4 text-destructive text-sm" role="alert">
-            Composio's app directory could not be read.
+            {/*
+             * The server's own sentence, as the enable failure above already does. A keyless
+             * deployment is refused with one naming COMPOSIO_API_KEY, and that name is the single
+             * thing an operator who reached this URL needs to read; the hardcoded line stays as
+             * the fallback for a failure that arrived carrying no message of its own.
+             */}
+            {apps.error.message ||
+              "Composio's app directory could not be read."}
           </p>
         ) : listed.length === 0 ? (
           <PageEmpty>

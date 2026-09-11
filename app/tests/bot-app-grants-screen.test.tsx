@@ -26,19 +26,26 @@ import {
 import { Route as BotAppRoute } from "@/routes/_authed/admin/plugins/$key_.bots.$agentId";
 
 /**
- * What the per-Bot grant screen says when the plugin list does not come back.
+ * What the per-Bot grant screen draws: which of its three pages a failed read returns, and the one
+ * mark a row carries beyond the action's own name.
  *
- * Same mistake, same shape, as `agent-roster-error.test.tsx`: the screen branched on the app being
+ * Most of it is about the failure. Same mistake, same shape, as `agent-roster-error.test.tsx`: the screen branched on the app being
  * absent from `plugins.data`, and `isPending` goes false on a failed fetch exactly as it does on a
  * successful one — so a request that never came back was rendered as "this deployment has not
  * enabled an app by that name", about an app that may be enabled and granted right now. The Bot
  * half of the same function always got this right (`agents.data && !bot`), which is what made the
  * app half visible.
  *
+ * The last case is no failure at all: the danger mark on a destructive action. It is here because
+ * this is where the harness that draws this screen lives, and it needs both halves — the marked row
+ * and the unmarked one — since `destructive: false` is the vendor making no claim rather than a
+ * claim of safety, and a row that read as reassuring on that evidence would say more than anybody
+ * knows. It draws off the same seeded page as the failed-refetch case above.
+ *
  * `bot-app-grants.test.tsx` is the other half of this screen's coverage and deliberately renders
  * nothing — it asserts the bulk button's set through the exported `readOnlyRefs`. This file has to
- * draw, because what is under test is which of three pages the component returns, so it is its own
- * file rather than a DOM smuggled into that one.
+ * draw, because what is under test is what reaches the page, so it is its own file rather than a
+ * DOM smuggled into that one.
  *
  * THE HARNESS IS THIS REPOSITORY'S, copied from `agent-roster-error.test.tsx` for the reasons
  * recorded there: `GlobalRegistrator` in `beforeAll`/`afterAll`, `cleanup` in `afterEach`, queries
@@ -301,4 +308,54 @@ test("a failed REFETCH keeps the grant list it already had, not the error", asyn
   expect(
     view.queryByText("This deployment has not enabled an app by that name."),
   ).toBeNull();
+});
+
+/**
+ * The actions end of one action's row: its switch, and whatever is drawn beside it.
+ *
+ * Reached through the switch's own label because a row carries no test id, and the label is the
+ * only thing on it that names the action uniquely. The roster never comes back in this file, so the
+ * Bot's name in that label falls back to its id, which is what the screen itself does.
+ */
+function rowActions(view: ReturnType<typeof renderScreen>, name: string) {
+  const actions = view
+    .getByLabelText(`Let ${BOT_ID} call ${name}`)
+    .closest('[data-slot="item-actions"]');
+  if (!actions) throw new Error(`No row drawn for ${name}.`);
+  return actions;
+}
+
+test("an action the vendor calls destructive is marked, and a write it says nothing about is not", async () => {
+  const queryClient = stalePluginsClient(
+    pluginsPage({
+      servers: [
+        server({
+          id: APP_KEY,
+          tools: [
+            tool({ effect: "write", name: "post_message" }),
+            tool({
+              destructive: true,
+              effect: "write",
+              name: "delete_channel",
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+
+  const view = renderScreen(queryClient);
+  await waitForFailedRefetch(queryClient);
+  await view.findByText("delete_channel");
+
+  // The mark itself, on the row that earned it: the heading already says these rows change things,
+  // and this is the one saying what this row changes does not come back.
+  expect(rowActions(view, "delete_channel").textContent).toContain(
+    "destroys things",
+  );
+
+  // The other half, which matters as much. `destructive: false` is the vendor having made no claim,
+  // not a claim that nothing is lost — so nothing at all goes beside this switch. A word here, of
+  // any colour, would be the page vouching for an action on evidence it does not have.
+  expect(rowActions(view, "post_message").textContent).toBe("");
 });
