@@ -182,18 +182,44 @@ const NO_PAGE_REMEDY =
  * `rejects.toThrow(...)` cannot be followed by a second question about the SAME error — which kind
  * it was, what else its sentence does not say — so every refusal assertion that wanted more than
  * one fact about one throw had to settle for the first. This hands the error over instead.
+ *
+ * IT TOLD TWO LIES ABOUT ITS OWN FAILURES, and a helper every refusal in this file is read through
+ * is the last place a wrong answer about what happened should come from.
+ *
+ * `null` WAS BOTH ANSWERS AT ONCE. It was the value the resolve arm produced AND a value the reject
+ * arm can hand back — `Promise.reject(null)` is a rejection, and a vendor stub or an adapter path
+ * that raises a falsy value is exactly the kind of thing the tests below are written to catch — so
+ * a call that REFUSED with one was reported as "The call answered where this test requires it to
+ * have refused." That sends the reader to look for a missing guard when the guard fired. The two
+ * outcomes are now told apart by which arm ran rather than by the value it carried.
+ *
+ * `undefined` WAS RETURNED AS AN `Error` IT IS NOT. The cast made the type check and nothing else:
+ * the caller's very next line reads `.message` off it and the suite fails with the runtime's own
+ * "undefined is not an object", which is the phrasing this file's own {@link A_CRASH}
+ * exists to flag as a crash wearing a refusal's clothes — raised here, in the helper, about the
+ * test rather than about the adapter. A rejection that is not an `Error` has no message to read, so
+ * this says so itself instead of handing the caller something that will.
  */
 async function failureOf(work: Promise<unknown>): Promise<Error> {
-  const raised = await work.then(
-    () => null,
-    (error: unknown) => error,
+  type Outcome = { refused: false } | { refused: true; raised: unknown };
+
+  const outcome = await work.then<Outcome, Outcome>(
+    () => ({ refused: false }),
+    (raised: unknown) => ({ refused: true, raised }),
   );
-  if (raised === null) {
+  if (!outcome.refused) {
     throw new Error(
       "The call answered where this test requires it to have refused.",
     );
   }
-  return raised as Error;
+  if (!(outcome.raised instanceof Error)) {
+    throw new Error(
+      `The call refused with ${
+        outcome.raised === null ? "null" : typeof outcome.raised
+      } rather than with an Error, so there is no message on it for this test to read.`,
+    );
+  }
+  return outcome.raised;
 }
 
 /**

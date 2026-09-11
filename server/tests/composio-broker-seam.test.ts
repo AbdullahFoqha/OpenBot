@@ -67,17 +67,40 @@ describe("brokerReturnUrl", () => {
     }
   });
 
+  /**
+   * THE ADDRESS HANDED IN WAS BUILT ON THE HOST THE REFUSAL QUOTES ON PURPOSE, which left this
+   * assertion verifying one segment of it.
+   *
+   * The sentence names `openbot.example.com` in its own example of the fix — "https://
+   * openbot.example.com rather than openbot.example.com" — and the value this test passed was
+   * `openbot.example.com/settings/...`. So `not.toContain` could only ever have been answered by
+   * the path: a refusal that echoed the host back would have matched the message's own example and
+   * looked, to this test, exactly like one that had not.
+   *
+   * The host is the half that carries the most. `OPENBOT_APP_URL` is an environment string and an
+   * environment string carries whatever was put in it: a customer's name in a tenant subdomain, an
+   * internal hostname that says how this deployment is reached, a preview host with a token in it.
+   * This refusal goes to whoever asked — it is a `BrokerRefusalError`, which is a promise
+   * that the message is safe to show them — so the address must be absent from it as a whole and
+   * in its parts, and the value asked about has to be one no sentence here mentions for its own
+   * reasons.
+   */
   test("says which setting fixes it, and never quotes the address", () => {
+    const address =
+      "openbot-tenant-42.internal.corp/settings/connected-accounts/9f3c";
+
     let thrown: unknown;
     try {
-      brokerReturnUrl("openbot.example.com/settings/connected-accounts/x");
+      brokerReturnUrl(address);
     } catch (error) {
       thrown = error;
     }
 
     const sentence = brokerSentence(thrown);
     expect(sentence).toContain("OPENBOT_APP_URL");
-    expect(sentence).not.toContain("/settings/connected-accounts/x");
+    expect(sentence).not.toContain(address);
+    expect(sentence).not.toContain("openbot-tenant-42.internal.corp");
+    expect(sentence).not.toContain("/settings/connected-accounts/9f3c");
   });
 
   test("hands back the address a configured deployment built", () => {

@@ -31,11 +31,23 @@ import { MAX_RESULT_CHARS } from "../src/plugins/mcp";
 
 afterEach(() => useComposioClient(null));
 
+/**
+ * One call as the vendor received it: the four fields that decide what it MEANS, and the arguments.
+ *
+ * THE ARGUMENTS ARE HERE BECAUSE THE ATTRIBUTION PROPERTY IS ABOUT BOTH HALVES. The recorder used to
+ * take the call record and drop `args` on the floor, so the one test this file exists for — a user
+ * id that comes off the connection and never out of a model's arguments — could only ever see the
+ * half that was already right. `@composio/client` resolves the connected account from the execute
+ * body's `user_id` and carries the model's own arguments beside it in `arguments`
+ * (0.1.0-alpha.76, `resources/tools.d.ts:480-493`), so what a transport sends into the second of
+ * those is as much of the call as what it sends into the first.
+ */
 type Recorded = {
   toolkit: string;
   slug: string;
   userId: string;
   version: string;
+  args: Record<string, unknown>;
 };
 
 /**
@@ -93,8 +105,12 @@ function recording(answers: Partial<ComposioActions> = {}): {
       listActions: answers.listActions ?? (async () => []),
       execute:
         answers.execute ??
-        (async (call) => {
-          calls.push({ ...call });
+        (async (call, args) => {
+          // SNAPSHOTTED RATHER THAN HELD BY REFERENCE, for the reason the schema test snapshots:
+          // `toEqual` against a live reference holds whatever happened to the object afterwards, so
+          // a transport that handed its arguments over and then edited them would be recorded as
+          // having sent whatever it edited them into.
+          calls.push({ ...call, args: structuredClone(args) });
           return answered({ ok: true });
         }),
     },
@@ -670,13 +686,13 @@ describe("listing an app's actions", () => {
     // `refreshTools` commits it as a healthy refresh. No client installed is the SHIPPED state —
     // nothing under `server/src` calls `useComposioClient` — so `[]` here was the only answer a
     // real Composio refresh could produce, and committing it deleted every recorded action.
-    const listing = listTools({ url: "composio://gmail" });
+    const refused = listTools({ url: "composio://gmail" });
 
-    await expect(listing).rejects.toThrow(
+    await expect(refused).rejects.toThrow(
       /not configured for this deployment/i,
     );
 
-    const thrown = (await listing.catch((error: unknown) => error)) as Error;
+    const thrown = (await refused.catch((error: unknown) => error)) as Error;
     expect(thrown.message).toContain("gmail");
     // Not a crash report. No deployment installs a client yet, so an operator reading this has to
     // recognise a state rather than go hunting for a fault.
@@ -704,13 +720,13 @@ describe("listing an app's actions", () => {
       }).client,
     );
 
-    const listing = listTools({ url: "https://example.com" });
+    const refused = listTools({ url: "https://example.com" });
 
     // The two refusals send an operator to different places — one to this deployment's
     // configuration, one to the row — so they must not share a sentence.
-    await expect(listing).rejects.toThrow(/does not name a Composio app/i);
+    await expect(refused).rejects.toThrow(/does not name a Composio app/i);
 
-    const thrown = (await listing.catch((error: unknown) => error)) as Error;
+    const thrown = (await refused.catch((error: unknown) => error)) as Error;
     expect(thrown.message).not.toMatch(/not configured/i);
     expect(thrown.message).toContain("https://example.com");
     expect(asked).toEqual([]);
@@ -739,14 +755,14 @@ describe("listing an app's actions", () => {
       }).client,
     );
 
-    const listing = listTools({ url: "composio://gmail" });
+    const refused = listTools({ url: "composio://gmail" });
 
     // Propagated rather than answered empty, because `refreshTools` records a throw in `lastError`
     // and leaves the tools it already holds alone. An empty answer would read as an app that has no
     // actions, and every grant would point at a name nothing advertises.
-    await expect(listing).rejects.toThrow(/did not match/i);
+    await expect(refused).rejects.toThrow(/did not match/i);
 
-    const thrown = await listing.catch((error: unknown) => error);
+    const thrown = await refused.catch((error: unknown) => error);
     expect(String((thrown as Error).message)).not.toContain("invalid_type");
     expect(String((thrown as Error).message)).toContain("gmail");
   });
@@ -1002,7 +1018,9 @@ describe("listing an app's actions", () => {
      */
     for (const thrown of [
       Object.assign(
-        new Error("Gmail rejected the query: from: is not a search operator."),
+        new Error(
+          "Composio's gmail gateway rejected the query: from: is not a search operator.",
+        ),
         { issues: ["from: is not a search operator."] },
       ),
       Object.assign(new Error("Composio rejected the request for gmail."), {
@@ -1022,7 +1040,15 @@ describe("listing an app's actions", () => {
         (error: unknown) => (error as Error).message,
       );
 
-      expect(message).toContain("rejected");
+      // PINNED WHOLE RATHER THAN BY THE ONE WORD EVERY CANDIDATE ANSWER CONTAINS. "rejected" is in
+      // the fixture, so it survived the sentence being wrapped, prefixed or cut short — and both
+      // of the answers this branch must not give, the upgrade advice and "Composio did not answer
+      // with an action list for gmail.", are sentences a fragment check cannot tell from this one.
+      expect(message).toBe(thrown.message);
+      // And it names the row the operator is looking at, which is what every sibling refusal on
+      // this path asserts and this one did not: `refreshTools` writes this string into `lastError`
+      // and an administrator reads it off the Plugins page beside a list of apps.
+      expect(message).toContain("gmail");
       expect(message).not.toMatch(/upgrad/i);
     }
   });
@@ -1114,6 +1140,7 @@ describe("calling one action", () => {
         slug: "GMAIL_FETCH_EMAILS",
         userId: "user_asker",
         version: "20260903_00",
+        args: { query: "is:unread" },
       },
     ]);
     expect(result.isError).toBe(false);
@@ -1202,19 +1229,85 @@ describe("calling one action", () => {
     expect(result.text).toMatch(/only if Composio publishes/i);
   });
 
-  test("an actor named in the arguments is ignored, whichever way it is spelled", async () => {
+  test("the version goes out without its padding, and padding alone is no version", async () => {
+    /*
+     * THE CALL SIDE OF A TRIM THE LISTING SIDE ALREADY TESTS. "a version made only of whitespace is
+     * recorded as no version at all" pins what `listTools` writes; nothing pinned what `callTool`
+     * sends, so the `.trim()` here could be deleted with the whole suite green.
+     *
+     * BOTH HALVES OF IT MATTER AND THEY FAIL DIFFERENTLY. A padded version forwarded as it arrived
+     * is a string Composio does not match to any revision of the action — the call fails at the
+     * vendor, wearing the vendor's words, for a fault that is this deployment's. A version made
+     * only of padding is not a version at all, and read as one it sends `"   "` where the module's
+     * own refusal says there is nothing to fall back on; the recorded-version guard is the thing
+     * that keeps that off the wire, and it is the trim that lets the guard see it.
+     *
+     * The same two shapes the listing side uses, reached from the other end: `mcp_tools` holds what
+     * `listTools` wrote, and `store.ts` hands it back through `__version` on the next call.
+     */
     const { client, calls } = recording();
     useComposioClient(client);
 
-    await callTool(
+    const padded = await callTool(
       { url: "composio://gmail", actorId: "user_asker" },
       "GMAIL_FETCH_EMAILS",
-      {
-        userId: "user_victim",
-        user_id: "user_victim",
-        entityId: "user_victim",
-        __version: "20260903_00",
-      },
+      { __version: " 20260903_00\n" },
+    );
+
+    expect(padded.isError).toBe(false);
+    expect(calls.map((call) => call.version)).toEqual(["20260903_00"]);
+
+    const blank = await callTool(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "   " },
+    );
+
+    expect(blank.isError).toBe(true);
+    expect(blank.text).toMatch(/no recorded version/i);
+    // Refused before dialling, which is the half a message match cannot show: nothing was added to
+    // the record above.
+    expect(calls).toHaveLength(1);
+  });
+
+  test("an actor named in the arguments is ignored, whichever way it is spelled", async () => {
+    /*
+     * THE HEADLINE PROPERTY OF THIS FILE, AND IT WAS ASSERTED OF HALF THE CALL. The recorder's
+     * default `execute` dropped the arguments, so what this test could see was the call record's
+     * own `userId` — the half a transport gets right by construction, because it is the field it
+     * fills from the connection. What it could not see was the object actually forwarded to the
+     * vendor, which is where a model's three spellings of an identity live and where the vendor
+     * reads `arguments` from. Both halves go out on one request, so both halves are the claim.
+     *
+     * ASSERTED AS THE WHOLE CALL rather than field by field, the way the adapter suite's own
+     * attribution test is ("a call that runs carries the person, the version and the arguments"):
+     * an EXTRA field on this request is as much a finding as a wrong one, and a per-field check is
+     * blind to every one of them.
+     *
+     * THE THREE SPELLINGS TRAVEL ON AS ARGUMENTS, which is the correct outcome and not an
+     * oversight. They are the model's own arguments; the vendor is the party that decides what an
+     * action's `userId` parameter means, and stripping keys by name would be this module reading
+     * `args` for an identity — the very thing that makes the property structural rather than
+     * merely checked. What must never happen is one of them reaching the field beside them.
+     *
+     * THE PERSON IS NAMED AFTER NOTHING ELSE IN THIS FILE, which is what makes the assertion able
+     * to tell attribution from coincidence: `user_asker` is the house id every other call here
+     * uses, so it is exactly the literal a transport that had stopped reading the connection would
+     * most plausibly be hard-coded to.
+     */
+    const { client, calls } = recording();
+    useComposioClient(client);
+
+    const spelled = {
+      userId: "user_victim",
+      user_id: "user_victim",
+      entityId: "user_victim",
+    };
+
+    await callTool(
+      { url: "composio://gmail", actorId: "user_whose_mailbox_this_is" },
+      "GMAIL_FETCH_EMAILS",
+      { ...spelled, query: "is:unread", __version: "20260903_00" },
     );
 
     // The identity is not a field a model fills. This is the defect OpenTag got wrong three times,
@@ -1223,27 +1316,42 @@ describe("calling one action", () => {
       {
         toolkit: "gmail",
         slug: "GMAIL_FETCH_EMAILS",
-        userId: "user_asker",
+        userId: "user_whose_mailbox_this_is",
         version: "20260903_00",
+        args: { ...spelled, query: "is:unread" },
       },
     ]);
   });
 
   test("a call with nobody attributed refuses and reaches nothing", async () => {
-    const { client, calls } = recording();
-    useComposioClient(client);
+    /*
+     * AN ACTOR MADE OF PADDING IS NOBODY, and that is the half of this guard nothing was asking.
+     * Only the absent key was tested, so the `.trim()` in front of the check could be deleted with
+     * the suite green — and what it keeps out is worse than an absent id, not better: `" "` is a
+     * user id Composio will happily look up, find no connected account for, and refuse. The call
+     * would then read as somebody's lapsed connection rather than as a run this deployment never
+     * attributed to anybody, which sends the person who reads it to the wrong page.
+     *
+     * The shapes are the ones an identifier arrives as when something upstream had nothing to put
+     * in it: a column read back empty, a header that was sent blank, a value assembled by a shell.
+     */
+    for (const actorId of [undefined, "", "   ", "\n\t "]) {
+      const { client, calls } = recording();
+      useComposioClient(client);
 
-    const result = await callTool(
-      { url: "composio://gmail" },
-      "GMAIL_FETCH_EMAILS",
-      {
-        __version: "20260903_00",
-      },
-    );
+      const result = await callTool(
+        { url: "composio://gmail", actorId },
+        "GMAIL_FETCH_EMAILS",
+        {
+          __version: "20260903_00",
+        },
+      );
 
-    expect(result.isError).toBe(true);
-    expect(result.text).toMatch(/not attributed to anybody/i);
-    expect(calls).toEqual([]);
+      const named = JSON.stringify(actorId ?? null);
+      expect(`${named}: ${result.isError}`).toBe(`${named}: true`);
+      expect(result.text).toMatch(/not attributed to anybody/i);
+      expect(calls).toEqual([]);
+    }
   });
 
   test("a thrown failure is reported with the vendor's own sentence", async () => {
@@ -1283,23 +1391,52 @@ describe("calling one action", () => {
     expect(result.text).not.toContain("x-request-id");
   });
 
-  test("a failure with no vendor sentence falls back to the thrown message", async () => {
-    useComposioClient(
-      recording({
-        execute: async () => {
-          throw new Error("composio unreachable");
-        },
-      }).client,
-    );
+  test("a failure with no vendor sentence falls back to the thrown message, whole", async () => {
+    /*
+     * WHY THIS ONE REFUSAL NAMES NEITHER THE ACTION NOR A REMEDY, which every sibling around it
+     * does and which this test used to accept without saying anything about.
+     *
+     * `toContain` accepted the current answer and would have accepted any of the wrong ones too: a
+     * sentence with this deployment's generic advice bolted on, one cut short of the vendor's
+     * words, one with the action's name prefixed. So what the fallback actually IS was pinned by
+     * nobody, and the difference between the branches is the whole subject of this describe.
+     *
+     * THE RULE THE MODULE FOLLOWS IS THAT THE WORDS THAT WERE SAID BEAT THE WORDS WE WOULD INVENT,
+     * and it is the same rule `listingSentence` follows on the other path. `unexplained` — which
+     * names the action and sends the reader to the Plugins page — is what the two sibling tests
+     * below assert, and it is reached only where the vendor said NOTHING usable: an empty message,
+     * or the placeholder. A transport fault that came with a diagnosis is not that case, and
+     * replacing "composio unreachable" with "check that this app is still connected" would be
+     * exactly the wrong advice at exactly the wrong moment — the connection is fine and Composio
+     * is down. The action's name is in `store.ts`'s audit row beside this sentence either way, and
+     * the model reading it has just called the action.
+     *
+     * So this refusal carrying neither is deliberate, and the test now says so by pinning the
+     * answer WHOLE rather than by looking for a fragment inside whatever arrived.
+     *
+     * THE PADDED ONE IS HERE BECAUSE THE TRIM IS. What comes back is measured by the cap and read
+     * by a person, and the module already decided this string was worth passing on — with the
+     * padding dropped, the way `vendorSentence` drops it.
+     */
+    for (const thrown of ["composio unreachable", "  composio unreachable\n"]) {
+      useComposioClient(
+        recording({
+          execute: async () => {
+            throw new Error(thrown);
+          },
+        }).client,
+      );
 
-    const result = await callTool(
-      { url: "composio://gmail", actorId: "user_asker" },
-      "GMAIL_FETCH_EMAILS",
-      { __version: "20260903_00" },
-    );
+      const result = await callTool(
+        { url: "composio://gmail", actorId: "user_asker" },
+        "GMAIL_FETCH_EMAILS",
+        { __version: "20260903_00" },
+      );
 
-    expect(result.isError).toBe(true);
-    expect(result.text).toContain("composio unreachable");
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe("composio unreachable");
+      expect(result.truncated).toBe(false);
+    }
   });
 
   test("a result is capped visibly rather than silently", async () => {
@@ -1437,7 +1574,11 @@ describe("calling one action", () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(result.text).not.toBe("Error executing the tool GMAIL_FETCH_EMAILS");
+    // ASKED OF THE WHOLE STRING, the way the listing-side sibling asks it. A not-equals only
+    // refuses the placeholder standing alone, so a refusal that carried it in the middle of a
+    // sentence — "GMAIL_FETCH_EMAILS failed: Error executing the tool GMAIL_FETCH_EMAILS" — is the
+    // same useless words in a model's context and in the audit row, and passed.
+    expect(result.text).not.toMatch(/error executing the tool/i);
     expect(result.text).toMatch(/Plugins page/);
   });
 
@@ -1587,25 +1728,38 @@ describe("calling one action", () => {
     expect(result.text).not.toContain("m1");
   });
 
-  test("an empty error beside a success is still a success", async () => {
-    // The other side of the rule, and the reason it is worded as a SENTENCE rather than as a
-    // present field: `successful: !response.error` treats `""` as success, so an empty string is
-    // the vendor saying nothing went wrong in the least committal way available to it.
-    useComposioClient(
-      recording({
-        execute: async () =>
-          answered({ messages: [] }, { successful: true, error: "" }),
-      }).client,
-    );
+  test("an error made of nothing but padding beside a success is still a success", async () => {
+    /*
+     * The other side of the rule, and the reason it is worded as a SENTENCE rather than as a
+     * present field: `successful: !response.error` treats `""` as success, so an empty string is
+     * the vendor saying nothing went wrong in the least committal way available to it.
+     *
+     * THE PADDED ONES ARE THE HALF THAT WAS UNASSERTED. Only `""` was here, so the `.trim()` that
+     * decides whether this field says anything could be deleted with the suite green — and what it
+     * would cost is the worst outcome on this path: a newline in `error` read as a complaint turns
+     * a call that worked into a reported failure, the action's own data is withheld from the model
+     * as content, and `store.ts` audits a failure against a call the vendor was perfectly happy
+     * with. A blank field is not a sentence here for the same reason it is not one in
+     * `vendorSentence`.
+     */
+    for (const error of ["", "   ", "\n\t", "\r\n "]) {
+      useComposioClient(
+        recording({
+          execute: async () =>
+            answered({ messages: [] }, { successful: true, error }),
+        }).client,
+      );
 
-    const result = await callTool(
-      { url: "composio://gmail", actorId: "user_asker" },
-      "GMAIL_FETCH_EMAILS",
-      { __version: "20260903_00" },
-    );
+      const result = await callTool(
+        { url: "composio://gmail", actorId: "user_asker" },
+        "GMAIL_FETCH_EMAILS",
+        { __version: "20260903_00" },
+      );
 
-    expect(result.isError).toBe(false);
-    expect(result.text).toBe(JSON.stringify({ messages: [] }, null, 2));
+      const named = JSON.stringify(error);
+      expect(`${named}: ${result.isError}`).toBe(`${named}: false`);
+      expect(result.text).toBe(JSON.stringify({ messages: [] }, null, 2));
+    }
   });
 
   test("a list where the envelope should be is refused, not called an empty success", async () => {
@@ -1932,7 +2086,11 @@ describe("calling one action", () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(result.text).not.toMatch(/^error executing the tool/i);
+    // ANCHORED TO NOTHING, for the reason above: the module's own `VENDOR_PLACEHOLDER` is anchored
+    // because it is deciding whether a string IS the placeholder, and this is asking whether a
+    // refusal CARRIES it. A start-anchored question of the answer lets it through anywhere but the
+    // first character.
+    expect(result.text).not.toMatch(/error executing the tool/i);
     expect(result.text).toMatch(/Plugins page/);
   });
 
