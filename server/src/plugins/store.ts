@@ -2398,7 +2398,10 @@ export function createPluginStore(options: PluginStoreOptions) {
      * — Composio keeps the accounts and the deployment sends a user id — so the only thing standing
      * between a person and their mailbox is a `composio_connections` row, and that table references
      * nothing that would cascade it. Removing the app therefore left every one of them behind, and
-     * adding the app back turned them live again without anybody being asked. That row goes too.
+     * adding the app back turned them live again without anybody being asked. That row goes too —
+     * and before it goes, the account it stands for is ended at Composio, because clearing the row
+     * alone shuts a gate and leaves the mailbox attached. The deployment's auth config for the app
+     * goes last, once nobody is connected to it any more.
      *
      * The revokes go first. These are writes on two tables and the store exposes no transaction that
      * spans both, so the order decides what a failure between them leaves: revoke-then-delete leaves
@@ -2526,19 +2529,65 @@ export function createPluginStore(options: PluginStoreOptions) {
        * two writes leaves has to be the recoverable half. A connection cleared with the app still
        * present is fixed by removing it again; an app deleted with the connections standing is
        * reachable by no operation at all, because the toolkit was only ever readable off its url.
+       *
+       * AND THE ACCOUNT IS ENDED AT THE VENDOR, not merely forgotten here. Deleting the row closes
+       * the gate this deployment owns and does nothing whatever to the account: the person's
+       * mailbox stays attached at Composio, the grant stays live, and an administrator who pressed
+       * "remove" was told the connector was gone. So every connected person is revoked through the
+       * broker first, exactly as {@link disconnectBrokered} revokes for one — the same
+       * shape at the scale of an app.
+       *
+       * REVOKE BEFORE DELETE, ALWAYS, and the argument is the one that method makes. The row is the
+       * only thing here that names which app this person connected, so a delete that ran first
+       * would leave a failed revoke with nothing to revoke under: a live grant on somebody's
+       * mailbox that no operation in this deployment can reach. The other order costs a repeat of
+       * an administrative act nobody minds repeating. Dead and reachable beats live and
+       * unreachable.
+       *
+       * WHICH MAKES THE FAILURE LOUD. Nothing is caught around the revokes: a broker that will not
+       * answer ends this method with the rows still standing and the app still present, rather than
+       * letting it report an ending that did not happen.
+       *
+       * THE AUTH CONFIG GOES LAST, after every account is dead and every row is gone, for the same
+       * reasoning one step out. An orphaned auth config grants nobody anything — it is a shape this
+       * deployment holds at Composio, not an account — while a live account whose config has
+       * already been deleted is access that nothing left here can end.
        */
       const toolkit = existing ? accessFor(existing, null).toolkit : null;
 
       if (toolkit) {
+        /*
+         * Read before anything is deleted, because the revokes below need the people and the rows
+         * are where the people are. Sorted, so two removals of the same app revoke in the same
+         * order and write their trail rows in the same order.
+         */
         const connected = await database
-          .delete(composioConnections)
+          .select({ userId: composioConnections.userId })
+          .from(composioConnections)
           .where(eq(composioConnections.toolkit, toolkit))
-          .returning({ userId: composioConnections.userId });
+          .orderBy(asc(composioConnections.userId));
 
-        // Sorted, so two removals of the same app write their rows in the same order.
-        for (const connection of connected.sort((left, right) =>
-          left.userId.localeCompare(right.userId),
-        )) {
+        /*
+         * What the broker actually did for each of them, kept so the trail below records the
+         * answer rather than the attempt. False where there is no broker at all: a deployment whose
+         * key has since been unset can still remove the app, and it could not have been calling it
+         * either way — but nothing was ended at Composio and the row must not claim otherwise.
+         */
+        const vendorRevoked = new Map<string, boolean>();
+        for (const connection of connected) {
+          vendorRevoked.set(
+            connection.userId,
+            broker
+              ? await broker.revoke({ userId: connection.userId, toolkit })
+              : false,
+          );
+        }
+
+        await database
+          .delete(composioConnections)
+          .where(eq(composioConnections.toolkit, toolkit));
+
+        for (const connection of connected) {
           await recordAuditEvent(auditStore, {
             eventType: "mcp.account_disconnected",
             targetType: "mcp_server",
@@ -2570,14 +2619,20 @@ export function createPluginStore(options: PluginStoreOptions) {
               // administrator took the whole app away and the person did nothing.
               reason: "mcp_server_removed",
               /*
-               * False, and said out loud. This closed the gate this deployment owns; the account
-               * the person connected is still connected at Composio, and only they or an operator
-               * of that broker can end it. A row implying otherwise would be worse than no row.
+               * What happened, not what was attempted — {@link ComposioBroker.revoke}'s own
+               * answer, passed through. True where a grant was withdrawn, false where there was
+               * none to withdraw or where this deployment has no broker to have asked. The value
+               * of the field is exactly that a reader can tell a grant this deployment ended from
+               * one that outlives it somewhere else, so a constant here would be worse than none.
                */
-              vendorRevoked: false,
+              vendorRevoked: vendorRevoked.get(connection.userId) ?? false,
             },
           });
         }
+
+        // Last of all, for the reason above, and skipped entirely on a deployment with no
+        // broker to have made one.
+        if (broker) await broker.deleteAuthConfig(toolkit);
       }
 
       await database.delete(mcpServers).where(eq(mcpServers.id, serverId));

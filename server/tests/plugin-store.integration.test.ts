@@ -6056,8 +6056,20 @@ test("enabling an app with no broker says which setting is missing", async () =>
  * the test's own functions, so a test that needs to know what a row looked like at the moment of
  * the call reads it inside its own handler — the same way the enablement test above establishes
  * that the auth config comes before the row.
+ *
+ * AND THE ENTRY NAMES WHOSE CALL IT WAS, where the call has an owner. A path that revokes for one
+ * person is fully described by `revoke`; a path that revokes for everybody connected to an app is
+ * not, because "two revokes happened" says nothing about who they were for and nothing about the
+ * order they went out in — and the order is what makes a removal repeatable. So the request's
+ * `userId` is appended where there is one, and calls that are about the deployment rather than a
+ * person (`deleteAuthConfig`) stay bare.
  */
 function brokerSpy(answers: {
+  ensureAuthConfig?: (config: {
+    toolkit: string;
+    name: string;
+  }) => Promise<void>;
+  deleteAuthConfig?: (toolkit: string) => Promise<void>;
   isConnected?: (request: {
     userId: string;
     toolkit: string;
@@ -6074,7 +6086,14 @@ function brokerSpy(answers: {
     what: string,
   ) => {
     return async (request: Request): Promise<Answer> => {
-      order.push(name);
+      const owner =
+        typeof request === "object" &&
+        request !== null &&
+        "userId" in request &&
+        typeof request.userId === "string"
+          ? `:${request.userId}`
+          : "";
+      order.push(`${name}${owner}`);
       if (!handler)
         throw new Error(`the connection path asked the broker to ${what}`);
       return await handler(request);
@@ -6085,8 +6104,16 @@ function brokerSpy(answers: {
     order,
     broker: {
       listApps: unasked("list the catalogue"),
-      ensureAuthConfig: unasked("create an auth config"),
-      deleteAuthConfig: unasked("delete an auth config"),
+      ensureAuthConfig: asked(
+        "ensureAuthConfig",
+        answers.ensureAuthConfig,
+        "create an auth config",
+      ),
+      deleteAuthConfig: asked(
+        "deleteAuthConfig",
+        answers.deleteAuthConfig,
+        "delete an auth config",
+      ),
       authorize: unasked("begin somebody's connection"),
       isConnected: asked(
         "isConnected",
@@ -6135,7 +6162,7 @@ test("a brokered connection row is written only where the vendor says the accoun
   const connection = await store.brokeredConnection(pair);
   expect(connection?.connectedAt).toBeTruthy();
 
-  expect(order).toEqual(["isConnected", "isConnected"]);
+  expect(order).toEqual(["isConnected:user_asker", "isConnected:user_asker"]);
   const connected = auditStore
     .recorded()
     .filter((event) => event.eventType === "mcp.account_connected");
@@ -6178,7 +6205,7 @@ test("confirming a brokered connection the vendor no longer has removes the row"
   });
 
   expect(await store.brokeredConnection(pair)).toBeNull();
-  expect(order).toEqual(["isConnected"]);
+  expect(order).toEqual(["isConnected:user_asker"]);
   expect(auditStore.recorded()).toHaveLength(0);
 });
 
@@ -6217,7 +6244,11 @@ test("confirming a brokered connection already recorded writes no second trail r
     connected: true,
   });
 
-  expect(order).toEqual(["isConnected", "isConnected", "isConnected"]);
+  expect(order).toEqual([
+    "isConnected:user_asker",
+    "isConnected:user_asker",
+    "isConnected:user_asker",
+  ]);
   // Unmoved, because the person connected when they connected: the confirms above are page loads.
   expect(await store.brokeredConnection(pair)).toEqual(first);
   expect(
@@ -6266,7 +6297,7 @@ test("disconnecting a brokered connection revokes at the vendor before the row g
 
   expect(outcome).toEqual({ vendorRevoked: true });
   expect(rowsWhenRevoked).toEqual(["user_asker"]);
-  expect(order).toEqual(["revoke"]);
+  expect(order).toEqual(["revoke:user_asker"]);
   expect(await store.brokeredConnection(pair)).toBeNull();
 
   const disconnected = auditStore
@@ -6362,7 +6393,7 @@ test("a brokered disconnect that withdrew no grant records that it withdrew none
     }),
   ).toEqual({ vendorRevoked: false });
 
-  expect(order).toEqual(["revoke"]);
+  expect(order).toEqual(["revoke:user_asker"]);
   // Gone, because there was nothing at the vendor and the row was therefore the half that had
   // drifted. Keeping it would leave the gate on every brokered call passing for an account that
   // no longer exists anywhere.
@@ -6430,4 +6461,184 @@ test("a brokered connection is not listed against a server row whose url names a
   await seedComposioGmail(database, store, { url: "composio://slack" });
 
   expect(await store.brokeredConnectionsFor("user_asker")).toEqual([]);
+});
+
+/**
+ * Removing an app ends every account at the vendor, and only then forgets where they were.
+ *
+ * CRITERION. `removeServer` on a brokered row revokes at the broker for every connected person
+ * while their rows are still standing, deletes the rows after that, and drops the deployment's
+ * auth config last of all — and the trail says of each person that the grant was really withdrawn.
+ *
+ * REASON. Clearing `composio_connections` closes the gate this deployment owns and nothing else:
+ * the account the person attached is still live at Composio, and an administrator who pressed
+ * "remove" was not told they had left it there. So the removal ends the accounts too, and the
+ * order is forced. A brokered row's toolkit is readable off nothing but the row, so delete-first
+ * and a revoke that then fails leaves a live grant on somebody's mailbox with no value left here
+ * to revoke it under; revoke-first and the same failure leaves the app present, every account
+ * dead, and removing again finishes the job. Dead-and-reachable beats live-and-unreachable.
+ *
+ * THE AUTH CONFIG GOES LAST for the same reasoning one step out. An orphaned auth config grants
+ * nobody anything — it is a shape this deployment holds at Composio, not an account — while a live
+ * account whose config has already gone is access nobody here can end.
+ *
+ * ASSERTED ON WHAT EACH CALL SAW, not on a count. Counting says nothing about order, and the order
+ * is the entire property: an implementation that deleted the rows first and revoked off what the
+ * delete returned would make exactly the same calls in exactly the same sequence.
+ *
+ * THE PEOPLE CONNECT IN REVERSE, `user-b` before `user-a`, so that the sorted revoke is doing work
+ * rather than agreeing with the insertion order by luck.
+ */
+test("removing an app revokes everybody, then clears rows, then drops the config", async () => {
+  /** Who was still connected to `linear` at the moment of each broker call, in call order. */
+  const connectedWhenAsked: string[][] = [];
+  const stillConnected = async () =>
+    (
+      await database
+        .select({ userId: composioConnections.userId })
+        .from(composioConnections)
+        .where(eq(composioConnections.toolkit, "linear"))
+        .orderBy(asc(composioConnections.userId))
+    ).map((row) => row.userId);
+
+  const { broker, order } = brokerSpy({
+    ensureAuthConfig: async () => {},
+    isConnected: async () => true,
+    revoke: async () => {
+      connectedWhenAsked.push(await stillConnected());
+      return true;
+    },
+    deleteAuthConfig: async () => {
+      connectedWhenAsked.push(await stillConnected());
+    },
+  });
+  const { store, database, auditStore } = await freshStore({ broker });
+  useComposioClient({
+    listActions: async () => [
+      {
+        slug: "LINEAR_CREATE_ISSUE",
+        description: "Create an issue.",
+        inputParameters: { type: "object", properties: {} },
+        tags: ["createHint"],
+        version: "20260903_00",
+      },
+    ],
+    execute: async () => vendorAnswered(),
+  });
+
+  /*
+   * This fixture's own ids, checked here because the guard at the top of the file does not cover
+   * them: `composio-linear` and the pairs at `linear` are spelled the way production spells them,
+   * so a row already sitting at one belongs to somebody else and the cleanup below would take it.
+   */
+  const [present] = await database
+    .select({ id: mcpServers.id })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, "composio-linear"));
+  const strangers = await database
+    .select({ userId: composioConnections.userId })
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, "linear"),
+        inArray(composioConnections.userId, ["user-a", "user-b"]),
+      ),
+    );
+  if (present || strangers.length > 0) {
+    throw new Error(
+      "a 'composio-linear' server row or a 'linear' connection for user-a or user-b was already " +
+        "here, so it is not this test's to write over",
+    );
+  }
+
+  try {
+    await store.addBrokeredApp({
+      slug: "linear",
+      title: "Linear",
+      by: "admin",
+    });
+    for (const userId of ["user-b", "user-a"]) {
+      expect(
+        await store.confirmBrokeredConnection({ toolkit: "linear", userId }),
+      ).toEqual({ connected: true });
+    }
+
+    // The setup's own traffic, cleared so what follows is about the removal and nothing else.
+    order.length = 0;
+    connectedWhenAsked.length = 0;
+
+    await store.removeServer("composio-linear", "admin");
+
+    expect(order).toEqual([
+      "revoke:user-a",
+      "revoke:user-b",
+      "deleteAuthConfig",
+    ]);
+    /*
+     * Both revokes found both rows, and the auth config was dropped with none left. This is the
+     * ordering the call list above cannot see: revoking off the rows a delete had already returned
+     * would produce that same list while leaving nothing to revoke under if the broker refused.
+     */
+    expect(connectedWhenAsked).toEqual([
+      ["user-a", "user-b"],
+      ["user-a", "user-b"],
+      [],
+    ]);
+
+    expect(
+      await store.brokeredConnection({ toolkit: "linear", userId: "user-a" }),
+    ).toBeNull();
+    expect(
+      await store.brokeredConnection({ toolkit: "linear", userId: "user-b" }),
+    ).toBeNull();
+
+    const disconnected = auditStore
+      .recorded()
+      .filter((event) => event.eventType === "mcp.account_disconnected");
+    expect(disconnected).toHaveLength(2);
+    expect(disconnected.map((event) => event.targetId)).toEqual([
+      // The app, not the server row's id, because that is what a brokered connection is keyed on
+      // and the id is gone by the time anybody reads back.
+      "linear",
+      "linear",
+    ]);
+    expect(disconnected.map((event) => event.payload)).toEqual([
+      {
+        actor: "admin",
+        server: "linear",
+        owner: "user-a",
+        // Not "they disconnected" and not "they were removed": an administrator took the whole
+        // app away and the person did nothing.
+        reason: "mcp_server_removed",
+        /*
+         * True, and true because the broker said so rather than because the call returned. This
+         * is the whole change: the row used to say `false` here whatever happened, which was
+         * honest only while the removal left every account live at Composio.
+         */
+        vendorRevoked: true,
+      },
+      {
+        actor: "admin",
+        server: "linear",
+        owner: "user-b",
+        reason: "mcp_server_removed",
+        vendorRevoked: true,
+      },
+    ]);
+  } finally {
+    await database
+      .delete(mcpTools)
+      .where(eq(mcpTools.serverId, "composio-linear"));
+    await database
+      .delete(mcpServers)
+      .where(eq(mcpServers.id, "composio-linear"));
+    await database
+      .delete(composioConnections)
+      .where(
+        and(
+          eq(composioConnections.toolkit, "linear"),
+          inArray(composioConnections.userId, ["user-a", "user-b"]),
+        ),
+      );
+  }
 });
