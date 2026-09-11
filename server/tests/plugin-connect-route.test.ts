@@ -44,9 +44,10 @@ function app(store: {
       /*
        * The read that decides whether this is a brokered row, which the handler makes before
        * anything about the consent flow. None of these vendors is one: a brokered app is reached
-       * through Composio and enters none of the flow these tests are about.
+       * through Composio and enters none of the flow these tests are about. `undefined` is an id
+       * naming no row, which falls through to the flow below exactly as a non-brokered row does.
        */
-      listServers: async () => [],
+      serverAddress: async () => undefined,
       ...store,
     } as never,
     signedIn(),

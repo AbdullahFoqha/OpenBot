@@ -483,10 +483,11 @@ export function createPluginRoutes(
    * {@link BrokerUnconfiguredError}'s own message is what is sent rather than a sentence written
    * here.
    *
-   * `enabled` comes off `toolkitOf(server.url)` and never off the row's id. The url is where the
+   * `enabled` comes off `toolkitOf(url)` and never off the row's id. The url is where the
    * transport reads which app a call is against, so it is the only reading that decides anything;
    * the id names the row — `composio-linear` — and reading one as the other would quietly work
-   * until somebody renamed a row.
+   * until somebody renamed a row. `serverUrls` hands over the urls and nothing else, which is that
+   * property made structural: there is no id here to read by mistake.
    */
   routes.get("/composio/apps", requireUser, async (context) => {
     /*
@@ -523,8 +524,8 @@ export function createPluginRoutes(
       : directory;
 
     const enabled = new Set(
-      (await store.listServers())
-        .map((server) => toolkitOf(server.url))
+      (await store.serverUrls())
+        .map((url) => toolkitOf(url))
         .filter((toolkit): toolkit is string => toolkit !== null),
     );
     return context.json({
@@ -687,10 +688,14 @@ export function createPluginRoutes(
      * The app comes off the row's url via `toolkitOf` rather than off its id, for the reason the
      * directory route says: the url is where the transport reads which app a call is against, and
      * the id is a row name that happens to look similar.
+     *
+     * ONE ROW, BY ID. Every request to this route pays for this read, including the ones that fall
+     * through to the OAuth flow below, because the branch cannot be taken until the row is in hand
+     * — so what it costs has to be a lookup of three columns rather than the whole plugin surface.
+     * `serverAddress` answering `undefined` is an id naming no row, which falls through exactly as
+     * a missing row did when this was a `.find`.
      */
-    const row = (await store.listServers()).find(
-      (server) => server.id === serverId,
-    );
+    const row = await store.serverAddress(serverId);
     const toolkit = row ? toolkitOf(row.url) : null;
     if (row && toolkit) {
       if (!composio) {
@@ -908,6 +913,11 @@ export function createPluginRoutes(
    * the connect branch above both give: the url is where the transport reads which app a call is
    * against, and the id is a row name that happens to look similar.
    *
+   * ONE ROW, BY ID, AND CONFIRM IS WHY. Both brokered account screens call that route from an
+   * effect when they mount, so this read runs on every page load — and it used to be
+   * `listServers`, which materialises every tool and every grant in the deployment to answer
+   * whether one row is brokered.
+   *
    * A ROW THAT IS NOT BROKERED IS REFUSED IN SO MANY WORDS. The id may well name a server this
    * deployment really has — what is wrong is that its connection does not live at Composio, and
    * there is nothing for either route to confirm or to end. `null` from `toolkitOf` also covers an
@@ -926,9 +936,7 @@ export function createPluginRoutes(
     | { toolkit: string; refusal?: undefined }
     | { toolkit?: undefined; refusal: { error: string; status: 400 | 503 } }
   > => {
-    const row = (await store.listServers()).find(
-      (server) => server.id === serverId,
-    );
+    const row = await store.serverAddress(serverId);
     const toolkit = row ? toolkitOf(row.url) : null;
     if (!toolkit) {
       return {

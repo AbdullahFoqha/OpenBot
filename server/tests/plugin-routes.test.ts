@@ -601,8 +601,9 @@ function directoryApp(
 ) {
   const added: Array<{ slug: string; title: string; by: string }> = [];
   const store = {
-    // Every read the plugins surface makes on its way to the route under test.
-    listServers: async () => servers,
+    // Every read the plugins surface makes on its way to the route under test. The directory asks
+    // for urls and is handed urls: the rows below carry an id as well, and the route never sees it.
+    serverUrls: async () => servers.map((server) => server.url),
     listSkills: async () => [],
     listGrants: async () => [],
     addBrokeredApp: async (input: {
@@ -669,7 +670,8 @@ describe("the Composio directory", () => {
   test("an app is enabled by the url of the row, not by the row's id", async () => {
     // Which app a row is comes off its url and only off its url, because that is where the
     // transport reads it from. An id read as an app name is a different question wearing the same
-    // answer's clothes.
+    // answer's clothes — and the read behind this route now hands over urls alone, so the id below
+    // is one the route could not consult even if it wanted to.
     const { app } = directoryApp(undefined, "admin", [
       { id: "an-id-nobody-should-read", url: "composio://slack" },
     ]);
@@ -968,7 +970,7 @@ const WRONG_KEY = Object.assign(new Error("Request failed"), {
 /**
  * One brokered app, added, and the person connecting their own account to it.
  *
- * WHICH APP THIS IS COMES OFF THE ROW'S URL. `listServers` answers one row whose url is
+ * WHICH APP THIS IS COMES OFF THE ROW'S URL. `serverAddress` answers one row whose url is
  * `composio://linear`, and the branch under test reads the app out of it with `toolkitOf` rather
  * than off the id — the id is a row name (`composio-linear`) and reading one as the other works
  * right up until somebody renames a row.
@@ -1010,31 +1012,34 @@ function brokeredApp(
     reason: string;
   }> = [];
 
+  const rows = [
+    {
+      id: "composio-linear",
+      // The app's name, which is the one of the two a person has ever seen. The refusal below
+      // reads it off the row, and the id beside it is what that refusal used to quote instead.
+      title: "Linear",
+      url: "composio://linear",
+    },
+    /*
+     * An ordinary OAuth row, so that "this app is not brokered" is a real row and not a missing
+     * one. The two routes below answer the same way for both, and this is the half that would
+     * otherwise go untested: an id naming nothing at all is easy to refuse, while a server this
+     * deployment really has whose connection simply does not live at Composio is where a
+     * confusing answer would come from.
+     */
+    { id: "notion", title: "Notion", url: "https://notion.test/mcp" },
+  ];
+
   const store = {
-    // Every read the plugins surface makes on its way to the route under test.
-    listServers: async () => [
-      {
-        id: "composio-linear",
-        // The app's name, which is the one of the two a person has ever seen. The refusal below
-        // reads it off the row, and the id beside it is what that refusal used to quote instead.
-        title: "Linear",
-        url: "composio://linear",
-        provenance: "composio",
-      },
-      /*
-       * An ordinary OAuth row, so that "this app is not brokered" is a real row and not a missing
-       * one. The two routes below answer the same way for both, and this is the half that would
-       * otherwise go untested: an id naming nothing at all is easy to refuse, while a server this
-       * deployment really has whose connection simply does not live at Composio is where a
-       * confusing answer would come from.
-       */
-      {
-        id: "notion",
-        title: "Notion",
-        url: "https://notion.test/mcp",
-        provenance: "curated",
-      },
-    ],
+    /*
+     * Every read the plugins surface makes on its way to the route under test.
+     *
+     * Three columns, looked up by id, because that is all these routes ask for: the url they read
+     * the app out of and the title a refusal names. The whole server list is what they used to ask
+     * for, and a stub that still answered one would be pretending they need more than they do.
+     */
+    serverAddress: async (serverId: string) =>
+      rows.find((row) => row.id === serverId),
     listSkills: async () => [],
     listGrants: async () => [],
     brokeredConnection: async (input: { toolkit: string; userId: string }) => {

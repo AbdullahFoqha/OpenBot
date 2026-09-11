@@ -58,7 +58,7 @@ function app(input: {
   const store = {
     // The brokered read the connect handler makes before anything about the consent flow. This
     // deployment has no brokered rows, so it answers nothing and the flow below is untouched.
-    listServers: async () => [],
+    serverAddress: async () => undefined,
     oauthClientFor: async () => ({ clientId: "dyn-1", clientSecret: "" }),
     ensureOAuthClient: async () => ({ clientId: "dyn-1", clientSecret: "" }),
     recordConnection:

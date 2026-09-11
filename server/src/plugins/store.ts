@@ -158,6 +158,16 @@ export type ServerRecord = {
   withdrawn: WithdrawnGrant[];
 };
 
+/**
+ * A server row as the surfaces that only need to know where it is see it.
+ *
+ * Three columns of {@link ServerRecord} and none of what hangs off it, because the callers this is
+ * for ask one question: which vendor is this row addressed at. The title travels with the url
+ * because their refusals name it — "You already have an account connected to Linear" is the app's
+ * name, which is the only one of the two a person has ever seen on a screen.
+ */
+export type ServerAddress = { id: string; title: string; url: string };
+
 export type SkillRecord = {
   id: string;
   slug: string;
@@ -3106,6 +3116,62 @@ export function createPluginStore(options: PluginStoreOptions) {
             })),
         };
       });
+    },
+
+    /**
+     * Where one server is, by id, and nothing that hangs off it.
+     *
+     * WHY IT EXISTS BESIDE {@link listServers}. Three routes asked that one for a single row's url
+     * — the brokered branch of connect, and the confirm and disconnect pair behind
+     * `brokeredAppFor` — and it answers by running three queries and materialising every server,
+     * every tool and every grant in the deployment. Confirm is the sharp end: both brokered account
+     * screens call it from an effect on mount, so opening a large app's page read the whole tool and
+     * grant table to ask whether one row is brokered. None of the three looks at a tool or a grant.
+     *
+     * THE URL IS THE ROW'S OWN, read out of the column rather than composed from the id. The whole
+     * brokered feature rests on the two being allowed to differ: `addBrokeredApp` writes
+     * `composio://<slug>` and names the row for it, but nothing holds them equal afterwards, and a
+     * row called `gmail` at `composio://slack` is exactly the shape the connection gate was once
+     * keyed on the wrong half of. The catalogue reconciliation {@link effectiveUrl} applies for
+     * `listServers` is deliberately not applied here, and changes no answer: it only ever
+     * substitutes the pinned host of a first-party entry, and neither reading of such a row names a
+     * Composio app.
+     *
+     * `undefined` for an id naming no row, which is what the `.find` over the whole list answered
+     * before — so a route that refused an unknown id still refuses it, in the same words.
+     */
+    async serverAddress(serverId: string): Promise<ServerAddress | undefined> {
+      const [row] = await database
+        .select({
+          id: mcpServers.id,
+          title: mcpServers.title,
+          url: mcpServers.url,
+        })
+        .from(mcpServers)
+        .where(eq(mcpServers.id, serverId))
+        .limit(1);
+      return row;
+    },
+
+    /**
+     * Where every added server is, for the one caller whose question is about the whole set.
+     *
+     * A SECOND READ RATHER THAN {@link serverAddress} IN A LOOP, and rather than one method serving
+     * both. The app directory asks which of Composio's apps are already enabled here, which has no
+     * id to look up — answered a row at a time it would be one query per app in the directory. And
+     * it needs strictly less than the row read hands back: the app comes off the url, so an id and
+     * a title would be nothing but two fields a reader could take the app out of by mistake. The
+     * directory route's own comment says why that matters — the url is where the transport reads
+     * which app a call is against, and the id is a row name that happens to look similar.
+     *
+     * Ordered, so two readings of an unchanged deployment answer alike.
+     */
+    async serverUrls(): Promise<string[]> {
+      const rows = await database
+        .select({ url: mcpServers.url })
+        .from(mcpServers)
+        .orderBy(asc(mcpServers.id));
+      return rows.map((row) => row.url);
     },
 
     /**

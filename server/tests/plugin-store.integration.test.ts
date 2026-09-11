@@ -4812,6 +4812,56 @@ test("the Plugins page shows a brokered action with the effect the vendor record
   ).toEqual([{ name: "GMAIL_FETCH_EMAILS", effect: "read" }]);
 });
 
+/**
+ * The narrow read the brokered routes make, and the one thing it must not do.
+ *
+ * CRITERION. `serverAddress` answers the url the ROW holds, whatever the row is called.
+ *
+ * REASON. Everything brokered rests on the id and the url being allowed to differ: `addBrokeredApp`
+ * writes `composio://<slug>` and names the row for it, and nothing afterwards holds the two equal.
+ * The routes read the app out of the url for exactly that reason, so a read that answered them with
+ * `composio://${id}` — composed, and always agreeing with the id — would put the mismatch back
+ * underneath four call sites at once and read as correct on every row anybody had not renamed. The
+ * fixture is seeded with the disagreement on purpose, which is what `seedComposioGmail`'s own `url`
+ * option exists for.
+ *
+ * The url listing is asserted off this fixture rather than out of a case of its own: it answers the
+ * directory's set question from the same column, and the property worth pinning is the same one.
+ */
+test("a server's address is the url the row holds, not one composed from its id", async () => {
+  const { store, database } = await freshStore();
+  // A row called `gmail` pointing at Slack, which is the shape the connection gate was once keyed
+  // on the wrong half of.
+  await seedComposioGmail(database, store, { url: "composio://slack" });
+
+  expect(await store.serverAddress("gmail")).toEqual({
+    id: "gmail",
+    title: "Gmail",
+    // Not `composio://gmail`. That is what composing the url from the id would have answered, and
+    // it is the app this row does not run against.
+    url: "composio://slack",
+  });
+  /*
+   * By membership rather than by equality, because this database is not only this test's: the
+   * suite's own `google-drive` row is there, and on a deployment somebody is using so is whatever
+   * they have added. What is being asserted is which of the two spellings of this row reaches the
+   * directory, and that survives the company.
+   */
+  const urls = await store.serverUrls();
+  expect(urls).toContain("composio://slack");
+  expect(urls).not.toContain("composio://gmail");
+});
+
+test("a server id naming no row is answered with nothing", async () => {
+  const { store, database } = await freshStore();
+  await seedComposioGmail(database, store);
+
+  // `undefined` rather than a throw or an empty row, because that is what the `.find` over the
+  // whole server list answered before — and the routes turn it into the 400 that says this app is
+  // not reached through a broker.
+  expect(await store.serverAddress("composio-gmail")).toBeUndefined();
+});
+
 test("refreshing a Composio app records each action's effect, destructive marker and version", async () => {
   const { store, database } = await freshStore();
   useComposioClient({
