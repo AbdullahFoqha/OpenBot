@@ -93,6 +93,25 @@ const WHOLE_LISTING = 1000;
 const RETURN_URL = "https://openbot.test/settings/connected-accounts/x";
 
 /**
+ * What Composio answers a withdrawal it actually performed, returned by every double that performs
+ * one.
+ *
+ * A DOUBLE THAT OMITS THIS IS NOT A DOUBLE OF THE VENDOR. `success` is a REQUIRED field of
+ * `ConnectedAccountDeleteResponse` — "indicates whether the connected account was successfully
+ * deleted" (`@composio/client` 0.1.0-alpha.76, `resources/connected-accounts.d.ts:7445-7451`) — and
+ * every fixture here used to answer `undefined`, which Composio cannot send. That was harmless only
+ * for as long as the adapter read nothing off the reply; the moment it started telling a performed
+ * delete from a declined one, a fixture answering nothing was a fixture asserting the adapter's
+ * behaviour against a reply no vendor produces.
+ *
+ * SPELLED AT EACH DOUBLE RATHER THAN DEFAULTED IN {@link fakeVendor}, for the reason the refusals
+ * there are spelled: the two tests next door hand back `{ success: false }` and `{}` on purpose,
+ * and a default would put the interesting answer and the ordinary one at different distances from
+ * the reader.
+ */
+const WITHDRAWN = { success: true };
+
+/**
  * The three auth configs this file reasons about, named once rather than spelled at each fixture.
  *
  * Two of them are ours and one is an operator's dashboard work, and every decision the adapter
@@ -850,6 +869,64 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     );
   });
 
+  test("an app whose configs no longer carry this deployment's name is not a clean removal", async () => {
+    const deleted: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          /*
+           * THE CONFIG THIS DEPLOYMENT MADE, RENAMED IN COMPOSIO'S DASHBOARD. Same object, same
+           * grants on it, same accounts connected against it; the one field that changed is the
+           * only one this file writes and the only one it can recognise itself by.
+           */
+          list: async () => ({
+            items: [{ id: "ac_ours", name: "Linear", status: "ENABLED" }],
+          }),
+          delete: async (...call: unknown[]) => {
+            deleted.push(call);
+          },
+        },
+      }),
+    );
+
+    /*
+     * QUIET IS THE FAILURE HERE, AND IT IS THE ONE NOTHING REPORTS. `deleteAuthConfig` returning
+     * normally lets `removeServer` delete the app's row, which is the last thing in this
+     * deployment naming the app — so an administrator reads that the app was withdrawn while the
+     * config and every grant made against it stand at Composio with nothing pointing at them.
+     */
+    const refusal = await failureOf(broker.deleteAuthConfig("linear"));
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal).not.toBeInstanceOf(AggregateError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    // The count of what is standing and the marker that would claim it, which together are the
+    // whole remedy: an operator can look at one config and see which of the two readings it is.
+    expect(refusal.message).toMatch(/Composio holds 1 for linear/);
+    expect(refusal.message).toMatch(/\(OpenBot\)/);
+    /*
+     * AND NOTHING WAS DELETED, which is the half this refusal is not allowed to trade away. The
+     * row carries no marker, so deleting it is as likely to destroy an operator's own dashboard
+     * work — with every account on THAT — as it is to finish the removal.
+     */
+    expect(deleted).toEqual([]);
+  });
+
+  test("an app Composio holds no configs for at all is still a quiet removal", async () => {
+    /*
+     * THE HALF THE REFUSAL ABOVE MUST NOT SWALLOW. Removing an app has to be able to happen twice:
+     * an app can be removed, re-enabled and removed again, two administrators can press the button
+     * together, and an app enabled before this deployment created configs at all has none to drop.
+     * In each of those the end state is the one that was asked for, so a throw would report a
+     * failure to somebody who got exactly what they wanted — and an implementation that reached
+     * green above by refusing whenever it deleted nothing would do precisely that.
+     */
+    const { broker } = buildComposioClient(
+      fakeVendor({ authConfigs: { list: async () => ({ items: [] }) } }),
+    );
+
+    await broker.deleteAuthConfig("linear");
+  });
+
   test("a disabled config of ours stops a second one being created", async () => {
     const created: unknown[] = [];
     const { broker } = buildComposioClient(
@@ -957,6 +1034,7 @@ describe("withdrawing one person's grants", () => {
           list: async () => ({ items: [{ id: "ca_1" }] }),
           delete: async (...call: unknown[]) => {
             deleted.push(call);
+            return WITHDRAWN;
           },
         },
       }),
@@ -966,6 +1044,73 @@ describe("withdrawing one person's grants", () => {
       true,
     );
     expect(deleted).toEqual([["ca_1", { revoke_on_delete: true }]]);
+  });
+
+  test("a delete Composio answered `success: false` is not a withdrawal", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => ({ items: [{ id: "ca_1" }] }),
+          // A 200 whose body says the account was not deleted. The flag went out, Composio read
+          // the request and answered it — this is the vendor declining, not failing.
+          delete: async () => ({ success: false }),
+        },
+      }),
+    );
+
+    /*
+     * WITHOUT THE CHECK THIS ANSWERS `true`, WHICH IS THE WHOLE FINDING. `store.ts` writes that
+     * boolean into `mcp.account_disconnected` as `vendorRevocationRequested` and then deletes the
+     * `composio_connections` row — the only thing in this deployment naming which app this person
+     * connected. So a `success: false` nobody read ends as a trail entry claiming a grant was
+     * withdrawn, an account that is still live at Google, and nothing left pointing at it.
+     *
+     * ASSERTED AS A REFUSAL AND AS A COUNT, because "did not answer true" is satisfied by a crash.
+     */
+    const refusal = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(
+      /withdrew 0 of this person's 1 accounts for gmail/,
+    );
+    expect(refusal.message).not.toMatch(A_CRASH);
+    // The reason lives on `cause`, because the count is deliberately the whole of the sentence.
+    expect(everythingSaidBy(refusal).join(" ")).toMatch(/success: false/);
+  });
+
+  test("a delete whose verdict Composio did not send is not counted as one either", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async () => ({ items: [{ id: "ca_1" }] }),
+          /*
+           * `success` IS REQUIRED IN THE DECLARATION AND ABSENT ON THIS WIRE, which is the shape
+           * the check has to survive rather than the one it is for. `@composio/client` parses the
+           * body and hands it over, so the schema's "required" is a promise about what Composio
+           * means to send and not a fact about what arrived.
+           */
+          delete: async () => ({}),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+
+    /*
+     * A DIFFERENT SENTENCE FROM THE ONE NEXT DOOR, and that is what this asserts. "Composio said
+     * no" is a fact about this account that a second press can meet again; "Composio answered
+     * something this deployment cannot read" is a fact about the package, correctable by nobody
+     * holding an admin page. Collapsing them would send an operator to press a button for a
+     * condition a button cannot change.
+     */
+    const said = everythingSaidBy(refusal).join(" ");
+    expect(said).toMatch(/upgrading this deployment's @composio\/core/);
+    expect(said).not.toMatch(/success: false/);
   });
 
   test("the listing asks about every state a grant can be hiding in", async () => {
@@ -1051,6 +1196,7 @@ describe("withdrawing one person's grants", () => {
           delete: async (id: string) => {
             if (id === "ca_2") throw new Error("Composio refused that one.");
             deleted.push(id);
+            return WITHDRAWN;
           },
         },
       }),
@@ -1071,6 +1217,7 @@ describe("withdrawing one person's grants", () => {
           list: async () => ({ items: [{ id: "ca_1" }, { id: "ca_2" }] }),
           delete: async (id: string) => {
             if (id === "ca_2") throw new Error("Composio refused that one.");
+            return WITHDRAWN;
           },
         },
       }),
@@ -1113,6 +1260,7 @@ describe("withdrawing one person's grants", () => {
           }),
           delete: async (id: string) => {
             deleted.push(id);
+            return WITHDRAWN;
           },
         },
       }),
@@ -1841,6 +1989,7 @@ describe("what the delete loop keeps of the failures it meets", () => {
           }),
           delete: async (id: string) => {
             if (id !== "ca_1") throw new Error(`Composio refused ${id}.`);
+            return WITHDRAWN;
           },
         },
       }),
@@ -1868,6 +2017,7 @@ describe("what the delete loop keeps of the failures it meets", () => {
           list: async () => ({ items: [{ id: "ca_1" }, { id: "ca_2" }] }),
           delete: async (id: string) => {
             if (id === "ca_2") throw new Error("Composio refused that one.");
+            return WITHDRAWN;
           },
         },
       }),
@@ -1912,6 +2062,7 @@ describe("what the delete loop keeps of the failures it meets", () => {
               );
             }
             deleted.push(id);
+            return WITHDRAWN;
           },
         },
       }),
@@ -2227,6 +2378,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
           },
           delete: async (id: string) => {
             deleted.push(id);
+            return WITHDRAWN;
           },
         },
       }),
@@ -2361,6 +2513,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
           },
           delete: async (id: string) => {
             deleted.push(id);
+            return WITHDRAWN;
           },
         },
       }),
@@ -2404,6 +2557,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
           // would satisfy any assertion that only asked for a refusal of some kind.
           delete: async (id: string) => {
             deleted.push(id);
+            return WITHDRAWN;
           },
         },
       }),
@@ -2437,6 +2591,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
           },
           delete: async (id: string) => {
             deleted.push(id);
+            return WITHDRAWN;
           },
         },
       }),
