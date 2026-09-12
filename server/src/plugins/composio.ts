@@ -44,24 +44,25 @@ import { type ListedTool, MAX_RESULT_CHARS, type McpCallResult } from "./mcp";
 export const VERSION_ARG = "__version";
 
 /**
- * How many actions one listing asks for, which is as many as this SDK can be made to answer with.
+ * How many rows one PAGE of a listing asks for, which is as many as Composio will answer with.
  *
  * A NUMBER RATHER THAN NO NUMBER, because omitting it is not "no opinion". Composio's page defaults
- * to 20 and Gmail publishes 63 actions, so an omitted limit truncates — and worse, it NARROWS:
- * `getRawComposioTools` sets `important=true` whenever the query named toolkits and gave no limit,
- * no tags and no search (`@composio/core` 0.18.1, `src/models/Tools.ts:505-515`), so the short
- * answer is a filtered one and nothing in it says a filter was applied. Passing a limit is what
- * turns the flag off.
+ * to 20 and Gmail publishes 63 actions, so an omitted limit truncates — and through the SDK wrapper
+ * it also NARROWED: `getRawComposioTools` set `important=true` whenever the query named toolkits
+ * and gave no limit, no tags and no search (`@composio/core` 0.18.1, `src/models/Tools.ts:505-515`),
+ * so the short answer was a filtered one and nothing in it said a filter had been applied.
  *
- * 1000 BECAUSE THAT IS THE CEILING, not because it is generous. The REST parameter documents "max
- * allowed is 1000" (`@composio/client` 0.1.0-alpha.76, `resources/tools.d.ts:441-444`), and the
- * core SDK exposes no way to go past it: `ToolListParamsSchema` has no cursor field, and
- * `getRawComposioTools` reads `tools.items` and drops the response's `next_cursor`. So one page at
- * the ceiling is not a page — it is the whole listing, and the only listing expressible here.
+ * 1000 BECAUSE THAT IS THE CEILING, not because it is generous. Both REST parameters document "max
+ * allowed is 1000" (`@composio/client` 0.1.0-alpha.76, `resources/tools.d.ts:441-444`,
+ * `resources/toolkits.d.ts:483-486`), so this is the fewest round trips a listing can be read in.
  *
- * Which is why {@link listTools} refuses a page that came back FULL. At the ceiling a complete
- * answer and a truncated one are the same array, and there is no second request that could tell
- * them apart.
+ * IT IS A PAGE AND NOT THE LISTING, WHICH IS WHAT CHANGED AND WHY THE REFUSAL BELOW IS GONE. This
+ * used to say that one page at the ceiling "is not a page — it is the whole listing, and the only
+ * listing expressible here", and {@link listTools} refused a page that came back FULL on the
+ * strength of it. That was a fact about the wrapper rather than about the vendor: `ToolListParams`
+ * and `ToolkitListParams` both carry a `cursor` and both responses carry a `next_cursor`, and
+ * `./composio-adapter` follows them to the end. A listing of exactly this many rows is now an app
+ * with a lot of actions, and nothing is truncated by it.
  */
 export const LISTING_LIMIT = 1000;
 
@@ -70,30 +71,29 @@ export type ComposioAction = {
   slug: string;
   description?: string;
   /**
-   * The action's JSON Schema as `@composio/core` re-spells it, which is NOT as Composio published it.
+   * The action's JSON Schema AS COMPOSIO PUBLISHED IT, which for two waves it was not.
    *
-   * This used to say "as they spell it", and that claim travelled: whatever lands in this field is
-   * what {@link listTools} puts in front of a model as the vendor's own schema. The SDK parses the
-   * response through `ToolSchema`, and its `ParametersSchema` is a plain `z.object` with no
-   * passthrough (`@composio/core` 0.18.1, `src/types/tool.types.ts:134-174`), so every key it does
-   * not name is dropped before anything here can see it. At the schema ROOT that is `if`, `then`,
-   * `else`, `examples` and every `x-` extension. Per property, `JSONSchemaPropertySchema` (`:77-131`)
-   * does keep `if`/`then`/`else`/`examples`, but names neither `deprecated` nor `contentEncoding`,
-   * so both of those go.
+   * THIS FIELD USED TO ARRIVE SHORT, AND THE FIX WAS NAMED HERE BEFORE IT WAS MADE. Whatever lands
+   * in it is what {@link listTools} puts in front of a model as the vendor's own schema, and
+   * `./composio-adapter` filled it from `tools.getRawComposioTools` — the call that ends in
+   * `ToolSchema.parse`. Its `ParametersSchema` is a plain `z.object` with no passthrough
+   * (`@composio/core` 0.18.1, `src/types/tool.types.ts:134-174`), so every key it did not name was
+   * dropped before anything here could see it: `if`, `then`, `else`, `examples` and every `x-`
+   * extension at the schema ROOT, and `deprecated` and `contentEncoding` per property
+   * (`JSONSchemaPropertySchema`, `:77-131`). This comment recorded that as unavoidable and named
+   * the one place it could be avoided — "that same file, by reading `client.tools.list` directly
+   * and never running `ToolSchema` over the answer".
    *
-   * WHY THE CLAIM WAS DROPPED RATHER THAN THE LOSS FIXED. The strip happens inside the vendor's own
-   * parse, upstream of every byte this module receives, so there is nothing here to restore a key
-   * from — "stop losing them" is not an option this file has. The loss is live rather than
-   * theoretical: `./composio-adapter` fills this field from `tools.getRawComposioTools`, which is
-   * the call that runs the parse. The one place it could be avoided is that same file, by reading
-   * `client.tools.list` directly and never running `ToolSchema` over the answer — a decision about
-   * the vendor's types, belonging where the vendor's types belong, and one somebody can now make in
-   * a file that exists. What this module can honestly promise is the narrower thing: it adds
-   * nothing to this schema and removes nothing from it, so what the SDK handed over is exactly what
-   * a model is shown.
+   * THAT IS NOW WHAT THE ADAPTER DOES, FOR A REASON THAT HAD NOTHING TO DO WITH THIS FIELD. The
+   * wrapper is the one method of the vendor's tool model that cannot be paged, so the listing moved
+   * to the raw client to follow Composio's cursor — and the keys came back as a side effect. What
+   * this module promises is unchanged and is now worth more: it adds nothing to this schema and
+   * removes nothing from it, so what a model is shown is what the vendor published.
    *
-   * Absent for the occasional action that publishes none — and equally for one that published `{}`,
-   * which the SDK normalizes to absent before parsing (`src/models/Tools.ts:76-93`).
+   * Absent for the occasional action that publishes none. An action that published `{}` now arrives
+   * as `{}` rather than as absent — the SDK normalized that away before parsing
+   * (`src/models/Tools.ts:76-93`) and nothing does now — which `./store` records as the open schema
+   * an empty one is.
    */
   inputParameters?: Record<string, unknown>;
   /** Behaviour labels mixed in with topical ones. See {@link effectOf}. */
@@ -140,13 +140,19 @@ export type ComposioResult = {
  */
 export type ComposioActions = {
   /**
-   * Every action of one app, for a page the CALLER has to name.
+   * Every action of one app, read to the end, in pages the CALLER has to name the size of.
    *
    * `page` is required rather than optional, and that is the whole point of it being here. The
-   * previous signature took the toolkit alone, so an adapter had nothing to pass a limit through
+   * original signature took the toolkit alone, so an adapter had nothing to pass a limit through
    * and the SDK's default applied — 20 rows, silently narrowed to the vendor's "important" subset.
-   * A required argument makes the narrowed listing a thing a caller has to ask for on purpose
-   * instead of a thing they get by leaving something out. See {@link LISTING_LIMIT}.
+   * A required argument makes the page a thing a caller asks for on purpose instead of a thing they
+   * get by leaving something out. See {@link LISTING_LIMIT}.
+   *
+   * WHAT IT NO LONGER BOUNDS IS THE ANSWER. `./composio-adapter` follows Composio's cursor until
+   * the vendor stops offering one, so this names how many rows each request carries and not how
+   * many actions can come back — which is why the full-page refusal that used to stand in
+   * {@link listTools} is gone, and why an implementation that reads one page and stops is a defect
+   * nothing about the signature would report.
    */
   listActions(
     toolkit: string,
@@ -388,11 +394,14 @@ function stagesAFile(schema: unknown): boolean {
  * nobody" cases throw, and they throw SEPARATELY, because one sends an operator to this
  * deployment's configuration and the other to the row's url.
  *
- * WHAT IS DELIBERATELY NOT REFUSED IS THE VENDOR'S OWN EMPTY PAGE, and it is worth saying why,
- * because `@composio/core` does manufacture one: `getRawComposioTools` ends `if (!tools) { return
- * []; }` (0.18.1, `src/models/Tools.ts:553-557`), so a response it could not read arrives here as
- * the same `[]` an app with no actions would send. That is a real hazard and it is answered a
- * layer down rather than here — `store.ts`'s own empty-listing guard keeps every recorded action,
+ * WHAT IS DELIBERATELY NOT REFUSED IS THE VENDOR'S OWN EMPTY PAGE, and it is worth saying why.
+ * `@composio/core` used to manufacture one — `getRawComposioTools` ends `if (!tools) { return []; }`
+ * (0.18.1, `src/models/Tools.ts:553-557`), so a response it could not read arrived here as the same
+ * `[]` an app with no actions would send — and that particular hazard is gone with the wrapper:
+ * `./composio-adapter` reads the raw client and refuses an answer that is not a page rather than
+ * turning it into an empty one. What remains is the honest case, a listing Composio really did
+ * answer with no rows, and that is answered a layer down rather than here — `store.ts`'s own
+ * empty-listing guard keeps every recorded action,
  * its `effect`, its `destructive` and its `version` whenever an app that HAS actions lists none,
  * writes the sentence saying so, and stamps no refresh. Refusing here as well would buy nothing
  * that guard does not already hold, and would cost the case it is careful to allow: an app that
@@ -600,25 +609,28 @@ export async function listTools(connection: {
     );
   }
 
-  if (actions.length >= LISTING_LIMIT) {
-    /*
-     * A FULL PAGE IS NOT A COMPLETE LISTING, and this deployment cannot find out which it is.
-     *
-     * `LISTING_LIMIT` is the largest page the vendor's REST parameter allows, and the core SDK
-     * offers no cursor to ask for a second one. So an app with exactly that many actions and an app
-     * with more of them answer identically here. Committed as complete, the second one has every
-     * action past the cut deleted from `mcp_tools` under a refresh that reported success — the same
-     * loss the empty answer used to cause, arriving by a different route.
-     *
-     * AND THE ONE `store.ts` CANNOT CATCH FOR US, which is why this refusal is not redundant with
-     * the empty-listing guard there. That guard keys on a listing with NOTHING in it; a full page
-     * is a listing with a thousand things in it, indistinguishable from a complete one, and it
-     * commits as the whole truth about the app.
-     */
-    throw new Error(
-      `Composio answered with ${actions.length} actions for ${toolkit}, which is the largest page this deployment's @composio/core can ask for, so there may be more that it cannot see. The actions already recorded are kept rather than replaced by a listing that might be a fragment.`,
-    );
-  }
+  /*
+   * A FULL PAGE USED TO BE REFUSED HERE, AND THAT REFUSAL IS GONE BECAUSE ITS PREMISE WAS FALSE.
+   *
+   * It said that `LISTING_LIMIT` is the largest page the vendor's REST parameter allows and that
+   * the core SDK offers no cursor to ask for a second one, so an app with exactly that many actions
+   * and an app with more of them answer identically — and that committing the second deletes every
+   * action past the cut from `mcp_tools` under a refresh that reported success. The consequence was
+   * real and the premise was about the WRAPPER. `ToolListParamsSchema` names no cursor, but
+   * `@composio/client`'s `ToolListParams` does, and its `ToolListResponse` carries `next_cursor`
+   * (0.1.0-alpha.76, `resources/tools.d.ts:421-432`, `:200-204`). `./composio-adapter` reads that
+   * client directly and follows the cursor to the end of the listing, so what arrives here is every
+   * action the app publishes and a full page is just a large app. A refusal that cannot be told
+   * from a healthy answer is one thing; a refusal that fires ON a healthy answer is another, and
+   * this had become the second — the same defect, at the same ceiling, that emptied the app picker
+   * one file over.
+   *
+   * NOTHING ELSE MOVED WITH IT. A listing that could not be read at all is still a throw rather than
+   * an empty list, for the reason at the top of this function, and `store.ts`'s empty-listing guard
+   * still keeps every recorded action when an app that HAS actions lists none. What is no longer
+   * claimed is that a listing this long might be a fragment, because it cannot be: the adapter
+   * refuses a cursor it cannot follow rather than handing over what it had.
+   */
 
   /*
    * AN ACTION IS OFFERED ONLY IF A MODEL COULD ACTUALLY FILL IN ITS ARGUMENTS.

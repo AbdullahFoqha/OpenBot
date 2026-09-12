@@ -485,16 +485,40 @@ describe("listing an app's actions", () => {
     await listTools({ url: "composio://gmail" });
 
     // Composio's default page is 20 and Gmail publishes 63 actions, so an omitted limit truncates.
-    // It also NARROWS: `getRawComposioTools` auto-applies `important=true` when no limit, no tags
-    // and no search were given (`@composio/core` 0.18.1, `src/models/Tools.ts:505-515`), and
-    // nothing in the short answer says a filter was applied. Asking for a page is therefore not an
-    // optimisation, and the seam must not let a caller forget to.
+    // It also NARROWED, through the wrapper this listing used to go through: `getRawComposioTools`
+    // auto-applied `important=true` when no limit, no tags and no search were given
+    // (`@composio/core` 0.18.1, `src/models/Tools.ts:505-515`), and nothing in the short answer
+    // said a filter had been applied. Asking for a page is therefore not an optimisation, and the
+    // seam must not let a caller forget to — what it sizes now is each request rather than the
+    // answer, because `./composio-adapter` reads on until Composio's cursor stops.
     expect(asked).toEqual([
       { toolkit: "gmail", page: { limit: WHOLE_LISTING } },
     ]);
   });
 
-  test("a listing that filled the biggest page the SDK can ask for is not called complete", async () => {
+  /**
+   * THIS TEST ASSERTED A REFUSAL AND WAS CHANGED ON PURPOSE.
+   *
+   * It was "a listing that filled the biggest page the SDK can ask for is not called complete", and
+   * it pinned the refusal this module made of any listing at {@link WHOLE_LISTING} rows. The reason
+   * it gave was true of the WRAPPER: "`ToolListParamsSchema` accepts no cursor and
+   * `getRawComposioTools` drops the response's `next_cursor`, so one page at the API's stated
+   * maximum is the largest listing expressible through this SDK".
+   *
+   * IT IS NOT TRUE OF THE VENDOR. `@composio/client`'s `ToolListParams` carries a `cursor` and its
+   * `ToolListResponse` carries `next_cursor` (0.1.0-alpha.76, `resources/tools.d.ts:421-432`,
+   * `:200-204`), and `./composio-adapter` now reads that client and follows the cursor to the end.
+   * A listing this long is an app with a lot of actions, and refusing it would be refusing a
+   * complete answer — which is what the same ceiling, one file over, was doing to the app picker
+   * on every single call.
+   *
+   * SO WHAT IS ASSERTED IS THE INVERSE, AT THE SAME BOUNDARY. The seam below hands back a full page
+   * because that is what the adapter's pager resolves to once it has read every page; this module's
+   * job is to commit it rather than to second-guess its length. The refusals this module still
+   * makes — an empty listing, an unreadable row, a listing that did not answer — are unmoved, and
+   * each has its own test above.
+   */
+  test("a listing as long as the biggest page is committed rather than called a fragment", async () => {
     useComposioClient(
       recording({
         listActions: async () =>
@@ -505,13 +529,9 @@ describe("listing an app's actions", () => {
       }).client,
     );
 
-    // `ToolListParamsSchema` accepts no cursor and `getRawComposioTools` drops the response's
-    // `next_cursor`, so one page at the API's stated maximum is the largest listing expressible
-    // through this SDK. A page that came back full is therefore indistinguishable from a truncated
-    // one, and committing it would delete every action past the cut while reporting a success.
-    await expect(listTools({ url: "composio://gmail" })).rejects.toThrow(
-      /there may be more/i,
-    );
+    const listed = await listTools({ url: "composio://gmail" });
+
+    expect(listed).toHaveLength(WHOLE_LISTING);
   });
 
   test("an action arrives with its schema, its effect and its version", async () => {
@@ -984,9 +1004,8 @@ describe("listing an app's actions", () => {
 
   test("a listing that failed with no wrapper still carries the vendor's sentence", async () => {
     /*
-     * `./composio-adapter`'s listing calls `getRawComposioTools`, which awaits
-     * `this.client.tools.list` with no try around it, so what lands here is `@composio/client`'s
-     * own error — see {@link unwrapped}. `refreshTools` writes this string into the row's
+     * `./composio-adapter`'s listing calls `client.tools.list` directly, with no try around it, so
+     * what lands here is `@composio/client`'s own error — see {@link unwrapped}. `refreshTools` writes this string into the row's
      * `lastError` for an administrator to read off the Plugins page, and what it used to write was
      * a status code followed by the entire response body.
      */
@@ -1521,10 +1540,12 @@ describe("listing an app's actions", () => {
      * AND THE VENDOR'S OWN EMPTY ANSWER IS STILL AN ANSWER, which is a decision this file shares
      * with `store.ts` rather than one it makes alone.
      *
-     * `@composio/core` does manufacture an empty listing out of a response it could not read —
+     * `@composio/core` used to manufacture an empty listing out of a response it could not read —
      * `getRawComposioTools` ends `if (!tools) { return []; }` (0.18.1,
-     * `src/models/Tools.ts:553-557`) — so the hazard of committing `[]` is real. It is answered at
-     * the layer that does the committing: `refreshTools` has its own empty-listing guard, which
+     * `src/models/Tools.ts:553-557`) — and that half is gone with the wrapper, because
+     * `./composio-adapter` refuses an answer that is not a page rather than emptying it. What is
+     * left is a listing Composio really did answer with no rows, and it is answered at the layer
+     * that does the committing: `refreshTools` has its own empty-listing guard, which
      * keeps every recorded action with its `effect`, `destructive` and `version` whenever an app
      * that holds actions lists none, and stamps no refresh
      * (`plugin-store.integration.test.ts`, "a refresh the vendor answered with no actions at all").
