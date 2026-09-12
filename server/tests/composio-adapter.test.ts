@@ -54,13 +54,13 @@ function fakeVendor(parts: {
 }) {
   return {
     tools: {
-      getRawComposioTools: refuse("tools.getRawComposioTools"),
+      list: refuse("tools.list"),
       getRawComposioToolBySlug: refuse("tools.getRawComposioToolBySlug"),
       execute: refuse("tools.execute"),
       ...parts.tools,
     },
     toolkits: {
-      get: refuse("toolkits.get"),
+      list: refuse("toolkits.list"),
       ...parts.toolkits,
     },
     authConfigs: {
@@ -106,8 +106,16 @@ const WHOLE_LISTING = 1000;
  *
  * So the number of pages READ and the number the refusal STATES are both asserted, and both
  * against this literal.
+ *
+ * IT WAS 50 AND IT IS 200, WHICH IS A DELIBERATE CHANGE RATHER THAN A TEST FOLLOWING A MODULE. 50
+ * was argued from the only two listings that paged — one app's authorization configs and one
+ * person's accounts for one app — where a second page is already extraordinary. The app catalogue
+ * now pages too and is not that listing: Composio publishes more than {@link WHOLE_LISTING}
+ * toolkits, so its second page is the ordinary case. The module states the arithmetic; what matters
+ * here is that both numbers are written out, so a ceiling that moves again reddens the tests that
+ * are about it rather than redefining them.
  */
-const PAGES_BEFORE_REFUSING = 50;
+const PAGES_BEFORE_REFUSING = 200;
 
 /** The page this deployment sends somebody back to once the consent screen is done with them. */
 const RETURN_URL = "https://openbot.test/settings/connected-accounts/x";
@@ -311,19 +319,21 @@ describe("listing an app's actions", () => {
     const { actions } = buildComposioClient(
       fakeVendor({
         tools: {
-          getRawComposioTools: async (query: unknown) => {
+          list: async (query: unknown) => {
             asked.push(query);
-            return [
-              {
-                slug: "GMAIL_FETCH_EMAILS",
-                name: "Fetch emails",
-                description: "Fetch emails from Gmail.",
-                inputParameters: { type: "object", properties: {} },
-                tags: ["readOnlyHint"],
-                version: "20260903_00",
-                toolkit: { slug: "gmail" },
-              },
-            ];
+            return {
+              items: [
+                {
+                  slug: "GMAIL_FETCH_EMAILS",
+                  name: "Fetch emails",
+                  description: "Fetch emails from Gmail.",
+                  input_parameters: { type: "object", properties: {} },
+                  tags: ["readOnlyHint"],
+                  version: "20260903_00",
+                  toolkit: { slug: "gmail" },
+                },
+              ],
+            };
           },
         },
       }),
@@ -333,12 +343,19 @@ describe("listing an app's actions", () => {
       limit: WHOLE_LISTING,
     });
 
-    // An omitted limit is not "no opinion": Composio's page defaults to 20, and
-    // `getRawComposioTools` additionally sets `important=true` whenever a toolkit query carried no
-    // limit, no tags and no search (`@composio/core` 0.18.1, `src/models/Tools.ts:505-515`), so the
-    // short answer is also a filtered one and nothing in it says so. Passing the limit through is
-    // what turns that flag off, which is why the assertion is on the query and not on the answer.
-    expect(asked).toEqual([{ toolkits: ["gmail"], limit: WHOLE_LISTING }]);
+    // An omitted limit is not "no opinion": Composio's page defaults to 20, and the wrapper this
+    // listing used to go through additionally set `important=true` whenever a toolkit query carried
+    // no limit, no tags and no search (`@composio/core` 0.18.1, `src/models/Tools.ts:505-515`), so
+    // the short answer was also a filtered one and nothing in it said so. The request is composed
+    // here now, which is why the assertion is on the query and not on the answer: the limit, the
+    // toolkit version the wrapper used to supply, and no `important` at all.
+    expect(asked).toEqual([
+      {
+        toolkit_slug: "gmail",
+        limit: WHOLE_LISTING,
+        toolkit_versions: "latest",
+      },
+    ]);
     expect(listed).toEqual([
       {
         slug: "GMAIL_FETCH_EMAILS",
@@ -355,12 +372,14 @@ describe("listing an app's actions", () => {
     const { actions } = buildComposioClient(
       fakeVendor({
         tools: {
-          getRawComposioTools: async (query: unknown) => {
+          list: async (query: unknown) => {
             asked.push(query);
-            // Twenty rows: Composio's own default page, which is what a dropped limit produces.
-            return Array.from({ length: 20 }, (_, index) => ({
-              slug: `GMAIL_ACTION_${index}`,
-            }));
+            // Twenty rows: Composio's own default page, which is what a dropped limit produced.
+            return {
+              items: Array.from({ length: 20 }, (_, index) => ({
+                slug: `GMAIL_ACTION_${index}`,
+              })),
+            };
           },
         },
       }),
@@ -369,14 +388,14 @@ describe("listing an app's actions", () => {
     const refusal = await failureOf(actions.listActions("gmail", { limit: 0 }));
 
     /*
-     * A ZERO DOES NOT TRAVEL SHORT — IT DOES NOT TRAVEL. `getRawComposioTools` composes its request
-     * with `...(limit ? { limit } : {})` (`@composio/core` 0.18.1, `src/models/Tools.ts:536`) over
-     * a schema that spells the field `z.number().optional()` with no floor
-     * (`src/types/tool.types.ts:257`), so the request goes out with no limit and Composio answers
-     * with its own page of twenty. Nothing downstream can see that: `./composio` catches a page
-     * that might be a fragment by measuring it against 1000, and twenty is nowhere near it, so the
-     * vendor's default commits as everything the app publishes and every action past it is deleted
-     * from `mcp_tools` by a refresh that reported success.
+     * THE REASON MOVED AND THE REFUSAL DID NOT. Through the wrapper a zero did not travel short —
+     * it did not travel: `getRawComposioTools` composed its request with `...(limit ? { limit } :
+     * {})` (`@composio/core` 0.18.1, `src/models/Tools.ts:536`) over a schema spelling the field
+     * `z.number().optional()` with no floor (`src/types/tool.types.ts:257`), so it went out with no
+     * limit and came back as Composio's own page of twenty. The raw client passes a zero through,
+     * so that particular substitution is gone. What is left is the argument that never rested on
+     * it: the page is required on this seam precisely so that no layer supplies one quietly, and a
+     * caller asking for no rows is a fault to report rather than one to correct on their behalf.
      */
     expect(refusal.message).not.toMatch(A_CRASH);
     expect(refusal.message).toMatch(/0 rows is not a page/);
@@ -392,33 +411,35 @@ describe("the app catalogue", () => {
     const { broker } = buildComposioClient(
       fakeVendor({
         toolkits: {
-          get: async (query: unknown) => {
+          list: async (query: unknown) => {
             asked.push(query);
-            return [
-              {
-                slug: "gmail",
-                name: "Gmail",
-                isLocalToolkit: false,
-                meta: {
-                  description: "Send and read mail.",
-                  logo: "https://logos.composio.dev/gmail.png",
-                  categories: [
-                    { slug: "productivity", name: "Productivity" },
-                    { slug: "email", name: "Email" },
-                  ],
-                  toolsCount: 63,
+            return {
+              items: [
+                {
+                  slug: "gmail",
+                  name: "Gmail",
+                  is_local_toolkit: false,
+                  meta: {
+                    description: "Send and read mail.",
+                    logo: "https://logos.composio.dev/gmail.png",
+                    categories: [
+                      { id: "productivity", name: "Productivity" },
+                      { id: "email", name: "Email" },
+                    ],
+                    tools_count: 63,
+                  },
                 },
-              },
-              // A toolkit that publishes none of the optional fields, because several do. An
-              // administrator picking from a few hundred apps is better served by a missing logo
-              // than by a broken one, so the absence has to survive as null rather than as "".
-              {
-                slug: "sparse",
-                name: "Sparse",
-                isLocalToolkit: false,
-                meta: {},
-              },
-            ];
+                // A toolkit that publishes none of the optional fields, because several do. An
+                // administrator picking from a few hundred apps is better served by a missing logo
+                // than by a broken one, so the absence has to survive as null rather than as "".
+                {
+                  slug: "sparse",
+                  name: "Sparse",
+                  is_local_toolkit: false,
+                  meta: {},
+                },
+              ],
+            };
           },
         },
       }),
@@ -426,11 +447,11 @@ describe("the app catalogue", () => {
 
     const apps = await broker.listApps();
 
-    // The catalogue is asked for one page at the documented ceiling, ordered by usage so the apps
-    // anybody actually connects are at the top. No search term: the SDK's list params have no such
-    // field, so one passed here would be stripped before the request and the caller would be
-    // filtering against a list nobody filtered.
-    expect(asked).toEqual([{ limit: WHOLE_LISTING, sortBy: "usage" }]);
+    // Pages at the documented ceiling, ordered by usage so the apps anybody actually connects come
+    // first, and carrying no cursor field on the first request. No search term: the catalogue is
+    // held for ten minutes and searched in this process by both of its callers, so a per-term
+    // request would be a per-term cache.
+    expect(asked).toEqual([{ limit: WHOLE_LISTING, sort_by: "usage" }]);
     expect(apps).toEqual([
       {
         slug: "gmail",
@@ -472,7 +493,7 @@ describe("holding the catalogue", () => {
   const GMAIL = {
     slug: "gmail",
     name: "Gmail",
-    meta: { description: "Send and read mail.", toolsCount: 63 },
+    meta: { description: "Send and read mail.", tools_count: 63 },
   };
   const GMAIL_ROW = {
     slug: "gmail",
@@ -489,9 +510,9 @@ describe("holding the catalogue", () => {
     const { broker } = buildComposioClient(
       fakeVendor({
         toolkits: {
-          get: async () => {
+          list: async () => {
             calls += 1;
-            return [GMAIL];
+            return { items: [GMAIL] };
           },
         },
       }),
@@ -515,16 +536,22 @@ describe("holding the catalogue", () => {
     const { broker } = buildComposioClient(
       fakeVendor({
         toolkits: {
-          get: async () => {
+          list: async () => {
             calls += 1;
             // The catalogue moves between the two reads, which is the only way to tell a second
             // request apart from a cache that happened to be asked twice.
             return calls === 1
-              ? [GMAIL]
-              : [
-                  GMAIL,
-                  { slug: "linear", name: "Linear", meta: { toolsCount: 12 } },
-                ];
+              ? { items: [GMAIL] }
+              : {
+                  items: [
+                    GMAIL,
+                    {
+                      slug: "linear",
+                      name: "Linear",
+                      meta: { tools_count: 12 },
+                    },
+                  ],
+                };
           },
         },
       }),
@@ -551,14 +578,14 @@ describe("holding the catalogue", () => {
 
   test("callers arriving while a listing is in flight share the one request", async () => {
     let calls = 0;
-    let answer: (toolkits: unknown[]) => void = () => {};
-    const inFlight = new Promise<unknown[]>((resolve) => {
+    let answer: (page: { items: unknown[] }) => void = () => {};
+    const inFlight = new Promise<{ items: unknown[] }>((resolve) => {
       answer = resolve;
     });
     const { broker } = buildComposioClient(
       fakeVendor({
         toolkits: {
-          get: () => {
+          list: () => {
             calls += 1;
             return inFlight;
           },
@@ -571,7 +598,7 @@ describe("holding the catalogue", () => {
     // together, or one debounce firing twice, all arrive before the first answer exists. A cache
     // that held the ROWS rather than the request would be empty for every one of them.
     const both = Promise.all([broker.listApps(), broker.listApps()]);
-    answer([GMAIL]);
+    answer({ items: [GMAIL] });
     const [first, second] = await both;
 
     expect(calls).toBe(1);
@@ -584,13 +611,13 @@ describe("holding the catalogue", () => {
     const { broker } = buildComposioClient(
       fakeVendor({
         toolkits: {
-          get: async () => {
+          list: async () => {
             calls += 1;
             // The real first failure here is a key that is unset or wrong, and the operator who
             // fixes it presses the button again within seconds. A cached refusal would keep
             // refusing for ten minutes with nothing left to fix.
             if (calls === 1) throw new Error("Composio refused the catalogue.");
-            return [GMAIL];
+            return { items: [GMAIL] };
           },
         },
       }),
@@ -2003,34 +2030,61 @@ describe("refusals a route can tell from an outage", () => {
  * What the catalogue is allowed to be, given that it is cached and then believed.
  */
 describe("a catalogue that might be a fragment", () => {
-  test("a full page is refused rather than held for ten minutes", async () => {
+  /**
+   * THIS TEST ASSERTED THE OPPOSITE AND WAS CHANGED ON PURPOSE, WHICH IS WORTH READING BEFORE THE
+   * CODE UNDER IT.
+   *
+   * It was "a full page is refused rather than held for ten minutes", and it pinned a refusal whose
+   * stated reason was that "`LISTING_LIMIT` is the largest page the toolkit endpoint allows and the
+   * SDK drops the response's cursor, so a catalogue of exactly this size and one larger answer
+   * identically". The consequence it guarded against is real and is still guarded: a fragment
+   * committed here is served for ten minutes to the picker AND to the enable route, which then
+   * tells an administrator that a real app "is not an app Composio lists".
+   *
+   * WHAT WAS FALSE WAS THE PREMISE. The cursor exists on the raw client and always did — see the
+   * paging tests at the end of this file — so the two answers the refusal said were
+   * indistinguishable are told apart by asking for the next page. And the refusal's cost was not
+   * hypothetical: Composio publishes more than {@link WHOLE_LISTING} toolkits, so it fired on the
+   * first call every time and the app picker showed an operator nothing at all.
+   *
+   * SO THE ASSERTION IS INVERTED RATHER THAN DELETED, and it is inverted at the same boundary. A
+   * page of exactly {@link WHOLE_LISTING} rows with a cursor still outstanding is the shape that
+   * used to be refused; what is asserted now is that the row on the far side of it arrives.
+   */
+  test("a full page is read on from rather than refused", async () => {
     let calls = 0;
     const { broker } = buildComposioClient(
       fakeVendor({
         toolkits: {
-          get: async () => {
+          list: async (query: unknown) => {
             calls += 1;
-            return Array.from({ length: WHOLE_LISTING }, (_, index) => ({
-              slug: `app_${index}`,
-              name: `App ${index}`,
-              meta: {},
-            }));
+            return (query as { cursor?: string }).cursor === undefined
+              ? {
+                  items: Array.from({ length: WHOLE_LISTING }, (_, index) => ({
+                    slug: `app_${index}`,
+                    name: `App ${index}`,
+                    meta: {},
+                  })),
+                  next_cursor: "page_2",
+                }
+              : {
+                  items: [
+                    { slug: "the_one_past_the_cut", name: "Past", meta: {} },
+                  ],
+                  next_cursor: null,
+                };
           },
         },
       }),
       () => 1_000_000,
     );
 
-    /*
-     * `LISTING_LIMIT` is the largest page the toolkit endpoint allows and the SDK drops the
-     * response's cursor, so a catalogue of exactly this size and one larger answer identically.
-     * Committed, the fragment would be served for ten minutes to the picker AND to the enable
-     * route, which tells an administrator that a real app "is not an app Composio lists".
-     */
-    await expect(broker.listApps()).rejects.toThrow(/largest page/);
-    // And the refusal is not what gets held: the next caller asks again.
-    await expect(broker.listApps()).rejects.toThrow(/largest page/);
+    const apps = await broker.listApps();
+
     expect(calls).toBe(2);
+    expect(apps).toHaveLength(WHOLE_LISTING + 1);
+    // The app an administrator would have been told Composio does not publish.
+    expect(apps.at(-1)?.slug).toBe("the_one_past_the_cut");
   });
 
   test("each caller gets its own rows, so one of them cannot edit the cache", async () => {
@@ -2038,17 +2092,19 @@ describe("a catalogue that might be a fragment", () => {
       fakeVendor({
         authConfigs: { list: ourGmailConfig },
         toolkits: {
-          get: async () => [
-            {
-              slug: "gmail",
-              name: "Gmail",
-              meta: {
-                description: "Send and read mail.",
-                categories: [{ slug: "productivity", name: "Productivity" }],
-                toolsCount: 63,
+          list: async () => ({
+            items: [
+              {
+                slug: "gmail",
+                name: "Gmail",
+                meta: {
+                  description: "Send and read mail.",
+                  categories: [{ id: "productivity", name: "Productivity" }],
+                  tools_count: 63,
+                },
               },
-            },
-          ],
+            ],
+          }),
         },
       }),
       () => 1_000_000,
@@ -2250,7 +2306,7 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
   }[] = [
     {
       method: "listApps",
-      vendor: (raise) => ({ toolkits: { get: raise } }),
+      vendor: (raise) => ({ toolkits: { list: raise } }),
       ask: ({ broker }) => broker.listApps(),
     },
     {
@@ -2303,7 +2359,7 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
     },
     {
       method: "listActions",
-      vendor: (raise) => ({ tools: { getRawComposioTools: raise } }),
+      vendor: (raise) => ({ tools: { list: raise } }),
       ask: ({ actions }) =>
         actions.listActions("gmail", { limit: WHOLE_LISTING }),
     },
@@ -2862,7 +2918,7 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
         return {
           parts: {
             toolkits: {
-              get: async () => {
+              list: async () => {
                 sent.push("toolkits.get");
                 return answer;
               },
@@ -2977,7 +3033,7 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
         return {
           parts: {
             tools: {
-              getRawComposioTools: async () => {
+              list: async () => {
                 sent.push("tools.getRawComposioTools");
                 return answer;
               },
@@ -3679,7 +3735,7 @@ describe("what a malformed field of a row actually costs", () => {
       row: {
         slug: "gmail",
         name: "Gmail",
-        meta: { categories: [{ slug: "productivity" }] },
+        meta: { categories: [{ id: "productivity" }] },
       },
       names: /categor/,
     },
@@ -3687,7 +3743,7 @@ describe("what a malformed field of a row actually costs", () => {
       fault: "an action count that arrived as a string",
       // `Number("63")` is the defect this whole sweep is about: a vendor change turned into a
       // plausible figure, shown BEFORE anybody enables an app, that nobody would think to question.
-      row: { slug: "gmail", name: "Gmail", meta: { toolsCount: "63" } },
+      row: { slug: "gmail", name: "Gmail", meta: { tools_count: "63" } },
       names: /count/,
     },
   ];
@@ -3695,7 +3751,7 @@ describe("what a malformed field of a row actually costs", () => {
   for (const { fault, row, names } of CATALOGUE_ROWS) {
     test(`a catalogue row with ${fault} stops the directory`, async () => {
       const { broker } = buildComposioClient(
-        fakeVendor({ toolkits: { get: async () => [row] } }),
+        fakeVendor({ toolkits: { list: async () => ({ items: [row] }) } }),
         () => 1_000_000,
       );
 
@@ -3730,10 +3786,12 @@ describe("what a malformed field of a row actually costs", () => {
     const { actions } = buildComposioClient(
       fakeVendor({
         tools: {
-          getRawComposioTools: async () => [
-            { slug: "GMAIL_FETCH_EMAILS", name: "Fetch emails" },
-            { slug: "   ", name: "Send mail" },
-          ],
+          list: async () => ({
+            items: [
+              { slug: "GMAIL_FETCH_EMAILS", name: "Fetch emails" },
+              { slug: "   ", name: "Send mail" },
+            ],
+          }),
         },
       }),
     );
@@ -3775,9 +3833,11 @@ describe("what a malformed field of a row actually costs", () => {
       const { broker } = buildComposioClient(
         fakeVendor({
           toolkits: {
-            get: async () => [
-              { slug: "gmail", name: "Gmail", meta: { categories: [entry] } },
-            ],
+            list: async () => ({
+              items: [
+                { slug: "gmail", name: "Gmail", meta: { categories: [entry] } },
+              ],
+            }),
           },
         }),
         () => 1_000_000,
@@ -3850,7 +3910,7 @@ describe("what a malformed field of a row actually costs", () => {
     },
     {
       fault: "an input schema that is not an object",
-      row: { slug: "GMAIL_FETCH_EMAILS", inputParameters: "not-a-schema" },
+      row: { slug: "GMAIL_FETCH_EMAILS", input_parameters: "not-a-schema" },
       names: /input schema/,
     },
     {
@@ -3861,7 +3921,7 @@ describe("what a malformed field of a row actually costs", () => {
   ]) {
     test(`an action with ${fault} stops the listing rather than crossing the seam`, async () => {
       const { actions } = buildComposioClient(
-        fakeVendor({ tools: { getRawComposioTools: async () => [row] } }),
+        fakeVendor({ tools: { list: async () => ({ items: [row] }) } }),
       );
 
       const failure = await failureOf(
@@ -3887,7 +3947,7 @@ describe("what a malformed field of a row actually costs", () => {
     const { actions } = buildComposioClient(
       fakeVendor({
         tools: {
-          getRawComposioTools: async () => [{ slug: "GMAIL_FETCH_EMAILS" }],
+          list: async () => ({ items: [{ slug: "GMAIL_FETCH_EMAILS" }] }),
         },
       }),
     );
@@ -4210,9 +4270,11 @@ describe("a field Composio padded with whitespace", () => {
     const { broker } = buildComposioClient(
       fakeVendor({
         toolkits: {
-          get: async () => [
-            { slug: "  gmail  ", name: " Gmail ", meta: { toolsCount: 63 } },
-          ],
+          list: async () => ({
+            items: [
+              { slug: "  gmail  ", name: " Gmail ", meta: { tools_count: 63 } },
+            ],
+          }),
         },
       }),
       () => 1_000_000,
@@ -4279,9 +4341,9 @@ describe("a field Composio padded with whitespace", () => {
     const { actions } = buildComposioClient(
       fakeVendor({
         tools: {
-          getRawComposioTools: async () => [
-            { slug: " GMAIL_FETCH_EMAILS ", version: "20260903_00" },
-          ],
+          list: async () => ({
+            items: [{ slug: " GMAIL_FETCH_EMAILS ", version: "20260903_00" }],
+          }),
         },
       }),
     );
@@ -4463,5 +4525,297 @@ describe("the key becoming a vendor, and which delete that vendor carries", () =
       `the raw client's connectedAccounts.delete ["ca_1",{"revoke_on_delete":true}]`,
       `the raw client's authConfigs.delete ["${OUR_GMAIL.id}",{"revoke_on_delete":true}]`,
     ]);
+  });
+});
+
+/**
+ * THE TWO LISTINGS THAT USED TO REFUSE A FULL PAGE, NOW READ TO THE END OF THEIR CURSORS.
+ *
+ * These were the last two places in this file where a request the vendor can answer was described
+ * as one this deployment cannot express. It can: `@composio/client` 0.1.0-alpha.76 declares
+ * `cursor` on both `ToolkitListParams` (`resources/toolkits.d.ts:467-478`) and `ToolListParams`
+ * (`resources/tools.d.ts:421-432`), and `next_cursor` on both responses (`:322-326` and
+ * `:200-204`). What had no cursor was the WRAPPER around them — `transformToolkitListResponse`
+ * returns `response.items.map(...)`, a bare array with the cursor dropped, and
+ * `ToolListParamsSchema` names no cursor field at all — and the two refusals blamed the vendor for
+ * the wrapper's shape.
+ *
+ * IT MATTERED MOST WHERE IT COST MOST. Composio publishes more than {@link WHOLE_LISTING} toolkits,
+ * so the catalogue refusal fired on the FIRST call every time and an operator opening the app
+ * picker saw no apps at all — not a truncated directory, none. The tests below are about the rows
+ * on the SECOND page, because a reader that stops at the first is exactly as wrong as the old
+ * refusal was and answers far more plausibly.
+ */
+describe("listings Composio pages, read to the end", () => {
+  /** One catalogue row, complete, so a test about paging is not also a test about a field. */
+  const app = (slug: string) => ({
+    slug,
+    name: slug.toUpperCase(),
+    meta: {
+      description: `The ${slug} app.`,
+      logo: `https://logo.test/${slug}.png`,
+      categories: [{ id: "productivity", name: "Productivity" }],
+      tools_count: 3,
+    },
+  });
+
+  /** One action row as the raw client hands it over, which is snake_case and unparsed. */
+  const action = (slug: string) => ({
+    slug,
+    description: `Does ${slug}.`,
+    input_parameters: { type: "object", properties: {} },
+    tags: ["readOnlyHint"],
+    version: "20260903_00",
+  });
+
+  test("an app on the catalogue's second page is an app the picker can find", async () => {
+    const asked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          list: async (query: unknown) => {
+            asked.push(query);
+            return (query as { cursor?: string }).cursor === undefined
+              ? { items: [app("slack")], next_cursor: "page_2" }
+              : { items: [app("gmail")], next_cursor: null };
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    // `gmail` is the whole test, and it is the app the operator waiting on this actually typed.
+    // Under the old refusal this call answered nothing at all; under a pager that stopped at page
+    // one it answers an app short and says so nowhere.
+    expect((await broker.listApps()).map((one) => one.slug)).toEqual([
+      "slack",
+      "gmail",
+    ]);
+    // The first request carries no cursor FIELD rather than an undefined one, and the second
+    // carries the vendor's own word for where it left off.
+    expect(asked).toEqual([
+      { limit: WHOLE_LISTING, sort_by: "usage" },
+      { limit: WHOLE_LISTING, sort_by: "usage", cursor: "page_2" },
+    ]);
+  });
+
+  test("an action on the second page is an action the refresh records", async () => {
+    const asked: unknown[] = [];
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          list: async (query: unknown) => {
+            asked.push(query);
+            return (query as { cursor?: string }).cursor === undefined
+              ? { items: [action("GMAIL_FETCH_EMAILS")], next_cursor: "page_2" }
+              : { items: [action("GMAIL_SEND_EMAIL")], next_cursor: null };
+          },
+        },
+      }),
+    );
+
+    const listed = await actions.listActions("gmail", { limit: WHOLE_LISTING });
+
+    expect(listed.map((one) => one.slug)).toEqual([
+      "GMAIL_FETCH_EMAILS",
+      "GMAIL_SEND_EMAIL",
+    ]);
+    // `refreshTools` commits a listing as the complete truth about an app — the write is a delete
+    // and an insert — so an action left on page two is an action DELETED from `mcp_tools` under a
+    // refresh that reported success, taking every grant pointing at it.
+    expect(listed[1]).toEqual({
+      slug: "GMAIL_SEND_EMAIL",
+      description: "Does GMAIL_SEND_EMAIL.",
+      inputParameters: { type: "object", properties: {} },
+      tags: ["readOnlyHint"],
+      version: "20260903_00",
+    });
+    /*
+     * THE QUERY IS ASSERTED BECAUSE THREE OF ITS FIELDS ARE THINGS THE WRAPPER USED TO DO FOR US.
+     * `toolkit_versions` is the SDK's own default, forwarded on every listing it made
+     * (`@composio/core` 0.18.1, `src/models/Tools.ts:548`), and it decides which `version` each
+     * action comes back with — the value a later call sends back to Composio. `limit` is the page,
+     * and its absence is what used to let the vendor apply twenty. And `important` is named
+     * NOWHERE, deliberately: the wrapper set it to "true" whenever a toolkit query gave no limit
+     * (`:505-515`), which narrows the answer to a featured subset that nothing in the answer
+     * declares.
+     */
+    expect(asked).toEqual([
+      {
+        toolkit_slug: "gmail",
+        limit: WHOLE_LISTING,
+        toolkit_versions: "latest",
+      },
+      {
+        toolkit_slug: "gmail",
+        limit: WHOLE_LISTING,
+        toolkit_versions: "latest",
+        cursor: "page_2",
+      },
+    ]);
+  });
+
+  test("a catalogue cursor this deployment cannot follow refuses rather than truncates", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          list: async () => ({ items: [app("slack")], next_cursor: 7 }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(broker.listApps());
+
+    // A number is a position this deployment cannot express and cannot rule out being real, so it
+    // is the fault it always was. Coercing it to "7" would be the fragment-read-as-whole mistake
+    // the pager exists to prevent, wearing a default's clothes.
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(
+      /sent a number where the cursor to the next page/,
+    );
+    expect(refusal.message).toMatch(/Composio's app catalogue/);
+  });
+
+  test("an action cursor this deployment cannot follow refuses rather than truncates", async () => {
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          list: async () => ({
+            items: [action("GMAIL_FETCH_EMAILS")],
+            next_cursor: { page: 2 },
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      actions.listActions("gmail", { limit: WHOLE_LISTING }),
+    );
+
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/an object/);
+    expect(refusal.message).toMatch(/gmail's actions/);
+  });
+
+  test("a catalogue page that is not a page of rows refuses", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: { list: async () => ({ items: "gmail" }) },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(broker.listApps());
+
+    /*
+     * THE CONTAINER IS THIS FILE'S TO CHECK NOW, WHICH IT WAS NOT BEFORE. The wrapper dereferenced
+     * every answer on its way out — `response.items.map(...)` — so a malformed envelope died inside
+     * the vendor's package and reached a reader as the translated `TypeError`. Reading the raw
+     * client means nothing dereferences it before this file does, and `rows.push(...items)` over a
+     * string is "string is not iterable" with nothing in it a person can act on.
+     */
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/sent a string where the rows/);
+    expect(refusal.message).toMatch(/Composio's app catalogue/);
+  });
+
+  test("an action page that is not a page of rows refuses", async () => {
+    const { actions } = buildComposioClient(
+      fakeVendor({ tools: { list: async () => null } }),
+    );
+
+    const refusal = await failureOf(
+      actions.listActions("gmail", { limit: WHOLE_LISTING }),
+    );
+
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/gmail's actions/);
+  });
+
+  test("the catalogue stops at the page ceiling rather than reading a listing that never ends", async () => {
+    let pages = 0;
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          list: async () => {
+            pages += 1;
+            return {
+              items: [app(`app_${pages}`)],
+              next_cursor: `page_${pages}`,
+            };
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(broker.listApps());
+
+    // The number of pages READ and the number the refusal STATES, both against the literal.
+    expect(pages).toBe(PAGES_BEFORE_REFUSING);
+    expect(refusal.message).toMatch(
+      new RegExp(`answered ${PAGES_BEFORE_REFUSING} pages`),
+    );
+    expect(refusal.message).toMatch(/Composio's app catalogue/);
+  });
+
+  test("a catalogue row whose metadata is not an object refuses", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          list: async () => ({
+            items: [{ slug: "gmail", name: "Gmail", meta: "productivity" }],
+          }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(broker.listApps());
+
+    /*
+     * A GUARANTEE THAT CAME FROM THE WRAPPER AND LEAVES WITH IT. `transformToolkitListResponse`
+     * built each row's meta itself, spreading it into a fresh literal, so every meta arriving here
+     * was an object however the wire had spelled it. Nothing does that now, and `meta.description`
+     * off a string is `undefined` rather than a throw — so the app would have shown no description,
+     * no logo, no categories and no count, indistinguishable from an app that published none.
+     */
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(
+      /sent a string where gmail's description, logo, categories and action count belong/,
+    );
+  });
+
+  test("a catalogue row whose categories are not a list refuses", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          list: async () => ({
+            items: [
+              {
+                slug: "gmail",
+                name: "Gmail",
+                meta: { categories: "productivity" },
+              },
+            ],
+          }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(broker.listApps());
+
+    // The wrapper's `item.meta.categories?.map(...)` died on this one; nothing maps it now, so a
+    // string would be read as an app that publishes no categories at all.
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(
+      /sent a string where gmail's categories belong/,
+    );
   });
 });

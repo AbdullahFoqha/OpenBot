@@ -30,15 +30,22 @@ import {
  * anywhere in this file is a defect, not an optimisation, and it will not look like one: the
  * session API is the shortest path to most of what this file does the long way.
  *
- * EVERY LISTING PASSES AN EXPLICIT LIMIT. Composio's default page is 20, which is smaller than the
- * number of actions Gmail alone publishes, and for a tool listing the default does a second thing
- * as well: `getRawComposioTools` sets `important=true` whenever a toolkit query arrived with no
- * limit, no tags and no search (`@composio/core` 0.18.1, `src/models/Tools.ts:505-515`), so an
- * omitted limit silently narrows the answer to the vendor's own "important" subset and nothing in
- * the result says a filter was applied. A limit is therefore not tuning; it is the difference
- * between the list and a fragment of it that reads exactly like the list. {@link LISTING_LIMIT} is
- * the documented ceiling, and `./composio` explains why one page at the ceiling is the largest
- * listing this SDK can express at all.
+ * EVERY LISTING PASSES AN EXPLICIT LIMIT AND EVERY LISTING IS READ TO THE END OF ITS CURSOR.
+ * Composio's default page is 20, which is smaller than the number of actions Gmail alone publishes,
+ * and through the SDK's tool wrapper the default did a second thing as well: `getRawComposioTools`
+ * set `important=true` whenever a toolkit query arrived with no limit, no tags and no search
+ * (`@composio/core` 0.18.1, `src/models/Tools.ts:505-515`), so an omitted limit silently narrowed
+ * the answer to the vendor's own "important" subset and nothing in the result said a filter had
+ * been applied. {@link LISTING_LIMIT} is the documented page ceiling and therefore the fewest round
+ * trips a listing can be read in.
+ *
+ * AND THE LIMIT IS A PAGE RATHER THAN THE ANSWER, WHICH IS WHAT CHANGED. Two of the four listings
+ * here used to meet a full page and refuse it, because the SDK wrapper around them could not ask
+ * for a second — one takes no cursor, the other drops the response's. That was never true of the
+ * vendor: both raw endpoints carry `cursor` and `next_cursor`, and Composio publishes more than
+ * {@link LISTING_LIMIT} toolkits, so the catalogue refusal fired on every call and the app picker
+ * showed an operator nothing at all. All four now go through {@link everyRowOf}, which follows the
+ * cursor until the vendor stops offering one and refuses rather than truncates when it cannot.
  *
  * THE API KEY NEVER LEAVES THIS FILE. It arrives as {@link createComposioClient}'s only argument,
  * goes straight into the vendor's constructor, and is held from there on by the vendor's client
@@ -49,32 +56,28 @@ import {
  */
 
 /**
- * One tool as the vendor hands it over, in as much detail as anything here reads.
+ * One tool as the SDK's SINGLE-TOOL call hands it over, in as much detail as anything here reads.
  *
  * Declared structurally rather than imported as `Tool`, for the same reason the seams it feeds are
  * structural: a field this file does not read is a field a vendor rename cannot break. `toolkit`
  * is optional because the SDK spells it optional — see {@link ComposioActions.execute} below for
  * what is done when it is in fact missing.
  *
- * THIS IS THE ONE ROW THE SDK ACTUALLY VALIDATES. `Tools.transformToolCases` ends in
- * `ToolSchema.parse(...)` (`@composio/core` 0.18.1, `src/models/Tools.ts:193`), a throwing parse
- * rather than the warn-only `transform()` every other listing here goes through — and both calls
- * this file makes run through it (`:561` for the listing, `:719` for the single tool). So a tool
- * whose `slug` is missing, or whose `toolkit` is present without a `slug`, does not arrive as a
- * malformed row: it arrives as a `ZodError`. `ToolkitSchema` spells that inner `slug` required
- * (`src/types/tool.types.ts:12-16`), so `toolkit?: { slug: string }` is a guarantee this file may
- * rest on.
+ * THIS IS THE ONE ROW THE SDK STILL VALIDATES, AND IT IS NO LONGER TWO. `Tools.transformToolCases`
+ * ends in `ToolSchema.parse(...)` (`@composio/core` 0.18.1, `src/models/Tools.ts:193`), a throwing
+ * parse rather than the warn-only `transform()` every other answer here goes through, and
+ * `getRawComposioToolBySlug` runs it (`:719`). The LISTING used to as well (`:561`) and does not
+ * any more: it reads {@link VendorToolRow} off the raw client, because the wrapper that ran the
+ * parse is also the wrapper that could not be paged. So `ToolkitSchema` spelling that inner `slug`
+ * required (`src/types/tool.types.ts:12-16`) is a guarantee this declaration may still rest on,
+ * and it is a guarantee about exactly one call.
  *
- * AND THE THREE FIELDS THIS FILE HANDS ON ARE STILL `unknown`, WHICH IS WHERE THAT ARGUMENT STOPPED
- * BEING TRUE. It was taken one step too far: the parse is a fact about `getRawComposioTools` in one
- * version of one package, and what these declarations govern is {@link ComposioVendor} — the seam a
- * test satisfies with a literal and the shape the next version will be read against. Running it
- * shows the gap is not academic: a `description` of 42 crosses into `./composio` as the `string`
- * this said it was and reaches `.replaceAll` in `./store` as a bare `TypeError`. A declaration is
- * an assertion and not a check, so the three values {@link actionOf} carries across are declared
- * at what the wire can hold and checked there. `slug` stays narrow because `ToolSchema` requires it
- * AND {@link actionOf} checks it anyway; `tags` stays narrow because `./composio` refuses a
- * non-list where it reads them.
+ * WHAT THIS FILE HANDS ON IS STILL `unknown`, WHICH IS WHERE THAT ARGUMENT ALWAYS STOPPED BEING
+ * TRUE. A parse is a fact about one method of one version of one package, and what these
+ * declarations govern is {@link ComposioVendor} — the seam a test satisfies with a literal and the
+ * shape the next version will be read against. Running it shows the gap is not academic: a
+ * `description` of 42 crosses into `./composio` as the `string` this said it was and reaches
+ * `.replaceAll` in `./store` as a bare `TypeError`. A declaration is an assertion and not a check.
  */
 type VendorTool = {
   slug: string;
@@ -86,69 +89,72 @@ type VendorTool = {
 };
 
 /**
- * One catalogue row as the vendor hands it over.
+ * One tool as the LISTING hands it over, which is the wire's own spelling and nobody's parse.
+ *
+ * SNAKE_CASE BECAUSE THIS IS COMPOSIO'S ANSWER RATHER THAN THE SDK'S RESTATEMENT OF IT. The listing
+ * reads `client.tools.list` directly — see {@link ComposioVendor} for why it has to — so nothing
+ * renames `input_parameters` on the way here and nothing runs `ToolSchema` over it. Both halves of
+ * that are deliberate. The rename was never a service: `transformToolCases` re-spelled the field
+ * and `ToolSchema.parse` then STRIPPED every schema key its `ParametersSchema` did not name —
+ * `if`, `then`, `else`, `examples`, every `x-` extension at the root, and `deprecated` and
+ * `contentEncoding` per property (`@composio/core` 0.18.1, `src/types/tool.types.ts:77-174`) —
+ * before any caller could see them. What a model is shown is now what Composio published; see
+ * {@link ComposioAction.inputParameters}, where that loss was written down as unavoidable.
+ *
+ * AND EVERY FIELD IS DECLARED AT WHAT THE WIRE CAN HOLD, because with the parse gone there is
+ * nothing between Composio and {@link actionOf} at all. `slug` widens for exactly that reason:
+ * `ToolSchema` required it and nothing does now, and `actionOf` was already checking it anyway.
+ * `tags` stays narrow on the same argument it always stood on, which never involved the parse —
+ * `./composio` refuses a `tags` that is not a list of labels where it reads them, container and
+ * contents both, and a check on both sides of one seam is a check nobody maintains.
+ */
+type VendorToolRow = {
+  slug?: unknown;
+  description?: unknown;
+  input_parameters?: unknown;
+  tags?: string[];
+  version?: unknown;
+};
+
+/**
+ * One catalogue row as the vendor hands it over, which is the wire's own spelling and nobody's map.
  *
  * `meta` is where all of it lives and every field of it is optional, which is not the SDK being
  * cautious: Composio genuinely publishes toolkits with no logo, no description and no category.
  * See {@link ComposioBroker.listApps} below for what each absence becomes.
  *
- * WIDER THAN THE SDK'S OWN SCHEMA, BECAUSE THE SCHEMA IS NOT ENFORCED ON THIS PATH. `transform()`
- * validates with `safeParse` and, where that fails, logs a warning and `return transformed` — the
- * unvalidated object — anyway (`@composio/core` 0.18.1, `src/utils/transform.ts:26-36`). So
- * `ToolKitItemSchema` spelling `name` required and `toolsCount` a number describes the answer
- * Composio means to send rather than the one this file has to be able to read: a row whose `name`
- * is null, or whose count arrives as a string, reaches the map below exactly as it came off the
- * wire and the only thing that noticed was a log line. A TypeScript interface over a wire value is
- * an assertion and not a check, so the least this one can do is assert something true.
+ * SNAKE_CASE AND `unknown` THROUGHOUT, BECAUSE THE TRANSFORMER THIS WAS WRITTEN AGAINST IS GONE.
+ * The catalogue reads `client.toolkits.list` directly — see {@link ComposioVendor} for why it has
+ * to — so `transformToolkitListResponse` no longer stands between Composio and {@link appOf}, and
+ * three things it was doing have to be accounted for rather than assumed.
  *
- * `meta` ITSELF IS NOT WIDENED, AND THAT IS A FINDING RATHER THAN AN OVERSIGHT.
- * `transformToolkitListResponse` builds each row's meta itself and reads `item.meta.categories`
- * while doing so (`src/utils/transformers/toolkits.ts:21-34`), so a row that carries no meta never
- * arrives here at all — the read throws and `Toolkits.getToolkits` rethrows it as
- * `ComposioToolkitFetchError` (`src/models/Toolkits.ts:76-82`). Every row that does arrive carries
- * a meta object. Its `categories` are objects for the same reason, the transformer constructing
- * each one; the values inside them are copied across verbatim and are therefore worth exactly what
- * the wire is worth.
+ * IT RENAMED, so the count is `tools_count` here and the category's own word is `name`
+ * (`@composio/client` 0.1.0-alpha.76, `resources/toolkits.d.ts:405-435`). That rename was the one
+ * thing in this projection easiest to get silently wrong — a count read off the wrong key is a
+ * plausible zero rather than an error — which is why {@link appOf} is where it is read and why a
+ * test asserts the figure rather than the field.
  *
- * `description` AND `toolsCount` ARE `unknown` RATHER THAN A WIDER UNION, because the wire can put
- * anything in them and a union would be another guess. `unknown` is the type that forces the
- * reader to say what it does with a value it has not checked, which is the whole point.
+ * IT REBUILT `meta` AND THE `categories` LIST, spreading each into a fresh literal and mapping
+ * every entry (`@composio/core` 0.18.1, `src/utils/transformers/toolkits.ts:21-34`). Those were
+ * this file's two structural guarantees and they were real: a `meta` of null and a `categories` of
+ * "crm" each raised a `TypeError` from that line when 0.18.1 was run, which is why neither was
+ * declared `unknown` and neither was checked. Nothing raises now. A `meta` that is a string reads
+ * as an app with no description, no logo, no categories and no count, and a `categories` that is a
+ * string reads as an app in no category — two silent, plausible answers about a real app. Both are
+ * declared at what the wire can hold and both are refused in {@link appOf}.
  *
- * `slug` IS AS WIDE AS `name`, AND FOR THE SAME REASON. `ToolKitItemSchema` spells it required and
- * the warn-only `transform()` above copies it across whatever it turns out to be, exactly as it does
- * the name. A slug is the only name this deployment has for an app — it is what enabling one records
- * and what every later call names — so the one it must not quietly become is `undefined` read as a
- * string. {@link appOf} refuses that.
- *
- * EVERY WIRE-VALUED FIELD IS `unknown` AND EVERY STRUCTURAL ONE IS NOT, which is the split the whole
- * file now turns on. `meta` and its `categories` array are built by
- * `transformToolkitListResponse` itself (`src/utils/transformers/toolkits.ts:21-34`) — it reads
- * `item.meta.categories` and maps each category into `{ slug, name }` — so a row with no meta and a
- * `categories` that is not a list both fail INSIDE that function and reach nothing here. Those two
- * are guarantees, and they were verified rather than reasoned about: a `meta` of null and a
- * `categories` of "crm" each raise a `TypeError` from that line when 0.18.1 is actually run.
- *
- * AND THE THIRD ONE WAS NOT, WHICH IS WHY THE ENTRY IS `unknown`. This said that "a category that
- * is not an object" fails there too, and running it says otherwise: `category.id` on the string
- * "crm" is `undefined` and not a throw, so a string, a number or a boolean in that list survives
- * the map — as `{ slug: undefined, name: undefined }`, which reaches {@link appOf} wearing the
- * shape of a category whose name Composio omitted. Only null and undefined die there. The claim was
- * load-bearing for a guard that was deleted on the strength of it, so the entry is declared at what
- * the vendor's own dereference actually promises, which is nothing.
- *
- * What the same lines copy across verbatim — the name, the slug, the description, the logo, each
- * category's name and the count — is worth exactly what the wire is worth, so all of it is
- * `unknown` or nullable and {@link appOf} says what it does with each.
+ * AND IT NEVER VALIDATED, which is the part that does not change. `transform()` checks with
+ * `safeParse` and, where that fails, logs a warning and returns the unvalidated object anyway
+ * (`src/utils/transform.ts:26-36`), so `ToolKitItemSchema` spelling `name` required and the count a
+ * number always described the answer Composio MEANS to send rather than the one that arrived. Every
+ * wire-valued field was already `unknown` on that argument and stays so: the slug, which is the
+ * only name this deployment has for an app; the name, which is the only thing to show a person
+ * choosing between apps; the description, the logo, each category's word, and the count.
  */
 type VendorToolkit = {
   slug?: unknown;
   name?: unknown;
-  meta: {
-    description?: unknown;
-    logo?: unknown;
-    categories?: unknown[];
-    toolsCount?: unknown;
-  };
+  meta?: unknown;
 };
 
 /**
@@ -326,16 +332,22 @@ function named(value: unknown): string {
  * settles rather than reasons about. Every list transformer dereferences the answer before
  * returning it: `response.items.map(...)` in `transformAuthConfigListResponse`
  * (`src/utils/transformers/authConfigs.ts:79`), in `transformConnectedAccountListResponse`
- * (`connectedAccounts.ts:113`) and in `getRawComposioTools` (`models/Tools.ts:561`), and
- * `item.meta.categories` inside the catalogue's own map (`toolkits.ts:27`). So a container of the
- * wrong shape — null, a bare list where an envelope belongs, an `items` that is a string — dies
- * inside the vendor's code and NEVER arrives here. Each of those guards was therefore a branch no
- * input could reach, sitting where the next reader would take it for the thing keeping them safe.
+ * (`connectedAccounts.ts:113`). So a container of the wrong shape — null, a bare list where an
+ * envelope belongs, an `items` that is a string — dies inside the vendor's code and NEVER arrives
+ * here. Each of those guards was therefore a branch no input could reach, sitting where the next
+ * reader would take it for the thing keeping them safe.
  *
  * WHAT KEEPS THEM SAFE IS ONE LAYER DOWN NOW. The vendor's crash is a bare `TypeError`, and
  * {@link vendorRefusal} translates it into a sentence naming what did not happen and the one act
  * that changes it — which catches every malformed container, including the shapes nobody here
  * thought to enumerate.
+ *
+ * AND IT IS TWO OF THE FOUR LISTINGS NOW RATHER THAN ALL OF THEM, WHICH IS THE COST OF PAGING THE
+ * OTHER TWO. The catalogue and the action listing read `@composio/client` directly — a generated
+ * client that parses the body and returns it — so nothing dereferences their answers before this
+ * file does. The same two shapes therefore reach this code rather than dying in the vendor's, and
+ * {@link pageOf} answers them at exactly those two call sites. The argument above still holds
+ * everywhere it is made: a guard is written where an input can reach it and nowhere else.
  *
  * SO THE DECLARATIONS BELOW ARE READ AT THEIR TYPES, and each one says which vendor line makes it
  * true. The fields inside them stay `unknown`, because the warn-only `transform()` really does copy
@@ -369,24 +381,45 @@ function textOf(value: unknown): string | null {
 /**
  * How many pages of one listing this deployment will read before it stops and says so.
  *
- * THE BOUND IS AGAINST A VENDOR THAT NEVER STOPS, not against a large answer. Both listings paged
- * below are narrow — one app's authorization configs, or one person's accounts for one app — at
- * {@link LISTING_LIMIT} rows a page, so a second page is already extraordinary and a fiftieth is
- * not a data set. What it is is a cursor that keeps being handed back, which without a ceiling is
- * a request that never returns: a person waiting on a page they pressed disconnect from, and a
- * process holding every row it has read so far.
+ * THE BOUND IS AGAINST A VENDOR THAT NEVER STOPS, not against a large answer. What it guards is a
+ * cursor that keeps being handed back, which without a ceiling is a request that never returns: a
+ * person waiting on a page they pressed disconnect from, and a process holding every row it has
+ * read so far.
  *
  * REACHING IT IS A REFUSAL AND NEVER A TRUNCATION, which is the property the whole guard exists for
  * — see {@link everyRowOf}. A ceiling that answered with what it had would be the page ceiling
  * again, one order of magnitude further out and harder to notice.
  *
+ * IT WAS 50, AND 50 WAS ARGUED FROM TWO NARROW LISTINGS THAT ARE NO LONGER THE ONLY ONES. The
+ * number was justified by one app's authorization configs and one person's accounts for one app:
+ * at {@link LISTING_LIMIT} rows a page a second page is extraordinary there and a fiftieth is not
+ * a data set. The app CATALOGUE is not that listing. Composio publishes more than
+ * {@link LISTING_LIMIT} toolkits today, so it is a listing whose SECOND page is the ordinary case,
+ * and a ceiling reasoned about from the narrow two would be sitting on top of a healthy answer
+ * rather than above it.
+ *
+ * 200 IS CHOSEN AGAINST THE PAGE THE VENDOR MIGHT ACTUALLY SEND rather than the one asked for, and
+ * that is the whole of the arithmetic. Asking for {@link LISTING_LIMIT} does not oblige Composio to
+ * answer with it — the cursor is documented as "a base64 encoded string of the page and limit"
+ * (`@composio/client` 0.1.0-alpha.76, `resources/toolkits.d.ts:469-478`), so the page size is the
+ * vendor's to settle. At the page asked for, 200 is 200,000 rows, two orders of magnitude past any
+ * catalogue Composio has published. At the vendor's OWN default page of twenty it is 4,000 rows,
+ * which still clears today's catalogue with room — where 50 pages of twenty is 1,000, which is
+ * today's catalogue exactly, and a ceiling that lands on the real answer is a healthy vendor turned
+ * into a refusal. And 200 sequential requests is still a request that ends.
+ *
+ * ONE NUMBER FOR ALL FOUR LISTINGS, because the two narrow ones lose nothing by it: they refuse a
+ * runaway cursor after 200 pages instead of 50, and there is no state in which a real answer to
+ * either of those questions is even a second page. A per-listing ceiling would be a second number
+ * to reason about in exchange for tightening a bound that nothing genuine approaches.
+ *
  * AND IT IS THE NUMBER OF PAGES THAT ARE READ, WHICH IS NOT WHAT IT USED TO BE. The test stood
  * ahead of the line recording the page it was counting, so the set held one fewer than had
- * arrived and the refusal fired on the fifty-FIRST page while telling its reader fifty. A ceiling
- * is a number somebody reasons about; stating one and doing another makes it the one number here
- * nobody can check.
+ * arrived and the refusal fired on the two-hundred-FIRST page while telling its reader two hundred.
+ * A ceiling is a number somebody reasons about; stating one and doing another makes it the one
+ * number here nobody can check.
  */
-const PAGE_CEILING = 50;
+const PAGE_CEILING = 200;
 
 /**
  * The listing a refusal is about, as the two clauses every sentence below is built from.
@@ -405,12 +438,21 @@ type Listing = {
 /**
  * EVERY ROW OF A LISTING THE VENDOR PAGES, or a refusal rather than a fragment read as the whole.
  *
- * WHY THIS PAGES WHERE THE CATALOGUE REFUSES, which is the one decision worth writing down here.
- * `fetchDirectory` below meets a full page and refuses, and `./composio` does the same with a full
- * action listing, and both say why in the same words: the SDK offers no cursor to ask for a second
- * page with, so an answer at the ceiling and an answer past it are indistinguishable and no second
- * request could tell them apart. That is a refusal born of an inexpressible request rather than a
- * house style. Here the request IS expressible: `AuthConfigListParamsSchema` and
+ * EVERY LISTING IN THIS FILE COMES THROUGH HERE NOW, AND TWO OF THEM USED TO REFUSE INSTEAD. This
+ * paragraph said that `fetchDirectory` met a full page and refused, that `./composio` did the same
+ * with a full action listing, and that both were right to: "the SDK offers no cursor to ask for a
+ * second page with, so an answer at the ceiling and an answer past it are indistinguishable and no
+ * second request could tell them apart". The reasoning was sound and the premise was wrong. It was
+ * a fact about the WRAPPER — `ToolListParamsSchema` names no cursor and
+ * `transformToolkitListResponse` drops the response's — and never about the request, which the raw
+ * client has always been able to compose: both list params carry `cursor` and both responses carry
+ * `next_cursor` (`@composio/client` 0.1.0-alpha.76, `resources/toolkits.d.ts:467-478` and
+ * `:322-326`, `resources/tools.d.ts:421-432` and `:200-204`). The cost of the mistake was not
+ * theoretical: Composio publishes more than {@link LISTING_LIMIT} toolkits, so the catalogue
+ * refusal fired on the first call every time and the app picker showed an operator nothing at all.
+ * See {@link ComposioVendor}, where both of those listings now name the raw client.
+ *
+ * THE OTHER TWO WERE ALWAYS EXPRESSIBLE THROUGH THE WRAPPER: `AuthConfigListParamsSchema` and
  * `ConnectedAccountListParamsSchema` both name a `cursor` (`@composio/core` 0.18.1,
  * `src/types/authConfigs.types.ts:124-131`, `src/types/connectedAccounts.types.ts:259-266`), both
  * models forward it (`src/models/AuthConfigs.ts:95`, `src/models/ConnectedAccounts.ts:118`) and
@@ -430,15 +472,19 @@ type Listing = {
  * as a key, and an explicit undefined is not something this file needs to make the SDK have an
  * opinion about.
  *
- * THERE WAS A FOURTH REFUSAL AND IT IS GONE, which is worth saying because it was the one that read
- * as the most important. It stood at the top of the loop for a page that is not an envelope at all,
- * and no answer could reach it: both transformers begin `response.items.map(...)`
+ * THERE WAS A FOURTH REFUSAL HERE AND IT MOVED RATHER THAN DIED, which is the correction the raw
+ * client forces. It stood at the top of this loop for a page that is not an envelope at all, and
+ * for the two SDK listings no answer can reach it: both transformers begin `response.items.map(...)`
  * (`src/utils/transformers/authConfigs.ts:79`, `connectedAccounts.ts:113`), so a null, a bare list
- * and an `items` that is not one all raise a `TypeError` inside the vendor's own code. That is now
- * answered where it happens — see the `TypeError` row in {@link vendorRefusal} — which is both a
- * sentence the old branch could never have produced and a check that covers shapes nobody here
- * enumerated. What is left below are the three faults the vendor CAN hand over, all of them about
- * the cursor, because the cursor is the one field these transformers copy off the wire unchecked.
+ * and an `items` that is not one all raise a `TypeError` inside the vendor's own code, answered
+ * where it happens — see the `TypeError` row in {@link vendorRefusal}. Nothing dereferences the
+ * answer on the two RAW listings, so for those the same shapes reach this loop, and
+ * `rows.push(...answered.items)` over a string is "string is not iterable" with nothing in it a
+ * person can act on. {@link pageOf} is where that is answered, at the two call sites that need it,
+ * rather than as a branch every listing pays for and two of them cannot reach.
+ *
+ * What is left below are the three faults every one of the four can hand over, all of them about
+ * the cursor, because the cursor is the one field nothing on any of these paths checks.
  *
  * AND A QUESTION ALREADY ANSWERED STOPS HERE, WHICH IS WHAT `enough` IS FOR. Paging made three of
  * this file's answers complete and made one of them FAILABLE: {@link ComposioBroker.isConnected}
@@ -541,6 +587,50 @@ async function everyRowOf<Row>(
 }
 
 /**
+ * ONE PAGE OFF THE RAW CLIENT, CHECKED FOR BEING A PAGE, in the shape {@link everyRowOf} reads.
+ *
+ * THE TWO SDK LISTINGS DO NOT NEED THIS AND THE TWO RAW ONES CANNOT DO WITHOUT IT. Every answer the
+ * wrapper hands over has already been dereferenced inside the vendor's package — both transformers
+ * open with `response.items.map(...)` — so a malformed envelope there is a `TypeError` raised
+ * inside `@composio/core` and translated by {@link vendorRefusal} with a sentence about a package
+ * upgrade. `@composio/client` is a generated client: it parses the body and returns it. Nothing
+ * looks at `items` before this file does.
+ *
+ * SO THE TWO SHAPES THE WRAPPER USED TO CATCH ARE CAUGHT HERE, and they are the same two:
+ * an answer that is not an envelope, and an `items` that is not a list of rows. Both would
+ * otherwise reach `rows.push(...answered.items)` as a bare `TypeError` naming a vendor field —
+ * the crash-wearing-a-refusal's-clothes that every sentence in this file exists not to be.
+ *
+ * OUTSIDE {@link askVendor} RATHER THAN INSIDE IT, deliberately, and it is the reason this is a
+ * function rather than four lines at each call site. That wrapper goes around the `await vendor.*`
+ * AND NOTHING ELSE, which is what makes "a throw reaching `vendorRefusal` came out of the vendor's
+ * code" true by construction; a refusal composed here is this file's own reading, and it already
+ * carries an authored sentence.
+ *
+ * THE CURSOR IS RENAMED AND NOT READ. `next_cursor` is the wire's spelling and `nextCursor` is what
+ * {@link everyRowOf} looks for, and it is carried across as `unknown` — every check on it belongs
+ * there, where the three faults it can carry are enumerated and answered together for all four
+ * listings.
+ */
+async function pageOf<Row>(
+  listing: Listing,
+  ask: () => Promise<{ items?: unknown; next_cursor?: unknown } | null>,
+): Promise<{ items: Row[]; nextCursor?: unknown }> {
+  const answered = await ask();
+  if (answered === null || typeof answered !== "object") {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(answered)} where a page of ${listing.noun} belongs, so ${listing.consequence}: what came back is not a listing at all. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+  if (!Array.isArray(answered.items)) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(answered.items)} where the rows of ${listing.noun} belong, so ${listing.consequence}: what came back is not a listing at all. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+  return { items: answered.items as Row[], nextCursor: answered.next_cursor };
+}
+
+/**
  * One catalogue row checked into the app an administrator picks from, or a refusal saying why not.
  *
  * A ROW THIS FILE CANNOT READ STOPS THE WHOLE CATALOGUE, for the reason the full-page guard in
@@ -556,17 +646,31 @@ async function everyRowOf<Row>(
  * is not what it is declared to be. A count that arrived as the string "63" is not a count, and
  * `Number(x)` over it would turn a vendor change into a plausible figure nobody would question.
  *
- * WHAT IS NOT CHECKED IS THE ROW'S SHAPE, AND THAT IS THE SDK RATHER THAN AN OVERSIGHT. Two
+ * THE ROW'S SHAPE IS CHECKED AGAIN, AND THAT IS THE RAW CLIENT RATHER THAN A CHANGE OF MIND. Two
  * refusals used to open this function — one for a row that is not an object, one for a row with no
- * meta — and neither could be reached: `transformToolkitListResponse` reads `item.meta.categories`
- * while building each row (`@composio/core` 0.18.1, `src/utils/transformers/toolkits.ts:27`), and
- * `Toolkits.getToolkits` wraps the whole thing in a try that rethrows everything as
- * `ComposioToolkitFetchError` (`src/models/Toolkits.ts:70-82`). So a catalogue this deployment
- * cannot read never becomes a row here at all; it becomes that vendor class, whose bare "Failed to
- * fetch toolkits" and whose key-or-status-page remedy are what the route's default already says.
+ * meta — and they were deleted because neither could be reached: `transformToolkitListResponse`
+ * read `item.meta.categories` while building each row (`@composio/core` 0.18.1,
+ * `src/utils/transformers/toolkits.ts:27`) and `Toolkits.getToolkits` rethrew everything as
+ * `ComposioToolkitFetchError` (`src/models/Toolkits.ts:70-82`), so a catalogue this deployment
+ * could not read never became a row here at all. The catalogue does not go through that function
+ * any more — see {@link ComposioVendor} — and both shapes now arrive.
+ *
+ * BOTH ARE BACK RATHER THAN LEFT TO THE FIELD READS, and the reason is the category guard three
+ * screens down, which was deleted on the same reasoning and restored after it was RUN. `("gmail")
+ * .slug` is `undefined` and not a throw, so a row that is a bare string would be refused with
+ * "Composio sent nothing where the slug of row 1 of Composio's app catalogue belongs" — a sentence
+ * that sends an operator looking in a dashboard for an app with a missing slug, about an answer
+ * that had no app in it. A guard whose absence is argued from a dereference that does not
+ * dereference is not a guard anything should rest on.
  */
 function appOf(row: VendorToolkit, position: number): BrokerApp {
   const at = `row ${position + 1} of Composio's app catalogue`;
+
+  if (typeof row !== "object" || row === null || Array.isArray(row)) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row)} where ${at} belongs, and a catalogue row is an object carrying an app's slug and name. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
 
   const slug = textOf(row.slug);
   if (slug === null) {
@@ -583,19 +687,39 @@ function appOf(row: VendorToolkit, position: number): BrokerApp {
   }
 
   /*
-   * `meta` IS TAKEN AS AN OBJECT RATHER THAN CHECKED FOR ONE, and the reason is two lines of vendor
-   * code rather than the one this used to cite. `transformToolkitListResponse` reads
-   * `item.meta.categories` while it builds this row (`@composio/core` 0.18.1,
-   * `src/utils/transformers/toolkits.ts:27`), so a meta that is absent or null raises there — and
-   * that is ALL the read rules out, which is less than was claimed for it: running 0.18.1 with a
-   * meta of "hello" or of 5 raises nothing, because `.categories` on a primitive is `undefined`.
-   * What makes every meta arriving here an object is the next line, which spreads it into a fresh
-   * literal (`:24-38`). That is a guarantee about the transformer and not about the wire, and its
-   * cost is written down where it lands: a primitive meta arrives as the spread of itself, so the
-   * app shows no description, no logo, no categories and no count — four absences this function
-   * treats as an app that published none, because nothing that reaches here can tell them apart.
+   * `meta` IS CHECKED FOR BEING AN OBJECT, WHICH IT DID NOT USED TO BE AND NOW HAS TO BE.
+   *
+   * The argument for taking it on trust was `transformToolkitListResponse`: it read
+   * `item.meta.categories` while building each row and then spread the result into a fresh literal
+   * (`@composio/core` 0.18.1, `src/utils/transformers/toolkits.ts:24-38`), so a meta that was
+   * absent or null raised there and every meta that did arrive was an object whatever the wire had
+   * sent. That was a guarantee about the transformer, it was written down as one, and the catalogue
+   * no longer goes through it — see {@link ComposioVendor}, where the toolkit listing names the raw
+   * client because the wrapper could not be paged.
+   *
+   * WHAT THE ABSENT GUARD WOULD COST IS FOUR SILENT ABSENCES RATHER THAN A CRASH, which is the
+   * worse of the two. `meta.description` off the string "productivity" is `undefined`, not a throw,
+   * and so are the logo, the categories and the count — so a row this file cannot read would show
+   * on an administrator's screen as a real app that publishes nothing, indistinguishable from the
+   * many that genuinely publish little. Absent IS an answer here, which is exactly why a meta that
+   * is present and is not a meta cannot be allowed to look like one.
    */
-  const meta = row.meta;
+  const rawMeta = row.meta;
+  if (
+    typeof rawMeta !== "object" ||
+    rawMeta === null ||
+    Array.isArray(rawMeta)
+  ) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row.meta)} where ${slug}'s description, logo, categories and action count belong. Every one of those is a thing an app is allowed to publish none of, so a row whose metadata is not readable at all would show as a real app that publishes nothing rather than as the answer this deployment could not read. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+  const meta = rawMeta as {
+    description?: unknown;
+    logo?: unknown;
+    categories?: unknown;
+    tools_count?: unknown;
+  };
 
   const description = meta.description ?? "";
   if (typeof description !== "string") {
@@ -612,31 +736,35 @@ function appOf(row: VendorToolkit, position: number): BrokerApp {
   }
 
   /*
-   * THE LIST IS THE TRANSFORMER'S OWN CONSTRUCTION AND THE ENTRIES IN IT ARE NOT, which is a line
-   * that was drawn in the wrong place and has been moved back. `item.meta.categories?.map(category
-   * => ({ slug: category.id, name: category.name }))` is what fills this field
-   * (`src/utils/transformers/toolkits.ts:27-30`), and a `categories` that is not a list has no
-   * `.map` and dies there — that half held up when it was run.
+   * NEITHER THE LIST NOR THE ENTRIES IN IT ARE ANYBODY'S CONSTRUCTION NOW, so both are checked.
    *
-   * THE OTHER HALF DID NOT, AND IT IS WHY THE ENTRY GUARD IS BACK. It was deleted on the stated
-   * ground that "a category that is null throws on `.id`, and everything that survives is an
-   * object". Only the first clause is true. `("crm").id` is `undefined`, not a throw, and so is
-   * `(7).id` and `(true).id` — so a primitive in that list survives the map and comes out the other
-   * side as `{ slug: undefined, name: undefined }`. What that cost was not a crash but a LIE: the
-   * whole catalogue was refused with "Composio sent nothing where the name of gmail's category 1
-   * belongs", about a value that was the string "crm". An operator reading that goes looking in a
+   * The list used to be the transformer's: `item.meta.categories?.map(category => ({ slug:
+   * category.id, name: category.name }))` (`@composio/core` 0.18.1,
+   * `src/utils/transformers/toolkits.ts:27-30`) has no `.map` for a `categories` that is not a
+   * list, and that half genuinely held when it was run. It does not hold through the raw client,
+   * where nothing maps this field at all — a `categories` of "productivity" would simply read as an
+   * app in no category, which is a state real apps are in.
+   *
+   * THE ENTRY GUARD WAS ALREADY BACK, AND FOR A REASON WORTH KEEPING IN VIEW. It had been deleted
+   * on the ground that "a category that is null throws on `.id`, and everything that survives is an
+   * object". Only the first clause was ever true: `("crm").id` is `undefined`, not a throw, and so
+   * is `(7).id` — so a primitive survived the map as `{ slug: undefined, name: undefined }`, and
+   * the whole catalogue was refused with "Composio sent nothing where the name of gmail's category
+   * 1 belongs" about a value that was the string "crm". An operator reading that goes looking in a
    * dashboard for a category with a missing name, and there is no such category.
    *
-   * SO THE SHAPE IS TESTED BEFORE THE FIELD IS READ, and the two faults get the two sentences they
-   * are. Today's transformer rebuilds every entry, so this branch stands at the seam
-   * {@link ComposioVendor} declares rather than in front of the live SDK path — which is the right
-   * place for it, because the rebuild is one version's behaviour and the declaration is what the
-   * next version will be read against. A guard whose absence was argued from a dereference that
-   * does not dereference is not a guard anything should rest on again.
-   *
-   * What the transformer copies verbatim is the NAME, which is why that is the one field read.
+   * SO THE SHAPE IS TESTED BEFORE THE FIELD IS READ, twice over, and the three faults get the three
+   * sentences they are. The vendor's own word is `name` on both spellings of this row
+   * (`@composio/client` 0.1.0-alpha.76, `resources/toolkits.d.ts:425-435`), which is why that is
+   * the one field read.
    */
-  const categories = (meta.categories ?? []).map((entry, index) => {
+  const listed = meta.categories ?? [];
+  if (!Array.isArray(listed)) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(meta.categories)} where ${slug}'s categories belong, and the catalogue shows an app's categories as the words a person chooses by. An app in no category is ordinary; a list of them that is not a list is an answer this deployment cannot show. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+  const categories = listed.map((entry: unknown, index: number) => {
     const at = `${slug}'s category ${index + 1}`;
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
       throw new BrokerRefusalError(
@@ -652,10 +780,19 @@ function appOf(row: VendorToolkit, position: number): BrokerApp {
     return label;
   });
 
-  const actionCount = meta.toolsCount ?? 0;
+  /*
+   * `tools_count` IS THE WIRE'S OWN KEY AND `toolsCount` WAS THE WRAPPER'S RESTATEMENT OF IT
+   * (`@composio/client` 0.1.0-alpha.76, `resources/toolkits.d.ts:405-408`;
+   * `@composio/core` 0.18.1, `src/utils/transformers/toolkits.ts:34`). Reading the old key off the
+   * new answer is the one mistake in this function that would not look like one: every count would
+   * be `undefined`, every count would default to zero, and every app in the picker would say it
+   * publishes no actions — a plausible figure on a page whose whole job is to show one. Which is
+   * why it is a number a test asserts rather than a field a type checks.
+   */
+  const actionCount = meta.tools_count ?? 0;
   if (typeof actionCount !== "number" || !Number.isFinite(actionCount)) {
     throw new BrokerRefusalError(
-      `Composio sent ${sent(meta.toolsCount)} where ${slug}'s action count belongs. The count is shown BEFORE anybody enables an app, because it is the difference between a small addition and a rewrite of what a model sees, so a figure derived from a value that is not a number is the one number here nobody would think to question. ${VENDOR_SHAPE_REMEDY}`,
+      `Composio sent ${sent(meta.tools_count)} where ${slug}'s action count belongs. The count is shown BEFORE anybody enables an app, because it is the difference between a small addition and a rewrite of what a model sees, so a figure derived from a value that is not a number is the one number here nobody would think to question. ${VENDOR_SHAPE_REMEDY}`,
     );
   }
 
@@ -890,23 +1027,25 @@ function withdrawalDeclined(
 /**
  * One tool row as the action this deployment holds, with the one check the SDK's schema leaves open.
  *
- * THIS IS THE ONE ROW HERE THAT THE VENDOR REALLY DOES VALIDATE, AND THE FILE USED TO CHECK IT
- * TWICE. `transformToolCases` ends in `ToolSchema.parse(...)` — a THROWING parse rather than the
+ * THE VENDOR USED TO VALIDATE THIS ROW AND NO LONGER DOES, WHICH IS WHY THE GUARDS ARE ALL HERE.
+ * `transformToolCases` ends in `ToolSchema.parse(...)` — a THROWING parse rather than the
  * warn-only `transform()` every other listing goes through (`@composio/core` 0.18.1,
- * `src/models/Tools.ts:193`) — and both calls this file makes run through it (`:561` for the
- * listing, `:719` for the single tool). So a tool whose description is a number, whose
- * `inputParameters` is a string of JSON, whose tags are not all labels, whose version is a number,
- * or which is not an object at all, does not arrive as a malformed row: it arrives as a `ZodError`,
- * which `./composio`'s `isSchemaMismatch` already recognises and answers with the same package
- * remedy. Five refusals stood here for those five shapes and not one of them could be reached.
+ * `src/models/Tools.ts:193`) — and the listing used to run through it (`:561`). It does not any
+ * more: `getRawComposioTools` is the one method of the vendor's tool model that cannot be paged,
+ * so the listing reads `client.tools.list` and {@link VendorToolRow} is the wire's own shape. Five
+ * refusals once stood here for five shapes that parse caught — a description that is a number, an
+ * input schema that is a string of JSON, tags that are not all labels, a version that is a number,
+ * and a row that is not an object at all — and each was deleted as unreachable. Four of the five
+ * had already come back, on the argument below. The fifth, the container, comes back with this
+ * change, because there is nothing at all between Composio and this function now.
  *
- * AND FIVE WAS TWO TOO MANY, WHICH IS THE SAME MISTAKE AS THE DELETED CATEGORY GUARD IN
- * {@link appOf} AND IS CORRECTED THE SAME WAY. "The SDK validates this" is a fact about
- * `getRawComposioTools` in one version, and it is not a fact about {@link ComposioVendor}, which is
- * the seam this function actually sits on and the shape a test satisfies with a literal. Running it
- * settles what the difference costs: a `description` of 42 and an `inputParameters` of
- * "not-a-schema" both travel through here untouched into {@link ComposioAction}, whose declared
- * types say they cannot. What they reach is not a refusal. `storableTools` writes
+ * THE ARGUMENT THAT BROUGHT THE OTHER FOUR BACK IS THE SAME MISTAKE AS THE DELETED CATEGORY GUARD
+ * IN {@link appOf}, CORRECTED THE SAME WAY. "The SDK validates this" is a fact about one method of
+ * one version, and it is not a fact about {@link ComposioVendor}, which is the seam this function
+ * actually sits on and the shape a test satisfies with a literal. Running it settles what the
+ * difference costs: a `description` of 42 and an input schema of "not-a-schema" both travel through
+ * here untouched into {@link ComposioAction}, whose declared types say they cannot. What they reach
+ * is not a refusal. `storableTools` writes
  * `(tool.description ?? "").replaceAll(NUL, "")` and `tool.version?.replaceAll(NUL, "")`
  * (`./store`), so a description or a version that is not a string is a bare
  * "42.replaceAll is not a function" thrown from outside every vendor `try` in this file — a crash
@@ -929,11 +1068,24 @@ function withdrawalDeclined(
  * read on its Plugins page, and `listingSentence` passes an authored message through untouched.
  */
 function actionOf(
-  row: VendorTool,
+  row: VendorToolRow,
   position: number,
   toolkit: string,
 ): ComposioAction {
   const at = `row ${position + 1} of Composio's action list for ${toolkit}`;
+
+  /*
+   * THE CONTAINER, FOR THE REASON {@link appOf}'S ROW GUARD IS BACK ONE FUNCTION UP. `ToolSchema`
+   * refused a row that is not an object and nothing does now. Read without it, `("GMAIL").slug` is
+   * `undefined` rather than a throw, so a listing of bare strings would be refused with "Composio
+   * sent nothing where the slug of row 1 ... belongs" — an administrator sent to look for an action
+   * with a missing name, about an answer that had no action in it.
+   */
+  if (typeof row !== "object" || row === null || Array.isArray(row)) {
+    throw new Error(
+      `Composio sent ${sent(row)} where ${at} belongs, and an action is an object carrying the name a call to it uses, so the list was not refreshed and the tools already held are untouched. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
 
   const slug = textOf(row.slug);
   if (slug === null) {
@@ -957,7 +1109,13 @@ function actionOf(
     );
   }
 
-  const inputParameters = row.inputParameters;
+  /*
+   * `input_parameters` IS THE WIRE'S KEY AND `inputParameters` WAS THE WRAPPER'S — see
+   * {@link VendorToolRow}. Reading the old one off the new answer would put no schema on any
+   * action, which `./composio` treats as the ordinary case of an action that publishes none: every
+   * tool would reach a model with an open schema and nothing would report a fault.
+   */
+  const inputParameters = row.input_parameters;
   if (
     inputParameters !== undefined &&
     (typeof inputParameters !== "object" ||
@@ -1316,10 +1474,56 @@ function everyRefusal(refused: unknown[]): unknown {
  */
 export type ComposioVendor = {
   tools: {
-    getRawComposioTools(query: {
-      toolkits: string[];
+    /**
+     * Every action of one app, one page at a time, THROUGH THE RAW CLIENT RATHER THAN THE WRAPPER.
+     *
+     * `getRawComposioTools` was here and could not be paged. `ToolListParamsSchema` names no cursor
+     * field at all (`@composio/core` 0.18.1, `src/types/tool.types.ts:257-266`) and the method ends
+     * `tools.items.map(...)` (`src/models/Tools.ts:561`), dropping the response's `next_cursor`
+     * before any caller sees it — so through the wrapper a page at {@link LISTING_LIMIT} and a
+     * listing longer than one were the same array, and `./composio` refused rather than commit a
+     * fragment as the whole truth about an app. The raw client is the difference: `ToolListParams`
+     * carries `cursor`, "a base64 encoded string of the page and limit", and `ToolListResponse`
+     * carries `next_cursor` (`@composio/client` 0.1.0-alpha.76, `resources/tools.d.ts:421-432` and
+     * `:200-204`). The request IS expressible, and {@link everyRowOf} makes it.
+     *
+     * WHAT THE WRAPPER WAS DOING THAT THIS HAS TO KEEP DOING IS TWO PARAMETERS AND ONE NO-OP.
+     * `toolkit_versions` is the SDK's own `toolkitVersions` config, which defaults to "latest"
+     * (`src/utils/config-defaults/ConfigDefaults.node.ts`) and was forwarded on every listing it
+     * made (`src/models/Tools.ts:548`); it decides which `version` each action comes back with,
+     * which is the value a later call sends back to Composio, so it is passed here as the literal
+     * the default is. `important` is the one this file already knew about and is now simply not
+     * named: the wrapper set it to "true" whenever a toolkit query carried no limit (`:505-515`),
+     * which NARROWS the answer to a featured subset that nothing in the answer declares. And the
+     * no-op is `applyDefaultSchemaModifiers`, which returns its argument untouched unless
+     * `dangerouslyAllowAutoUploadDownloadFiles` is on (`:242-248`); it defaults off
+     * (`ConfigDefaults.node.ts`) and {@link createComposioClient} does not turn it on — which is
+     * the premise `./composio`'s file-upload guard is written on.
+     *
+     * AND `ToolSchema.parse` IS GONE WITH IT, WHICH IS A GAIN AND A COST, BOTH WRITTEN DOWN
+     * ELSEWHERE. The gain is that the parse STRIPPED every schema key its `ParametersSchema` did
+     * not name before any caller could see it — see {@link ComposioAction.inputParameters}, where
+     * that loss was recorded as unavoidable and where the fix was named as this exact call. The
+     * cost is that nothing validates the row: {@link actionOf} carries every check now, including
+     * the container, and {@link pageOf} carries the envelope.
+     */
+    list(query: {
+      toolkit_slug: string;
       limit: number;
-    }): Promise<VendorTool[]>;
+      toolkit_versions: "latest";
+      /** Where the last page left off, ABSENT on the first request rather than undefined. */
+      cursor?: string;
+    }): Promise<{
+      /**
+       * `unknown` BECAUSE NOTHING HAS LOOKED AT IT, which is the difference between this listing
+       * and the two the SDK still serves. Their transformers open `response.items.map(...)`, so a
+       * malformed envelope dies inside the vendor's package; a generated client parses the body and
+       * returns it. {@link pageOf} is where that is answered.
+       */
+      items?: unknown;
+      /** The vendor's own word for "there is another page", read by {@link everyRowOf}. */
+      next_cursor?: unknown;
+    } | null>;
     getRawComposioToolBySlug(
       slug: string,
       options?: { version?: string },
@@ -1334,7 +1538,45 @@ export type ComposioVendor = {
     ): Promise<ComposioResult>;
   };
   toolkits: {
-    get(query: { limit: number; sortBy: "usage" }): Promise<VendorToolkit[]>;
+    /**
+     * The app catalogue, one page at a time, THROUGH THE RAW CLIENT FOR THE SAME REASON.
+     *
+     * AND THIS IS THE ONE THAT WAS BROKEN IN FRONT OF PEOPLE. `Toolkits.getToolkits` does forward a
+     * `cursor` (`@composio/core` 0.18.1, `src/models/Toolkits.ts:68`) — so the wrapper could ASK
+     * for a second page — but `transformToolkitListResponse` returns `response.items.map(...)`, a
+     * bare array (`src/utils/transformers/toolkits.ts:16-43`), so there is no cursor to put in it.
+     * One half of a pager is not a pager, and `fetchDirectory` refused a full page because it could
+     * not tell a complete catalogue from a truncated one. Composio publishes more than
+     * {@link LISTING_LIMIT} toolkits, so that refusal fired on the FIRST call, every time, and an
+     * operator opening the app picker saw no apps at all. `ToolkitListResponse` carries
+     * `next_cursor` and `ToolkitListParams` carries `cursor` (`@composio/client` 0.1.0-alpha.76,
+     * `resources/toolkits.d.ts:322-326`, `:467-478`), so the whole request was expressible the
+     * entire time.
+     *
+     * `sort_by` IS THE WIRE'S SPELLING OF WHAT WAS `sortBy`, and it still matters even though the
+     * listing is no longer finite. What it buys now is order rather than coverage: the rows reach a
+     * picker in the order Composio thinks people want them, and the page ceiling in
+     * {@link PAGE_CEILING} is the one case left where being cut off is possible at all.
+     *
+     * NO SEARCH TERM, WHICH IS THE SAME DECISION FOR A DIFFERENT REASON THAN BEFORE. It used to be
+     * that the SDK's params named no search field and the parse stripped what it did not name, so a
+     * term passed here would vanish before the request. `ToolkitListParams` DOES name `search`
+     * (`:480-484`), so that is no longer the argument. The argument is that the catalogue is held
+     * for ten minutes and searched in this process by both of its callers — the picker and the
+     * enable route's slug check — and a per-term request would be a per-term cache. Searching over
+     * the held rows is this deployment's own job and stays so.
+     */
+    list(query: {
+      limit: number;
+      sort_by: "usage";
+      /** Where the last page left off, ABSENT on the first request rather than undefined. */
+      cursor?: string;
+    }): Promise<{
+      /** `unknown` for the reason the action listing's is — see {@link pageOf}. */
+      items?: unknown;
+      /** The vendor's own word for "there is another page", read by {@link everyRowOf}. */
+      next_cursor?: unknown;
+    } | null>;
   };
   authConfigs: {
     list(query: {
@@ -1974,60 +2216,48 @@ export function buildComposioClient(
   let heldDirectory: { at: number; apps: Promise<BrokerApp[]> } | null = null;
 
   /**
-   * The catalogue as the vendor answers it, mapped to the rows an administrator chooses from.
+   * The catalogue as the vendor answers it, EVERY PAGE OF IT, mapped to the rows a person picks from.
    *
-   * ONE PAGE AT THE CEILING, SORTED BY USAGE, AND NO SEARCH TERM.
+   * IT USED TO BE ONE PAGE AND A REFUSAL, AND THAT REFUSAL IS THE BUG THIS FUNCTION WAS FIXED FOR.
+   * It asked for {@link LISTING_LIMIT} rows, met exactly that many, and threw — because a full page
+   * and a truncated one are the same array and it believed no second request could tell them apart.
+   * Composio publishes more than {@link LISTING_LIMIT} toolkits, so the condition was true on every
+   * call and the app picker showed an operator nothing at all, with a sentence explaining why a
+   * partial directory would be worse. The reasoning was right and the premise was false: the raw
+   * client has a cursor for this listing and always did. See {@link ComposioVendor} and
+   * {@link everyRowOf}.
    *
-   * The order matters because the page is finite: at the ceiling the apps most likely to be wanted
-   * are the ones that must not be the ones cut off. The absent search term is the subtler half —
-   * the SDK's list params name no search field
-   * (`ToolkitsListParamsSchema`, `@composio/core` 0.18.1, `src/types/toolkit.types.ts:9-15`)
-   * and the parse strips what it does not name, so a term passed here would vanish before the
-   * request and leave a caller believing they had filtered a list nobody filtered. Searching the
-   * catalogue is this deployment's own job, over the rows below.
+   * SORTED BY USAGE, AND NO SEARCH TERM — see {@link ComposioVendor}, where both are argued now
+   * that neither is holding a finite page together.
+   *
+   * THROWN FROM INSIDE THE FETCH, WHICH IS WHAT KEEPS A FAILURE OUT OF THE CACHE. Every refusal
+   * below — a cursor that cannot be followed, a page that is not a page, a row that cannot be read
+   * — rejects the promise `listApps` holds, and `listApps` drops an entry whose request rejected.
+   * A fragment committed here would be a fragment served for ten minutes to BOTH callers: an
+   * administrator searching for an app past the cut is told nothing matched, and the enable route,
+   * which checks a slug against this same directory, tells them a real app is not one Composio
+   * lists.
    */
   const fetchDirectory = async (): Promise<BrokerApp[]> => {
-    /*
-     * TAKEN AS THE LIST IT IS DECLARED TO BE, which is the one answer in this file whose container
-     * the vendor settles TWICE OVER. `Toolkits.getToolkits` returns
-     * `transformToolkitListResponse(result)`, whose body is `response.items.map(...)` — so it is an
-     * array or it threw — and the whole method sits inside a try that rethrows anything at all as
-     * `ComposioToolkitFetchError` (`@composio/core` 0.18.1, `src/models/Toolkits.ts:70-82`). A
-     * container refusal used to stand here for a null or an envelope; neither can arrive, and a
-     * malformed catalogue reaches a reader as that vendor class, whose own message is the bare
-     * "Failed to fetch toolkits" and whose remedy genuinely is the key or the status page — which
-     * is why {@link vendorRefusal} deliberately leaves it to the route's default answer.
-     */
-    const toolkits = await askVendor(
-      { outcome: "the app catalogue was not read", app: null },
-      () => vendor.toolkits.get({ limit: LISTING_LIMIT, sortBy: "usage" }),
+    const listing: Listing = {
+      noun: "Composio's app catalogue",
+      consequence: "the directory was not shown",
+    };
+    const toolkits = await everyRowOf<VendorToolkit>(listing, (cursor) =>
+      pageOf(listing, () =>
+        askVendor(
+          { outcome: "the app catalogue was not read", app: null },
+          () =>
+            vendor.toolkits.list({
+              limit: LISTING_LIMIT,
+              sort_by: "usage",
+              // Spread rather than an explicit undefined, for the reason `everyRowOf` gives: a
+              // `cursor: undefined` is a key on the wire, and "the first page" is said by omission.
+              ...(cursor === undefined ? {} : { cursor }),
+            }),
+        ),
+      ),
     );
-
-    if (toolkits.length >= LISTING_LIMIT) {
-      /*
-       * A FULL PAGE IS NOT A COMPLETE CATALOGUE, and this deployment cannot find out which it is.
-       * The same refusal `./composio` makes of a full action listing, for the same reason and one
-       * line of vendor code apart.
-       *
-       * `LISTING_LIMIT` is the largest page the toolkit endpoint allows, and while its params do
-       * name a `cursor` (`ToolkitsListParamsSchema`, `@composio/core` 0.18.1,
-       * `src/types/toolkit.types.ts:9-15`) there is nothing to put in it: the SDK's
-       * `ToolKitListResponse` is a bare array (`:53`) and `transformToolkitListResponse` drops the
-       * response's `next_cursor` before any caller sees it. So a catalogue of exactly this many
-       * apps and one with more of them answer identically here, and there is no second request that
-       * could tell them apart.
-       *
-       * COMMITTED AS COMPLETE IT WOULD BE CACHED AS COMPLETE, which is what makes this worse than
-       * one short answer. The fragment is held for ten minutes and served to both callers, so an
-       * administrator searching for an app past the cut is told nothing matched, and the enable
-       * route — which checks a slug against this same directory — tells them a real app "is not an
-       * app Composio lists". Thrown from inside the fetch so the failure is never the thing that
-       * gets held: `listApps` drops an entry whose request rejected.
-       */
-      throw new BrokerRefusalError(
-        `Composio answered with ${toolkits.length} apps, which is the largest page this deployment's @composio/core can ask for, so there may be more that it cannot see. A partial directory is not shown, because an app missing from it reads exactly like an app Composio does not publish.`,
-      );
-    }
 
     /*
      * Each absence becomes the value that reads honestly on an administrator's screen, and each
@@ -2052,50 +2282,60 @@ export function buildComposioClient(
   const actions: ComposioActions = {
     async listActions(toolkit, page): Promise<ComposioAction[]> {
       /*
-       * A LIMIT THAT CANNOT TRAVEL IS THE VENDOR'S DEFAULT WEARING THE CALLER'S NAME.
+       * A PAGE OF NOTHING IS NOT A PAGE, AND THE REASON IT IS REFUSED HAS MOVED.
        *
-       * `getRawComposioTools` composes its request with `...(limit ? { limit } : {})`
-       * (`@composio/core` 0.18.1, `src/models/Tools.ts:536`), and its schema spells the field
-       * `z.number().optional()` with no floor (`src/types/tool.types.ts:257`). So a zero is not
-       * sent short — it is not sent at all: the request goes out with no limit, Composio applies
-       * its own page of twenty, and twenty rows come back looking exactly like everything a small
-       * app publishes. Nothing downstream can see it. `./composio` measures the answer against
-       * {@link LISTING_LIMIT} to catch a page that might be a fragment, and twenty is nowhere near
-       * it, so a refresh commits the vendor's default as the whole truth about the app and deletes
-       * every action past it from `mcp_tools` while reporting success.
+       * It used to be a fact about the wrapper: `getRawComposioTools` composed its request with
+       * `...(limit ? { limit } : {})` (`@composio/core` 0.18.1, `src/models/Tools.ts:536`) over a
+       * schema spelling the field `z.number().optional()` with no floor
+       * (`src/types/tool.types.ts:257`), so a zero was not sent short — it was not sent at all, and
+       * Composio's own page of twenty came back looking exactly like everything a small app
+       * publishes. The raw client passes a zero through, so what a zero means now is Composio's to
+       * say rather than a silent substitution.
        *
-       * REFUSED RATHER THAN DEFAULTED, because the page is required on this seam precisely so that
-       * no layer supplies one quietly — and a caller asking for no rows is a caller with a fault,
-       * which is a thing to report rather than a thing to correct on their behalf.
+       * IT IS STILL REFUSED, AND THE ARGUMENT IS THE ONE THAT DID NOT DEPEND ON THE WRAPPER. The
+       * page is required on this seam precisely so that no layer supplies one quietly; a caller
+       * asking for no rows is a caller with a fault, and a fault is a thing to report rather than a
+       * thing to correct on their behalf. What changed with paging is that the limit is now a PAGE
+       * SIZE rather than the whole listing — {@link everyRowOf} reads on until the cursor stops —
+       * so a small one costs requests rather than actions. A zero would cost every request there
+       * is, or none.
        */
       if (!Number.isInteger(page.limit) || page.limit < 1) {
         throw new Error(
-          `A page of ${page.limit} rows is not a page Composio can be asked for, so ${toolkit}'s action list was not refreshed and the tools already held are untouched. This deployment's @composio/core drops a limit it reads as falsy rather than refusing it, so the request would have gone out with no limit at all and come back as the vendor's own default page — indistinguishable from everything ${toolkit} publishes.`,
+          `A page of ${page.limit} rows is not a page Composio can be asked for, so ${toolkit}'s action list was not refreshed and the tools already held are untouched. The page a listing asks for is required on this seam so that no layer supplies one quietly, and a request for no rows is a fault to report rather than one to correct on a caller's behalf.`,
         );
       }
 
       /*
-       * The caller's page is passed through rather than defaulted here, because the seam made
-       * `page` required precisely so that no layer could quietly supply one. See the module
-       * comment on what an omitted limit does beyond truncating.
-       *
-       * AND THE ANSWER IS TAKEN AS THE LIST IT IS DECLARED TO BE, for the reason the catalogue
-       * above is. `getRawComposioTools` answers `[]` where the client returned nothing and
-       * otherwise returns `tools.items.map(tool => this.transformToolCases(tool))`
-       * (`@composio/core` 0.18.1, `src/models/Tools.ts:557-561`), so it is an array or the `.map`
-       * threw — and the refusal that used to stand here for a non-array was a branch the SDK made
-       * unreachable.
+       * EVERY PAGE, WHICH IS WHAT THIS SEAM COULD NOT DO UNTIL THE LISTING LEFT THE WRAPPER.
+       * `./composio` used to meet a listing at {@link LISTING_LIMIT} and refuse it, for the reason
+       * the catalogue above used to: an app with exactly that many actions and one with more of
+       * them answer identically, and committing the second deletes every action past the cut from
+       * `mcp_tools` under a refresh that reported success. That refusal is gone with this, and the
+       * guard it cannot be confused with — `store.ts`'s empty-listing guard — stays where it is.
        */
-      const tools = await askVendor(
-        {
-          outcome: `${toolkit}'s action list was not refreshed and the tools already held are untouched`,
-          app: toolkit,
-        },
-        () =>
-          vendor.tools.getRawComposioTools({
-            toolkits: [toolkit],
-            limit: page.limit,
-          }),
+      const listing: Listing = {
+        noun: `${toolkit}'s actions`,
+        consequence: `${toolkit}'s action list was not refreshed and the tools already held are untouched`,
+      };
+      const tools = await everyRowOf<VendorToolRow>(listing, (cursor) =>
+        pageOf(listing, () =>
+          askVendor(
+            {
+              outcome: `${toolkit}'s action list was not refreshed and the tools already held are untouched`,
+              app: toolkit,
+            },
+            () =>
+              vendor.tools.list({
+                toolkit_slug: toolkit,
+                limit: page.limit,
+                // The SDK's own default, forwarded on every listing it made, and the thing that
+                // decides which `version` each action carries. See {@link ComposioVendor}.
+                toolkit_versions: "latest",
+                ...(cursor === undefined ? {} : { cursor }),
+              }),
+          ),
+        ),
       );
 
       return tools.map((row, position) => actionOf(row, position, toolkit));
@@ -2892,14 +3132,18 @@ export function buildComposioClient(
  * and a private field of the vendor's client thereafter, and no path out of this module carries it
  * — see the module comment.
  *
- * IT IS NO LONGER ONE LINE, AND THE REASON IS THE TWO DELETES. `Composio` used to satisfy
- * {@link ComposioVendor} whole, passed straight in. It cannot any more: its own `authConfigs.delete`
- * and `connectedAccounts.delete` send a hard-coded empty body and therefore cannot ask for the
- * upstream revocation, which is the difference between ending somebody's access and filing it away.
- * The underlying `@composio/client` takes the parameter, so those two members are satisfied from
- * `getClient()` and the rest from the SDK's own models. A wrapper per member rather than a spread,
- * so that the arrow's own type checks against the shape above — a vendor method whose signature
- * drifted would fail here rather than at the call site.
+ * IT IS NO LONGER ONE LINE, AND THE REASON WAS THE TWO DELETES AND IS NOW ALSO THE TWO LISTINGS.
+ * `Composio` used to satisfy {@link ComposioVendor} whole, passed straight in. It cannot any more,
+ * for two separate faults in the same wrapper. Its own `authConfigs.delete` and
+ * `connectedAccounts.delete` send a hard-coded empty body and therefore cannot ask for the upstream
+ * revocation, which is the difference between ending somebody's access and filing it away. And its
+ * `tools.getRawComposioTools` and `toolkits.get` cannot be paged — one takes no cursor, the other
+ * drops the response's — which is the difference between a catalogue and the first thousand rows
+ * of one, and which showed an operator an empty app picker. The underlying `@composio/client`
+ * answers all four, so those members are satisfied from `getClient()` and the rest from the SDK's
+ * own models. A wrapper per member rather than a spread, so that the arrow's own type checks
+ * against the shape above — a vendor method whose signature drifted would fail here rather than at
+ * the call site.
  *
  * NO NEW IMPORT, WHICH IS WHY THE ONE-IMPORT-SITE RULE SURVIVES THIS. `getClient()` is public on the
  * SDK's own object and the client's types are inferred from it; `@composio/client` is not named
@@ -2922,8 +3166,15 @@ export function createComposioClient(apiKey: string): {
   const client = composio.getClient();
 
   return buildComposioClient({
-    tools: composio.tools,
-    toolkits: composio.toolkits,
+    tools: {
+      // The listing is the raw client's because the wrapper has no cursor; the single-tool read and
+      // the execute stay the SDK's, because both are one call about one action and neither pages.
+      list: (query) => client.tools.list(query),
+      getRawComposioToolBySlug: (slug, options) =>
+        composio.tools.getRawComposioToolBySlug(slug, options),
+      execute: (slug, body) => composio.tools.execute(slug, body),
+    },
+    toolkits: { list: (query) => client.toolkits.list(query) },
     authConfigs: {
       list: (query) => composio.authConfigs.list(query),
       create: (toolkit, options) =>
