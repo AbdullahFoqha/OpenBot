@@ -13,19 +13,27 @@
  * the import graph of every test that touches enablement.
  */
 
-/** The schemes whose secret a PERSON holds and types in, rather than one anybody registers. */
-export type FieldScheme =
-  | "API_KEY"
-  | "BASIC"
-  | "BEARER_TOKEN"
-  | "BASIC_WITH_JWT";
-
-const FIELD_SCHEME_NAMES: readonly string[] = [
+/**
+ * The schemes whose secret a PERSON holds and types in, rather than one anybody registers.
+ *
+ * WRITTEN ONCE AND READ TWICE, BECAUSE A SECOND DECLARATION IS A WAY FOR THE TWO TO DISAGREE. The
+ * list is the fact and {@link FieldScheme} is derived from it, so the names the guard tests and the
+ * names the type admits cannot come apart. A hand-written union beside a hand-written array is the
+ * same set stated twice, and a member added to one of them and not the other typechecks perfectly.
+ *
+ * AND THE DISAGREEMENT FAILS OPEN, which is why it is worth a derivation rather than a comment
+ * asking the next person to keep both in step. {@link isFieldScheme} would answer false for a scheme
+ * the type calls valid, and an app whose secret a person types would be read as one nobody types —
+ * sent down the consent path, to a vendor screen that has nothing to ask them for.
+ */
+const FIELD_SCHEME_NAMES = [
   "API_KEY",
   "BASIC",
   "BEARER_TOKEN",
   "BASIC_WITH_JWT",
-];
+] as const;
+
+export type FieldScheme = (typeof FIELD_SCHEME_NAMES)[number];
 
 /**
  * Whether a scheme recorded on a row is one whose secret a person types.
@@ -35,7 +43,10 @@ const FIELD_SCHEME_NAMES: readonly string[] = [
  * the same `includes` into four call sites.
  */
 export function isFieldScheme(scheme: string | null): scheme is FieldScheme {
-  return scheme !== null && FIELD_SCHEME_NAMES.includes(scheme);
+  return (
+    scheme !== null &&
+    (FIELD_SCHEME_NAMES as readonly string[]).includes(scheme)
+  );
 }
 
 /**
