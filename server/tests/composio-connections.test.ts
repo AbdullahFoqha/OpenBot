@@ -10,6 +10,7 @@ import type {
 import { createDatabase } from "../src/db/client";
 import {
   agents,
+  auditEvents,
   composioConnections,
   mcpServers,
   mcpTools,
@@ -118,6 +119,22 @@ const foreignToolkit = `foreign-${suite}`;
  */
 const probeAppId = `probe-${suite}`;
 const admin = "admin@openbot.local";
+/**
+ * THE SECRET A PERSON TYPES, which the test below looks for everywhere it must not be.
+ *
+ * A RUN-UNIQUE SPELLING, for the same reason every id here carries one and for one more. The
+ * assertions about it are ABSENCE assertions read out of two shared tables, and `audit_events` is
+ * append-only — nothing in this file can sweep it — so a fixed spelling would have one run's rows
+ * answering another run's question. With the suffix, "this string is nowhere" is a sentence about
+ * rows this run wrote.
+ *
+ * AND IT IS A KEY THE REDACTOR WOULD NOT SAVE, WHICH IS WHAT MAKES THE TEST WORTH RUNNING.
+ * `redactAuditPayload` masks a value by the NAME of the key holding it, and neither `values` nor
+ * `generic_api_key` — the name Composio publishes for Perplexity's key — is on its list. So a
+ * payload that carried what somebody typed would carry it verbatim into the trail, and the absence
+ * asserted below is the implementation's doing rather than the redactor's.
+ */
+const typedKey = `pplx-secret-value-${suite}`;
 
 const policy: ActionPolicy = { mode: "enforce", deny: [], allow: ["true"] };
 
@@ -259,6 +276,17 @@ const unasked = (what: string) => async (): Promise<never> => {
  */
 const asks: { ask: string; held: string[] }[] = [];
 
+/**
+ * What the vendor was handed to connect somebody with, which is the ONE place it belongs.
+ *
+ * Kept beside {@link asks} rather than folded into it, because the two record opposite things. An
+ * ask is a sentence safe to compare and to print; this holds a person's own credential, and the
+ * only reason it is held at all is that "the secret is nowhere else" is worth nothing unless
+ * something also asserts it ARRIVED. A test that only looked for the absence would pass just as
+ * well against a method that sent Composio nothing.
+ */
+const valuesSent: Record<string, string>[] = [];
+
 /** The asks alone, which is what an ordering assertion is about. */
 function asksMade(): string[] {
   return asks.map((entry) => entry.ask);
@@ -335,6 +363,22 @@ const broker: ComposioBroker = {
       held: await connectionsHeld(),
     });
   },
+  // Nothing here draws a connect form, so nobody asks what an app wants typed.
+  connectionFields: unasked("ask what an app wants typed"),
+  connectWithFields: async (request) => {
+    asks.push({
+      // Named by app AND person, for `isConnected`'s reason: a connection is one person's account
+      // at one app, and "a connection was made" names neither. The values are deliberately NOT in
+      // this string — it is compared, printed on failure, and read by whoever is debugging.
+      ask: `connectWithFields:${request.toolkit}/${request.userId}`,
+      held: await connectionsHeld(),
+    });
+    valuesSent.push(request.values);
+    return { accountId: `ca_${suite}` };
+  },
+  // The verification that undoes its own account is micro-task 10.1's; nothing here makes one to
+  // take back, so this has no caller yet and says so.
+  revokeAccount: unasked("take one account back"),
 };
 
 const store = createPluginStore({
@@ -491,6 +535,7 @@ beforeEach(async () => {
   events.length = 0;
   reached.length = 0;
   asks.length = 0;
+  valuesSent.length = 0;
   // The vendor finding an account is the ordinary case — somebody connected, so there is a grant to
   // withdraw. The one test about the answer itself says otherwise for itself.
   vendorFinds = () => true;
@@ -1319,4 +1364,100 @@ test("an app whose only read takes an argument has no probe", async () => {
   });
 
   expect(await store.probeActionFor(probeAppId)).toBeNull();
+});
+
+/**
+ * CONNECTING WITH A KEY SOMEBODY TYPED: THE VALUES REACH COMPOSIO AND NOTHING ELSE.
+ *
+ * CRITERION. After a connection made from typed values, the secret is in the vendor's hands and in
+ * no row this deployment wrote — not in the `mcp.account_connected` payload, not in
+ * `composio_connections` — and what the trail carries instead is the NAMES of the fields that were
+ * filled in.
+ *
+ * REASON. This is the only flow in the product where a person hands this deployment a credential of
+ * their own, and the whole design of it is that the credential travels in one direction: off the
+ * request, into `connectWithFields`, out to Composio. Every other participant here is a long-lived,
+ * widely-readable record. `composio_connections` is read by offboarding, by disconnect and by the
+ * gate on every brokered call; `audit_events` is append-only by trigger, exported, and kept for as
+ * long as a deployment's retention window says — so a key that lands in either is not a leak
+ * somebody can clean up afterwards, it is a leak with a schedule.
+ *
+ * WHICH IS WHY THIS ASSERTS ABSENCE OUT OF THE TABLES RATHER THAN OFF THE RETURN VALUE. A method
+ * can be read for what it puts in a payload; what a reviewer cannot read is what some later writer
+ * on the same path adds. Stringifying the rows themselves is the assertion that survives that, and
+ * it is not saved by the redactor: neither `values` nor `generic_api_key` is on `sensitiveKeys`, so
+ * a payload carrying what somebody typed would carry it through verbatim. See {@link typedKey}.
+ *
+ * AND IT ASSERTS THE ARRIVAL TOO. "The secret is nowhere" is true of a method that sends Composio
+ * nothing at all, so {@link valuesSent} is checked in the same breath: the values went to the one
+ * place they are for.
+ *
+ * `verified: false` IS THE STATE THIS TASK LEAVES AND NOT THE SETTLED ANSWER. The probe that earns
+ * the flag is its own step; until it exists a key connection is honestly unchecked, which is the
+ * pair `composio_connections.verified` documents for exactly this row.
+ */
+test("the values reach Composio and nothing else", async () => {
+  useAnsweringClient();
+  await store.addBrokeredApp({
+    slug: enabledToolkit,
+    title: "Enablable App",
+    by: admin,
+    connection: { kind: "fields", authScheme: "API_KEY" },
+  });
+
+  expect(
+    await store.connectBrokeredWithFields({
+      toolkit: enabledToolkit,
+      userId: askerId,
+      values: { generic_api_key: typedKey },
+    }),
+  ).toEqual({ connected: true, verified: false });
+
+  // The vendor was asked, and asked with what the person typed. Without this the absences below
+  // would be satisfied by a method that connected nobody.
+  expect(asksMade()).toEqual([
+    `ensureAuthConfig:${enabledToolkit}/fields`,
+    `connectWithFields:${enabledToolkit}/${askerId}`,
+  ]);
+  expect(valuesSent).toEqual([{ generic_api_key: typedKey }]);
+
+  /*
+   * THE TRAIL, READ OUT OF THE TABLE RATHER THAN OFF THE RECORDING STORE. The rows are what a
+   * reader of the trail will actually see — after the redactor, after the insert — and this file's
+   * `auditStore` keeps a copy of the input beside it, not instead of it. Narrowed to this app
+   * because `audit_events` is append-only: no cleanup here can reach it, so the other tests in this
+   * run have already written `mcp.account_connected` rows under {@link toolkit}.
+   */
+  const trail = await database
+    .select()
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.eventType, "mcp.account_connected"),
+        eq(auditEvents.targetId, enabledToolkit),
+      ),
+    );
+  expect(trail).toHaveLength(1);
+  expect(trail[0].payload).toMatchObject({
+    actor: askerId,
+    server: enabledToolkit,
+    reconnected: false,
+    // The names, sorted, because a reader needs to know what the app asked this person for — and
+    // that is the whole of what a credential may contribute to a record like this one.
+    fields: ["generic_api_key"],
+  });
+  expect(JSON.stringify(trail)).not.toContain(typedKey);
+
+  const rows = await database
+    .select()
+    .from(composioConnections)
+    .where(inArray(composioConnections.toolkit, ownedToolkits));
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({
+    toolkit: enabledToolkit,
+    userId: askerId,
+    verified: false,
+  });
+  expect(rows[0].verifiedAt).toBeNull();
+  expect(JSON.stringify(rows)).not.toContain(typedKey);
 });

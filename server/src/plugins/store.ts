@@ -39,8 +39,10 @@ import {
 } from "./access";
 import {
   type BrokerConnection,
+  BrokerRefusalError,
   BrokerUnconfiguredError,
   type ComposioBroker,
+  isFieldScheme,
 } from "./broker";
 import {
   type CatalogueEntry,
@@ -4188,6 +4190,114 @@ export function createPluginStore(options: PluginStoreOptions) {
       }
 
       return { connected: true };
+    },
+
+    /**
+     * Connect this person with the secret they typed, and write down everything except the secret.
+     *
+     * THE VALUES TRAVEL IN ONE DIRECTION AND THE WHOLE METHOD IS BUILT AROUND THAT. They arrive on
+     * the request, they are handed to {@link ComposioBroker.connectWithFields}, and they reach
+     * Composio. Nothing else here is given them: not the row, not the audit payload, not a log
+     * line, not a thrown error — the broker's own doc comment is where that promise is kept on the
+     * far side, and it is the one call in this tree that rethrows with no `cause` precisely because
+     * the vendor's error object holds the key. Every other participant in this method is a
+     * long-lived, widely-readable record, so a credential landing in one is not a leak somebody can
+     * clean up afterwards; it is a leak with a retention schedule.
+     *
+     * THE SCHEME IS THE ONE RECORDED ON THE APP'S ROW, never a fresh read of the catalogue and
+     * never a value a caller passed. It is what this deployment's authorization config was created
+     * AS, and a connection is attached to that config: a second derivation is a second answer — a
+     * key sent as `BASIC` against a config made for `API_KEY` — which is the reasoning {@link
+     * ComposioBroker.connectionFields} gives for taking the scheme rather than resolving it, one
+     * step earlier in the same flow.
+     *
+     * AND AN APP WHOSE SCHEME IS NOT A FIELD SCHEME IS REFUSED BEFORE THE KEY TRAVELS. A consent
+     * app, a `NO_AUTH` app and an app this deployment could not resolve at all have no form and
+     * nothing to attach typed values to, so sending them on would spend somebody's credential on a
+     * config that cannot hold it — and would do it having already taken the secret out of the
+     * request. {@link isFieldScheme} is asked rather than the string compared, for the reason it
+     * exists: one list, read by the guard and by the type, so the schemes this admits cannot come
+     * apart from the schemes the broker's signature takes.
+     *
+     * `connected` IS THE LITERAL `true` BECAUSE THERE IS NO OTHER WAY OUT OF HERE. Unlike {@link
+     * confirmBrokeredConnection}, which asks a question the vendor may answer no to, this performs
+     * an act: it either made the connection or it threw. A `boolean` would invite a caller to
+     * branch on a `false` this method cannot produce.
+     */
+    async connectBrokeredWithFields(input: {
+      toolkit: string;
+      userId: string;
+      values: Record<string, string>;
+    }): Promise<{ connected: true; verified: boolean }> {
+      // First, and for `confirmBrokeredConnection`'s reason: a deployment with no key has nobody to
+      // connect anybody at, and the refusal must happen before the values are touched at all.
+      if (!broker) throw new BrokerUnconfiguredError();
+
+      // Keyed on the url, which is where a brokered row records which app it is; `mcp_servers.id`
+      // is a display name and nothing holds the two equal. It is the same reasoning the connection
+      // gate in `connectionTokenFor` is keyed on, and for the sharper version of the same stake: a
+      // row called `gmail` at `composio://slack` would have somebody's Slack key attached to a
+      // scheme read off Gmail's row.
+      const [app] = await database
+        .select({ authScheme: mcpServers.authScheme })
+        .from(mcpServers)
+        .where(eq(mcpServers.url, `composio://${input.toolkit}`))
+        .limit(1);
+
+      const authScheme = app?.authScheme ?? null;
+      if (!isFieldScheme(authScheme)) {
+        throw new BrokerRefusalError(
+          `${input.toolkit} is not an app this deployment connects with values somebody types, so nothing was sent. Open the app on the Plugins page and connect it the way it asks for; if it is not listed there at all, an administrator has to enable it first.`,
+        );
+      }
+
+      await broker.connectWithFields({
+        userId: input.userId,
+        toolkit: input.toolkit,
+        authScheme,
+        values: input.values,
+      });
+
+      /*
+       * UNVERIFIED FOR NOW, AND "FOR NOW" IS THE WHOLE OF WHAT THIS FALSE MEANS.
+       *
+       * It is a PLACEHOLDER and not a settled answer: the next step calls a probe against the key
+       * that was just attached and writes `Boolean(probe)` here instead. Until that exists,
+       * `false` is the honest value rather than a pessimistic one — Composio accepted the values
+       * and nothing has asked the app on the other side whether the credential works, which is
+       * exactly the state {@link composioConnections.verified} documents as "a key somebody typed
+       * in that nobody has checked". Written through the single writer rather than spelled here,
+       * so this path and the confirm path cannot drift into two row shapes.
+       */
+      const verified = false;
+      await this.recordBrokeredConnection({
+        toolkit: input.toolkit,
+        userId: input.userId,
+        verified,
+      });
+
+      await recordAuditEvent(auditStore, {
+        eventType: "mcp.account_connected",
+        targetType: "mcp_server",
+        // The app, the same id `confirmBrokeredConnection` and `retireConnectionsFor` file under,
+        // so one query answers what happened to one person's access to one app however it began
+        // and however it ended.
+        targetId: input.toolkit,
+        payload: {
+          actor: input.userId,
+          server: input.toolkit,
+          reconnected: false,
+          /*
+           * THE NAMES AND NEVER THE VALUES. What a reader of the trail needs is which app somebody
+           * connected and what it asked them for; the values are the credential itself, and an
+           * audit row is exactly the kind of long-lived, widely-readable record they must never
+           * reach.
+           */
+          fields: Object.keys(input.values).sort(),
+        },
+      });
+
+      return { connected: true, verified };
     },
 
     /**
