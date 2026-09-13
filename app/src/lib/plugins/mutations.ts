@@ -334,3 +334,105 @@ export function removeSkillMutationOptions(queryClient: QueryClient) {
     onSuccess: () => invalidatePlugins(queryClient),
   });
 }
+
+/**
+ * One value Composio wants from the person connecting, as Composio itself describes it.
+ *
+ * Declared here rather than guessed at a form: the vendor publishes the list per app, `secret` says
+ * which one to mask, and `help` is written for the person filling it in. `name` goes back on the
+ * wire verbatim and is never shown.
+ */
+export type BrokerField = {
+  name: string;
+  label: string;
+  help: string;
+  required: boolean;
+  secret: boolean;
+  default?: string;
+};
+
+/**
+ * Ask what an app wants typed in, for the apps nobody consents to.
+ *
+ * Most Composio apps are not connected through a consent screen — the person holds an API key and
+ * types it in — so the same connect route answers a field list on the first press and takes the
+ * values on the second. Nothing is written by this half: it is a question about the app, not about
+ * anybody's account, which is why it refetches nothing.
+ */
+export function brokeredConnectionFieldsMutationOptions() {
+  return mutationOptions({
+    mutationFn: (serverId: string): Promise<BrokerField[]> =>
+      client<BrokerField[]>(
+        `/api/plugins/servers/${encodeURIComponent(serverId)}/connect`,
+        "fields",
+        {
+          method: "POST",
+          fallback: "That app could not be asked what it needs.",
+        },
+      ),
+  });
+}
+
+/**
+ * Finish that connection with what the person typed.
+ *
+ * The values are passed to the mutation and held nowhere else — no query cache, no router state, no
+ * local storage. They are somebody's own key: the request body is the whole of their life in this
+ * app, and putting them anywhere a later render could read them back would be keeping a credential
+ * we were only ever asked to forward.
+ *
+ * Answers with the body rather than a bare success, because Composio does not check a submitted key.
+ * `connected` is only that the vendor accepted the row; `verified` is whether a real call was made
+ * with it, and a screen says different things about the two.
+ */
+export function connectBrokeredWithFieldsMutationOptions(
+  queryClient: QueryClient,
+) {
+  return mutationOptions({
+    mutationFn: async (variables: {
+      serverId: string;
+      values: Record<string, string>;
+    }): Promise<{ connected: boolean; verified: boolean }> => {
+      const response = await client(
+        `/api/plugins/servers/${encodeURIComponent(variables.serverId)}/connect`,
+        {
+          method: "POST",
+          body: { values: variables.values },
+          fallback: "That account could not be connected.",
+        },
+      );
+      return (await response.json()) as {
+        connected: boolean;
+        verified: boolean;
+      };
+    },
+    onSuccess: () => invalidatePlugins(queryClient),
+  });
+}
+
+/**
+ * Spend one read-only call at the vendor to find out whether a key still works.
+ *
+ * A button rather than something a page does on its own. Verifying on every render would spend the
+ * person's own rate limit at the vendor to redraw a word, so the check happens when somebody asks
+ * for it and the answer is recorded with the time it was taken.
+ */
+export function recheckBrokeredConnectionMutationOptions(
+  queryClient: QueryClient,
+) {
+  return mutationOptions({
+    mutationFn: async (
+      serverId: string,
+    ): Promise<{ verified: boolean; verifiedAt: string | null }> => {
+      const response = await client(
+        `/api/plugins/servers/${encodeURIComponent(serverId)}/connection/recheck`,
+        { method: "POST", fallback: "That connection could not be checked." },
+      );
+      return (await response.json()) as {
+        verified: boolean;
+        verifiedAt: string | null;
+      };
+    },
+    onSuccess: () => invalidatePlugins(queryClient),
+  });
+}
