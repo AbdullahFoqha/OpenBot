@@ -734,8 +734,11 @@ export function createPluginRoutes(
      * row is the only one with anything to re-check: this deployment holds no secret for it, only a
      * note that Composio said yes, and that note can drift when somebody ends the connection in
      * Composio's own dashboard. `probe` rides with the other two because the first of them cannot
-     * be read alone — three situations share one `verified: false`, and which action the app would
-     * be checked with is what separates them on a page that has done nothing but load. A held
+     * be read alone — three situations share one `verified: false`, and which action the check
+     * actually SPENT is what separates them on a page that has done nothing but load. It is a
+     * record of that check rather than a reading of what the app publishes now, and the difference
+     * is not academic: see `brokeredConnectionsFor`, where an administrator's press of Refresh
+     * moved the second without touching the first and the page accused a key nobody had tried. A held
      * connection has no equivalent question, so its rows carry no such fields, and their absence is
      * what tells the two READS apart. It is not how a reader learns how an app connects: that is
      * the app's recorded `authScheme`, and a page asking this list instead would be deriving a

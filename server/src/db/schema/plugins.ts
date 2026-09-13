@@ -242,6 +242,52 @@ export const composioConnections = pgTable(
     verified: boolean("verified").notNull().default(false),
     /** When that check last passed, which is what the page reports instead of a present tense. */
     verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    /**
+     * The action the last check SPENT on this connection, and null where it spent none.
+     *
+     * A RECORD OF WHAT HAPPENED, NOT A QUESTION ASKED OF TODAY'S METADATA — which is the whole
+     * reason it is a column at all. `verified` is a fact about a check made against the app's action
+     * listing as it stood THEN; this used to be derived on read from the listing as it stands NOW,
+     * and the argument that the two agreed held only for as long as nothing changed in between.
+     * Something can: `POST /servers/:id/refresh` is a generic administrator's route keyed on a
+     * server id and `composio-<slug>` is one, so an ordinary press of Refresh re-lists a brokered
+     * app's actions — the very press the Composio transport tells an operator to make when an
+     * action gains the version that makes it callable. The moment it did, a row that truthfully
+     * said "the key was accepted without being checked, because this app publishes nothing safe to
+     * try one on" began reading as a NAMED probe beside `verified: false`, which the settings page
+     * draws as "your key was checked and rejected, and the account still stands — disconnect it".
+     * Every clause of that is false for somebody whose key was never tried, and it persisted: it is
+     * what every page load said until they pressed Re-check.
+     *
+     * SO THE WRITER RECORDS IT, and the writer is the one place that cannot be wrong about it.
+     * `recordBrokeredConnection` is the single writer of this row, every caller knows what it spent
+     * — a probe's name, or nothing — and it is passed in beside `verified` because the two are one
+     * fact: what was checked, and how it went.
+     *
+     * NULL MEANS NO ACTION WAS SPENT, WHICH IS NOT THE SAME AS UNCHECKED. Read beside `verified` it
+     * says which:
+     *
+     *   null, not verified   — nothing was tried. The app published nothing safe to spend a key on
+     *                          at the moment of the check. A fact about the app, not about the key.
+     *   null, verified       — a CONSENT connection. The vendor's own yes at the end of its own
+     *                          screen is the evidence, and no call was ever made against the
+     *                          account, so there is no action to name and there never will be.
+     *   a name, verified     — it ran in this person's account and the vendor took the key.
+     *   a name, not verified — it ran and the vendor refused the key, and the account it ran in is
+     *                          still standing. A live account with a bad key behind it.
+     *
+     * AND NULL ON A ROW WRITTEN BEFORE THIS COLUMN EXISTED, which is the same null and deliberately
+     * so. No backfill is possible or wanted: what a check spent in March is not recoverable, and
+     * today's chooser answering for it is exactly the inference this column retires. The rows
+     * migration 0030 touched are consent rows, where null is permanently right; a key row that
+     * predates it reads as unchecked, the mildest of the four states and the only safe direction to
+     * be uncertain in — a name invented for it would be the false accusation above, written down.
+     *
+     * WHAT A CALLER MUST NOT READ IT AS is "the action this app could be checked with now". That is
+     * a different question, asked of `probeActionFor`, and the two answers diverge exactly when
+     * the app's listing has moved since the check.
+     */
+    probeAction: text("probe_action"),
     updatedAt: updatedAt(),
   },
   (table) => [

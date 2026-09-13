@@ -1615,11 +1615,11 @@ test("the chooser passes over a versionless read for the one it could call", asy
 });
 
 /**
- * AND THE LISTING CARRIES THAT CHOICE, WHICH IS WHAT SURVIVES A RELOAD.
+ * AND THE LISTING CARRIES THE ACTION THE CHECK ACTUALLY SPENT, WHICH IS WHAT SURVIVES A RELOAD.
  *
- * CRITERION. A brokered connection to an app that publishes a safe argument-less read is listed
- * with that action's name in `probe`; a connection to an app that publishes none is listed with
- * null. Both read out of recorded metadata, and neither spends a call at the vendor.
+ * CRITERION. A brokered connection whose row records an action is listed with that action's name in
+ * `probe` — and it is, EVEN WHERE THE APP NO LONGER PUBLISHES IT. Nothing is spent at the vendor to
+ * find that out.
  *
  * REASON. `probe` was only ever a field of an ANSWER — to a key handed over, or to a re-check — so
  * a page that reloaded lost it, and the row fell back to the sentence that says a key was accepted
@@ -1629,44 +1629,53 @@ test("the chooser passes over a versionless read for the one it could call", asy
  * nothing was wrong, and the Re-check button was taken away from them at the same moment — on the
  * page load where they would reach for it.
  *
- * WHICH IS DERIVABLE RATHER THAN STORED, and that is the whole design: the chooser above answers
- * from `mcp_tools` alone, so the listing can say what this deployment WOULD check an app with
- * without asking Composio anything. What makes the derived field honest is that a key connection is
- * always probed at connect time — so for an app that HAS a probe, the only way to be holding an
- * unverified row is that the probe ran, failed, and the account could not be taken back.
+ * WHICH IS RECORDED RATHER THAN DERIVED, and the de-listed app above is what makes that an
+ * assertion instead of a wording. The field was once answered by the chooser, from the app's action
+ * listing as it stood at the moment of the READ; the row's own verdict comes from the listing as it
+ * stood at the moment of the CHECK, and an administrator's press of Refresh moves one and not the
+ * other in either direction. Here the action the check spent has since left the app's listing —
+ * Composio publishes what it publishes — and the connection still reports what was tried on it,
+ * because that is what happened and no later listing can unhappen it.
  */
-test("a listed brokered connection names the action its app would be checked with", async () => {
+test("a listed brokered connection names the action it was checked with", async () => {
   useAnsweringClient();
-  await addProbedApp();
-  await database
-    .insert(composioConnections)
-    .values({ toolkit: probedToolkit, userId: askerId, verified: false });
+  // The app WITHOUT the action, so the only place the name below can come from is the row.
+  await addProbedApp({ withProbe: false });
+  await database.insert(composioConnections).values({
+    toolkit: probedToolkit,
+    userId: askerId,
+    verified: false,
+    probeAction: probeAction,
+  });
 
   const listed = await store.brokeredConnectionsFor(askerId);
   expect(listed).toHaveLength(1);
   expect(listed[0]?.serverId).toBe(probedId);
   expect(listed[0]?.verified).toBe(false);
   // The name, and not merely "something": it is the name that separates a key the vendor refused
-  // from an app with nothing to refuse it with.
+  // from a connection nothing was ever tried on.
   expect(listed[0]?.probe).toBe(probeAction);
-  // And nothing was spent finding that out. The chooser reads the recorded listing.
+  // And the chooser has nothing to offer, which is what makes the line above about the record.
+  expect(await store.probeActionFor(probedId)).toBeNull();
+  // Nothing was spent finding any of that out: both answers are read out of this deployment's own
+  // tables.
   expect(reached).toEqual([]);
 });
 
 /**
- * AND AN APP WITH NOTHING SAFE TO SPEND A KEY ON IS LISTED AS EXACTLY THAT.
+ * AND A CONNECTION NOTHING WAS EVER SPENT ON IS LISTED AS EXACTLY THAT.
  *
- * CRITERION. Where the app publishes no action a probe may use, the listed connection's `probe` is
- * null rather than a name.
+ * CRITERION. Where the row records no action, the listed connection's `probe` is null rather than a
+ * name.
  *
- * REASON. Null is the first of the three states and the only one that is a fact about the APP: most
- * key-based apps in the live catalogue publish some argument-less read and PostHog publishes none,
- * so an unverified row under such an app means nothing was tried rather than that something failed.
- * A listing that could not say null would leave the screen unable to tell that apart from a refused
- * key, which is the distinction the whole field exists for — and it would offer a Re-check that
- * could only come back with the same null.
+ * REASON. Null is the first of the states and the only one that is a fact about the CHECK rather
+ * than about the key: nothing was tried. Most key-based apps in the live catalogue publish some
+ * argument-less read and PostHog publishes none, so a connection made to such an app is honestly
+ * unchecked and stays so. A listing that could not say null would leave the screen unable to tell
+ * that apart from a refused key, which is the distinction the whole field exists for — and it would
+ * draw the accusation written for a bad key over somebody whose key was never tried.
  */
-test("a listed brokered connection for an app with no probe says there is none", async () => {
+test("a listed brokered connection nothing was spent on says there is no probe", async () => {
   useAnsweringClient();
   await addProbedApp({ withProbe: false });
   await database
@@ -1676,6 +1685,124 @@ test("a listed brokered connection for an app with no probe says there is none",
   const listed = await store.brokeredConnectionsFor(askerId);
   expect(listed).toHaveLength(1);
   expect(listed[0]?.serverId).toBe(probedId);
+  expect(listed[0]?.probe).toBeNull();
+});
+
+/**
+ * AND AN APP THAT LATER STARTS PUBLISHING ONE DOES NOT ACCUSE A KEY NOBODY EVER TRIED.
+ *
+ * CRITERION. A key connected to an app that published nothing safe to spend it on is listed with a
+ * null probe; the app's action listing then gains a safe versioned read, the chooser names it from
+ * that moment on, and the SAME connection is still listed with a null probe.
+ *
+ * REASON. `verified` is a fact about a check made against the listing as it stood THEN; a probe
+ * derived on read is a fact about the listing as it stands NOW, and nothing holds the two together.
+ * `POST /servers/:id/refresh` is a generic administrator's route keyed on a server id, and
+ * `composio-<slug>` is a server id, so a brokered app's actions are re-listed by an ordinary press
+ * of Refresh — which is exactly what the transport's own comment tells an operator to press when an
+ * action appears, or when one it had already listed gains the version that makes it callable. The
+ * instant that happened, a row honestly recording "your key was accepted without being checked"
+ * began reading as a NAMED probe beside `verified: false`, and the page drew the worst sentence
+ * this feature has: the key was checked and rejected, the account it ran in still stands, disconnect
+ * it. Every clause of that is false for somebody whose key was never tried, and it tells them to
+ * take down a connection that works — on every page load until they press Re-check.
+ *
+ * WHICH IS WHY THE COLUMN EXISTS. The pair is a record of the check that was made, written by the
+ * one writer that knows what it spent, and no metadata arriving afterwards can talk a listing out
+ * of it. The chooser is asked in the same breath below, so this is a test about the record rather
+ * than a test about an app that still has nothing to publish.
+ */
+test("an action listed after the fact does not rewrite what a key was checked with", async () => {
+  useAnsweringClient();
+  await addProbedApp({ withProbe: false });
+
+  expect(
+    await store.connectBrokeredWithFields({
+      toolkit: probedToolkit,
+      userId: askerId,
+      values: { generic_api_key: typedKey },
+    }),
+  ).toEqual({ connected: true, verified: false, probe: null });
+
+  // THE REFRESH, as its only lasting effect: the app's actions re-listed, now carrying a read the
+  // chooser will take. Inserted directly for {@link addProbedApp}'s reason — nothing here is about
+  // how a listing turns Composio's tags into an effect.
+  await database.insert(mcpTools).values({
+    serverId: probedId,
+    name: probeAction,
+    description: "Says who the key belongs to.",
+    effect: "read",
+    version: probeVersion,
+  });
+
+  const listed = await store.brokeredConnectionsFor(askerId);
+  expect(listed).toHaveLength(1);
+  expect(listed[0]?.serverId).toBe(probedId);
+  expect(listed[0]?.verified).toBe(false);
+  // Still null, because still nothing was ever spent on this key.
+  expect(listed[0]?.probe).toBeNull();
+  // While the chooser now names one, which is the whole of what changed and the reason the two
+  // answers have to come from two different questions.
+  expect((await store.probeActionFor(probedId))?.name).toBe(probeAction);
+  // And no call was made to find any of that out.
+  expect(reached).toEqual([]);
+});
+
+/**
+ * A CONSENT CONNECTION RECORDS NO ACTION, BECAUSE NONE WAS SPENT.
+ *
+ * CRITERION. A connection confirmed at the vendor is written verified with no action beside it, and
+ * listed that way, even where the app publishes one the chooser would happily take.
+ *
+ * REASON. Null in this column is not "unchecked" — `verified` is what says that — it is "this
+ * deployment spent no action of the app's to know what it knows". For a consent row that is
+ * permanently and exactly true: the evidence is the vendor's own yes at the end of its own screen,
+ * which {@link confirmBrokeredConnection} goes and asks for, and no call is ever made against the
+ * account. The derived field could not say so. It answered with whatever the app happened to
+ * publish, so a consent connection was listed as checked with an action nothing had ever called,
+ * and the rows whose date is the moment of consent read exactly like the rows that had answered a
+ * call.
+ */
+test("a consent connection records no action, because none was spent", async () => {
+  useAnsweringClient();
+  await store.addBrokeredApp({
+    slug: probedToolkit,
+    title: "Probed App",
+    by: admin,
+    connection: { kind: "consent" },
+  });
+  // The action a derived field would have named, so the null below is this path's doing and not the
+  // app having nothing to offer.
+  await database.insert(mcpTools).values({
+    serverId: probedId,
+    name: probeAction,
+    description: "Says who the account belongs to.",
+    effect: "read",
+    version: probeVersion,
+  });
+
+  expect(
+    await store.confirmBrokeredConnection({
+      toolkit: probedToolkit,
+      userId: askerId,
+    }),
+  ).toEqual({ connected: true });
+
+  const [row] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(row.verified).toBe(true);
+  expect(row.probeAction).toBeNull();
+  // Nothing was called to earn that flag, which is the fact the null records.
+  expect(reached).toEqual([]);
+
+  const listed = await store.brokeredConnectionsFor(askerId);
   expect(listed[0]?.probe).toBeNull();
 });
 
@@ -2064,6 +2191,9 @@ test("an app with no probe connects unverified rather than not at all", async ()
     );
   expect(row.verified).toBe(false);
   expect(row.verifiedAt).toBeNull();
+  // Null in the column too, and it is the row's own sentence rather than the listing's: NOTHING WAS
+  // SPENT on this key. What the app publishes today, or comes to publish tomorrow, cannot move it.
+  expect(row.probeAction).toBeNull();
 
   const checked = recordedOfType("mcp.connection_verified");
   expect(checked).toHaveLength(1);
@@ -2156,6 +2286,10 @@ test("a key that works is recorded verified, with the action it was checked with
   expect(row.verified).toBe(true);
   expect(row.verifiedAt).not.toBeNull();
   expect(row.verifiedAt?.getTime()).toBeGreaterThanOrEqual(before.getTime());
+  // AND THE ROW RECORDS WHICH ACTION EARNED THE FLAG, which is the half `verified` cannot hold.
+  // The listing reads this column rather than asking today's metadata what it WOULD spend, so what
+  // a page says about this connection stays what happened to it.
+  expect(row.probeAction).toBe(probeAction);
 
   const checked = recordedOfType("mcp.connection_verified");
   expect(checked).toHaveLength(1);
@@ -2284,6 +2418,10 @@ test("a re-check that answers records the connection verified, with the action i
     );
   expect(row.verified).toBe(true);
   expect(row.verifiedAt?.toISOString()).toBe(answer.verifiedAt);
+  // And the action this press spent, written down beside the flag it earned. A re-check is the
+  // second of the two writers that can put a name here, and a row must not be able to tell which of
+  // them wrote it apart from by its date.
+  expect(row.probeAction).toBe(probeAction);
 
   // NOTHING WAS CONNECTED AND NOTHING WAS WITHDRAWN. The only ask in this run is the one the app's
   // own enablement made; a re-check that reached `connectWithFields` would be making a second

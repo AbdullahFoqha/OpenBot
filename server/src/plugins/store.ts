@@ -3896,57 +3896,79 @@ export function createPluginStore(options: PluginStoreOptions) {
      * row is comes from the app's recorded {@link ServerRecord.authScheme}, which the page branches
      * on first, and not from anything answered here.
      *
-     * `probe` IS DERIVED HERE RATHER THAN STORED, AND IT IS WHAT SURVIVES A RELOAD. The pair above
-     * says whether a key connection was ever checked; it cannot say WHY one was not, and three
-     * different situations share the one word `false`. Until this field, only the answer to a
-     * connect or a re-check could tell them apart — so a page reload lost the distinction, and the
-     * worst of the three degraded into the mildest: a row saying the key was accepted without being
-     * checked, over an account whose key the vendor had actually REFUSED.
+     * `probe` IS THE ACTION THE LAST CHECK SPENT, READ OUT OF THE ROW. The pair above says whether a
+     * key connection was ever checked; it cannot say WHY one was not, and three different
+     * situations share the one word `false`. Until this field, only the answer to a connect or a
+     * re-check could tell them apart — so a page reload lost the distinction, and the worst of the
+     * three degraded into the mildest: a row saying the key was accepted without being checked, over
+     * an account whose key the vendor had actually REFUSED.
      *
-     * THERE IS NO COLUMN AND THERE NEED NOT BE, because {@link probeActionFor} already answers the
-     * question from recorded metadata alone — which action this deployment would check this app
-     * with — and asks the vendor nothing. IT IS THE SAME PREDICATE THE PROBE ITSELF RUNS ON, whole
-     * and not an approximation of it: the chooser is where every condition on "can this action be
-     * called at all" lives, the version among them, and {@link probeBrokeredConnection} adds none
-     * of its own. That is what makes the field below a derivation rather than a guess, and it is
-     * the property this whole paragraph depends on — while the version condition sat in the probe
-     * and not the chooser, the two predicates disagreed for exactly the apps whose listing is
-     * thinnest, and the sentence the third line below licenses was drawn for somebody whose key had
-     * never been tried. Read together with `verified`, the chooser's answer separates the three:
+     * IT IS STORED BECAUSE IT IS A FACT ABOUT A MOMENT, NOT ABOUT TODAY'S METADATA. This field was
+     * once derived here, by asking {@link probeActionFor} which action this deployment WOULD check
+     * the app with; the argument for that was that the chooser holds every condition the probe
+     * itself runs on, so the two could not disagree. They cannot disagree AT AN INSTANT, and that is
+     * all it establishes. `verified` records a check made against the app's action listing as it
+     * stood THEN, and the chooser answers from the listing as it stands NOW — and `POST
+     * /servers/:id/refresh` is a generic administrator's route keyed on a server id, of which
+     * `composio-<slug>` is one, so an ordinary press of Refresh moves the second without touching
+     * the first. It is the very press the Composio transport tells an operator to make when an
+     * action appears or gains the version that makes it callable. So: somebody connects a key to an
+     * app that publishes nothing safe to try it on, and the row honestly says the key was accepted
+     * unchecked. An administrator presses Refresh. From that page load on, the derivation named an
+     * action, and the row drew the sentence written for a REFUSED key — your key was checked against
+     * this app and rejected, the account it was checked in still stands, so disconnect it. Every
+     * clause of that is false for somebody whose key was never tried, it tells them to take down a
+     * connection that works, and it persists: it is what every page load says until they press
+     * Re-check.
      *
-     *   no probe, not verified   — the app publishes nothing safe to spend a key on. Nothing was
-     *                              tried, and nothing can be. A fact about the app, not the key.
+     * SO THE WRITER RECORDS WHAT IT SPENT AND THIS READS IT BACK. {@link recordBrokeredConnection}
+     * is the single writer, every path into it knows the action it spent or that it spent none, and
+     * {@link composioConnections.probeAction} is where that goes. Read together with `verified`, the
+     * column tells four states apart, and no inference is made in any of them:
+     *
+     *   no probe, not verified   — nothing was tried: at the time of the check the app published
+     *                              nothing safe to spend a key on. A fact about the app, not the
+     *                              key. A key row written before the column existed reads this way
+     *                              too, for the reason that column gives.
+     *   no probe, verified       — a CONSENT connection. The vendor's own yes at its own screen is
+     *                              the evidence, no call was ever made against the account, and so
+     *                              there is no action to name.
      *   a probe, verified        — it ran in this person's account and the vendor took the key.
      *   a probe, NOT verified    — it ran and the vendor refused the key, and the account it ran in
      *                              is still standing. A live account with a bad key behind it.
      *
-     * AND THE THIRD LINE IS AN INFERENCE THIS METHOD IS ENTITLED TO MAKE, which is what makes the
-     * derived field honest rather than a guess. TWO PATHS PRODUCE IT and both end the same way, in
-     * a refused key over an account that is still there. A key connection is ALWAYS probed at
-     * connect time ({@link connectBrokeredWithFields}), and a probe that fails withdraws the
-     * account it just made — so one way to be holding an unverified row for an app that HAS a probe
-     * is that the probe ran, the vendor refused, and the withdrawal did not succeed.
+     * AND THE LAST LINE IS A RECORD RATHER THAN AN INFERENCE, which is the whole of what changed.
+     * The caveat that stood here used to argue the state into existence: a key connection is ALWAYS
+     * probed at connect time, a probe that fails withdraws the account it just made, so an
+     * unverified row under an app that HAS a probe must be a refusal whose withdrawal failed — or
+     * else a re-check the vendor refused, which leaves the person's own older account alone. That
+     * reasoning was sound about the rows it described and said nothing about the row a refresh had
+     * quietly moved underneath it. What the row now warrants, it warrants by having been written:
+     * the check ran, it spent this action, and the vendor refused.
      *
-     * THE SECOND IS A RE-CHECK THE VENDOR REFUSED ({@link recheckBrokeredConnection}), which writes
-     * the same unverified row over an account it deliberately never withdraws: that account predates
-     * the press and is the person's own, so taking it away to report a bad key would destroy the
-     * thing they are trying to repair. Nothing else can write this pair — an app with no probe never
-     * reaches it, and a re-check that could try nothing writes nothing at all — so the row could not
-     * otherwise exist.
+     * WHICH PATH WROTE IT IS STILL NOT RECOVERABLE, and a reader must not invent one. The column
+     * records what was spent, not who spent it, and the two writers of that pair end differently: a
+     * connect withdraws the account it had just made and only leaves the row where Composio refused
+     * to take it back, while a re-check never withdraws anything, because the account predates the
+     * press and is the person's own. So a page may say the key was refused and the account stands;
+     * a page that goes on to blame a failed withdrawal is right on the connect path and FALSE on the
+     * re-check, where nothing ever tried to remove anything.
      *
-     * WHICH OF THE TWO IS NOT RECOVERABLE FROM HERE, and a reader must not invent one. What the pair
-     * warrants is the refusal and the standing account; a page that goes on to blame a failed
-     * withdrawal is right on the connect path and FALSE on the re-check, where nothing ever tried to
-     * remove anything.
+     * WHAT NO LONGER TRAVELS WITH IT IS "COULD THIS BE CHECKED NOW", and that is a different
+     * question with a different answer: {@link probeActionFor}, asked of the app rather than of the
+     * connection. The two diverge exactly when the listing has moved since the check — the case this
+     * column exists for — so a caller that needs the second must ask for it rather than read it off
+     * this one. The settings page gates its Re-check button on this field today, which was the same
+     * question while the field was derived and is not any more: a connection nothing was ever spent
+     * on reads null for good, so the button stays withheld even where the app has since published
+     * something to spend. Withholding it is the safe direction and the honest answer here is still
+     * what happened, but the screen's question is the app's and wants the chooser.
      *
-     * CHOSEN PER ROW RATHER THAN FOLDED INTO THE QUERY ABOVE, and deliberately: the chooser reads
-     * every recorded action for one app and applies a rule — vendor-labelled read, not destructive,
-     * no required inputs, a recorded version, identity action preferred — that has no honest
-     * spelling in SQL. Folding
-     * it in would mean a second copy of that rule, and a second copy is how a listing comes to name
-     * an action the verification would never call. The rows read are the same either way (the
-     * chooser selects the same actions whether asked once per app or once for all of them), the
-     * calls are made together, and the count is bounded by the apps ONE person has connected.
+     * NOTHING IS CHOSEN PER ROW ANY MORE, so a listing is one query again. The chooser reads every
+     * recorded action for one app and applies a rule — vendor-labelled read, not destructive, no
+     * required inputs, a recorded version, identity action preferred — that has no honest spelling
+     * in SQL, and it was called once per connected app to fill this field. It no longer is: the
+     * value is on the row the query already reads.
      *
      * `verifiedAt` STAYS NULL WHERE IT IS NULL, unlike `connectedAt`, which collapses to `""`
      * because a row cannot exist without one and the fallback is unreachable. Null here is
@@ -3972,6 +3994,7 @@ export function createPluginStore(options: PluginStoreOptions) {
           connectedAt: composioConnections.connectedAt,
           verified: composioConnections.verified,
           verifiedAt: composioConnections.verifiedAt,
+          probeAction: composioConnections.probeAction,
         })
         .from(composioConnections)
         .innerJoin(
@@ -3981,18 +4004,16 @@ export function createPluginStore(options: PluginStoreOptions) {
         .where(eq(composioConnections.userId, userId))
         .orderBy(asc(mcpServers.id));
 
-      return await Promise.all(
-        rows.map(async (row) => ({
-          serverId: row.serverId,
-          scope: "",
-          connectedAt: iso(row.connectedAt) ?? "",
-          verified: row.verified,
-          verifiedAt: iso(row.verifiedAt),
-          // The name alone, because that is what the three states are told apart by; the version
-          // beside it is for the caller that makes the call, which this read is not.
-          probe: (await this.probeActionFor(row.serverId))?.name ?? null,
-        })),
-      );
+      return rows.map((row) => ({
+        serverId: row.serverId,
+        scope: "",
+        connectedAt: iso(row.connectedAt) ?? "",
+        verified: row.verified,
+        verifiedAt: iso(row.verifiedAt),
+        // The name alone, because that is what the four states are told apart by; the version the
+        // check was made at is the caller-of-the-call's business, and this read makes none.
+        probe: row.probeAction,
+      }));
     },
 
     /**
@@ -4065,14 +4086,17 @@ export function createPluginStore(options: PluginStoreOptions) {
      * required input: not unsafe, just not callable. The version is SELECTED AND RETURNED for the
      * caller that has to send it, so the choice and the call cannot come apart.
      *
-     * THE CONDITION LIVES IN THE FILTER RATHER THAN AFTER THE CHOICE, and that placement is the
-     * whole reason this answer is trustworthy twice over. While it sat downstream — read by the
-     * probe, unknown to everything else — TWO PREDICATES EXISTED FOR ONE QUESTION, and the weaker
-     * one was the one the connections listing derived its `probe` field from: an app whose chosen
-     * action had no version connected honestly as "nothing was tried", then reloaded as "your key
-     * was checked and rejected". A filter also lets the search CONTINUE: a versionless candidate is
-     * passed over for the next safe read rather than short-circuiting the whole app to "nothing to
-     * try", so an app that can be checked is.
+     * THE CONDITION LIVES IN THE FILTER RATHER THAN AFTER THE CHOICE, so there is ONE predicate for
+     * one question. While it sat downstream — read by the probe, unknown to everything else — there
+     * were two, and the weaker of them was what the connections listing derived its `probe` field
+     * from: an app whose chosen action had no version connected honestly as "nothing was tried",
+     * then reloaded as "your key was checked and rejected". That listing no longer asks this
+     * function anything — {@link brokeredConnectionsFor} reads what the check RECORDED, because no
+     * derivation from today's metadata can be right about yesterday's check — so a split predicate
+     * would no longer show up on a settings page. It would show up somewhere worse: in a probe that
+     * chose an action it then refused to send. A filter also lets the search CONTINUE: a versionless
+     * candidate is passed over for the next safe read rather than short-circuiting the whole app to
+     * "nothing to try", so an app that can be checked is.
      *
      * NULL IS AN ANSWER AND NOT A FAILURE. Of fifteen key-based apps sampled, most publish some safe
      * argument-less read and PostHog publishes none at all, so an app that cannot be probed is an
@@ -4153,11 +4177,27 @@ export function createPluginStore(options: PluginStoreOptions) {
      * browser as the date the row's sentence is drawn from — would otherwise have to read the row
      * back and hope it was reading its own write. The timestamp is still this writer's; what
      * changed is that it is no longer thrown away.
+     *
+     * `probeAction` IS PASSED IN, UNLIKE THE TIMESTAMP, BECAUSE ONLY THE CALLER KNOWS IT. It is the
+     * action this check SPENT — the probe's name, or null where none was spent — and it is required
+     * rather than optional so that a new path cannot record a connection while staying silent about
+     * what it tried. Every existing caller knows the answer without looking anything up: a consent
+     * confirm spent nothing and passes null, and both probing paths pass the name the probe returned
+     * them, which is null there too when the app published nothing safe to call.
+     *
+     * IT IS PART OF THE SAME SET AS THE FLAG AND THE STAMP, which is the reason it is written here
+     * and nowhere else. `verified` alone says a check did not pass and cannot say what it was; this
+     * column is what separates "the app published nothing to try" from "it ran and the vendor said
+     * no", and a row carrying one of the three without the others is a shape no reader downstream
+     * has reasoned about. It used to be derived on read instead, from the app's action listing as
+     * that listing stood at the moment of the read — see {@link brokeredConnectionsFor}, where the
+     * refresh that broke the derivation is written out.
      */
     async recordBrokeredConnection(input: {
       toolkit: string;
       userId: string;
       verified: boolean;
+      probeAction: string | null;
     }): Promise<Date | null> {
       const verifiedAt = input.verified ? new Date() : null;
       await database
@@ -4167,10 +4207,19 @@ export function createPluginStore(options: PluginStoreOptions) {
           userId: input.userId,
           verified: input.verified,
           verifiedAt,
+          probeAction: input.probeAction,
         })
         .onConflictDoUpdate({
           target: [composioConnections.toolkit, composioConnections.userId],
-          set: { verified: input.verified, verifiedAt, updatedAt: new Date() },
+          set: {
+            verified: input.verified,
+            verifiedAt,
+            // Overwritten rather than left standing, for `verifiedAt`'s reason: the pair describes
+            // ONE check, and a row keeping the action an earlier check spent beside the verdict of
+            // a later one would name a call this row's own state did not come from.
+            probeAction: input.probeAction,
+            updatedAt: new Date(),
+          },
         });
       return verifiedAt;
     },
@@ -4224,10 +4273,12 @@ export function createPluginStore(options: PluginStoreOptions) {
        * ordinary answer — see that method — and it is the FIRST of the three states above.
        *
        * NOTHING IS ASKED A SECOND TIME HERE, AND THAT IS THE POINT. Every condition on whether an
-       * action can be spent on a key lives in the chooser, so what this method reports and what the
-       * connections listing derives from the same chooser cannot disagree. A version re-read here
-       * would be a second predicate, and the weaker of two predicates is what once had a reloaded
-       * page tell somebody their untried key had been rejected.
+       * action can be spent on a key lives in the chooser, so the action this method sends is the
+       * action the chooser said was sendable, whole. A version re-read here would be a second
+       * predicate for one question, and the weaker of two predicates is what once had a reloaded
+       * page tell somebody their untried key had been rejected — in the days when the connections
+       * listing answered by asking the chooser too. It no longer does: what a page says about a
+       * check is what the check recorded, and what it recorded is the name this method returns.
        */
       const serverId = `composio-${input.toolkit}`;
       const candidate = await this.probeActionFor(serverId);
@@ -4354,6 +4405,13 @@ export function createPluginStore(options: PluginStoreOptions) {
         toolkit: input.toolkit,
         userId: input.userId,
         verified: true,
+        // NOTHING WAS SPENT TO EARN THAT FLAG, and that is what the null records rather than an
+        // absence of information. A consent connection is verified by the vendor's own yes at its
+        // own screen; no action of the app's is ever called against it, here or later, so there is
+        // no name to write and there never will be. The derived field could not say so — it
+        // answered with whatever the app happened to publish — and a consent row was listed as
+        // having been checked with an action nothing had called.
+        probeAction: null,
       });
 
       if (!existing) {
@@ -4521,6 +4579,12 @@ export function createPluginStore(options: PluginStoreOptions) {
             toolkit: input.toolkit,
             userId: input.userId,
             verified: false,
+            // THE ACTION THAT WAS TRIED, which is the half of this state the flag cannot hold. This
+            // is the worst state the feature has — a live account at Composio with a key the vendor
+            // has just refused — and the name beside the `false` is the whole of what separates it
+            // on a later page load from a key nobody ever tried. It is the same name the audit row
+            // below carries under `action`, for a reader of the trail rather than of a screen.
+            probeAction: probe,
           });
 
           /*
@@ -4598,6 +4662,11 @@ export function createPluginStore(options: PluginStoreOptions) {
         toolkit: input.toolkit,
         userId: input.userId,
         verified,
+        // What was spent, which is the name on a probe that ran and the null that IS the first of
+        // the three states: this app published nothing safe to try the key on. `verified` is
+        // derived from this same value a few lines above, so the row cannot claim a check with an
+        // action beside a flag that says nothing checked it, or the other way about.
+        probeAction: probe,
       });
 
       await recordAuditEvent(auditStore, {
@@ -4800,6 +4869,10 @@ export function createPluginStore(options: PluginStoreOptions) {
         toolkit: input.toolkit,
         userId: input.userId,
         verified,
+        // The action this press spent. Never null on this path: the nothing-to-probe branch above
+        // returns before reaching the writer, precisely so that a check which could try nothing
+        // writes nothing at all.
+        probeAction: probe,
       });
 
       /*
