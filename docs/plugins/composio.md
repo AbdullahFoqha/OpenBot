@@ -290,15 +290,27 @@ which case the key is kept and the page says it was accepted without being check
 honest sentence and not an apology for one. A person with a perfectly good key must not be told the
 vendor rejected it because an app's listing was thin.
 
-There is one state worse than those, and it has a sentence of its own for that reason: the probe
-failed *and* Composio would not take the account back. Leaving no row then would not mean nothing
-was left behind — it would mean a live account nothing on any screen names and the person cannot
-disconnect, because disconnect works off the row. So the row is written unverified and the person is
-told all three facts rather than left to conclude their key might be fine: *Your key was checked
-against Perplexity and rejected. The account it was checked in still stands at Composio — this
-deployment could not withdraw it — so disconnect it here, or fix the key at Perplexity and press
-Re-check.* An audit row naming the action that was tried records the same state for whoever reads
-the trail a week later, because a sentence one person read once outlives nothing.
+There is one state worse than those, and it has a sentence of its own for that reason: a key the
+vendor refused, over an account that is still standing at Composio. Two paths arrive at it and they
+arrive for different reasons. A connect whose probe failed tried to withdraw the account it had just
+made and Composio would not take it back — and leaving no row then would not mean nothing was left
+behind, it would mean a live account nothing on any screen names and the person cannot disconnect,
+because disconnect works off the row. A re-check the vendor refuses never tried to withdraw
+anything, deliberately: that account predates the press and is the person's own, so taking it away
+in order to report a bad key would destroy the thing they came to repair.
+
+Either way the row is written unverified and the person is told all three facts rather than left to
+conclude their key might be fine: *Your key was checked against Perplexity and rejected, and the
+account it was checked in still stands at Composio, so disconnect it here, or fix the key at
+Perplexity and press Re-check.* What the sentence does not do is say **why** the account stands,
+and the omission is deliberate rather than vague. Blaming a failed withdrawal is true on the connect
+path and false on the re-check, where nothing ever attempted a removal; the standing account is the
+actionable half on both, and which path wrote the row is not recoverable from it afterwards. Both
+ways out are named because neither is obvious from a row that still reads "Connected": the account
+ends with the button beside the line, and a key corrected at the vendor is worth a second check
+rather than a second connection. An audit row naming the action that was tried records the same
+state for whoever reads the trail a week later, because a sentence one person read once outlives
+nothing.
 
 **Which of the three a row is in is a fact about the action a check would be spent on, and the page
 keeps it across a reload.** The flag alone cannot say: `false` is both *this app publishes nothing
