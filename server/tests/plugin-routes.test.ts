@@ -877,10 +877,15 @@ describe("the Composio directory", () => {
      * 503 with the refusal's own words, because a refusal this deployment authored is not a third
      * party being down and the generic sentence would send an administrator to check a key that is
      * fine.
+     *
+     * DOCUSIGN IS THE APP PRESSED HERE because it is the fixture's `unsupported` row, and a refusal
+     * of exactly this kind is the one it would really raise. The POST can still reach it: the route
+     * searches the unfiltered `directory`, not the `connectable` subset the GET answers with, so
+     * the last thing between an administrator and a dead button is this sentence.
      */
     const { app } = directoryApp(undefined, "admin", [], async () => {
       throw new BrokerRefusalError(
-        "Linear was not enabled: it needs its own OAuth client, and Composio holds no managed credentials for it.",
+        "DocuSign was not enabled: it needs its own OAuth client, and Composio holds no managed credentials for it.",
       );
     });
 
@@ -889,7 +894,7 @@ describe("the Composio directory", () => {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ slug: "linear" }),
+        body: JSON.stringify({ slug: "docusign" }),
       },
     );
 
@@ -897,6 +902,40 @@ describe("the Composio directory", () => {
     expect(((await response.json()) as { error: string }).error).toContain(
       "its own OAuth client",
     );
+  });
+
+  test("a deployment fault while enabling is still a 409 in its own words", async () => {
+    /*
+     * WHAT THE BROKER MAPPING MUST NOT SWALLOW. The catch on this route now ends in
+     * `brokerRefusal`, and where that mapping sits decides the answer for three whole classes of
+     * failure: the deployment faults — an ambiguous server row, a broken invariant, a query this
+     * database refused — are recognised one branch ABOVE it and answered 409 with the sentence
+     * they carry. Move the broker mapping up and every one of them turns into a 502 saying
+     * "Composio said nothing about why" about a failure Composio had no part in, which would send
+     * an administrator to check a key that is fine and hide the row they actually have to fix.
+     *
+     * Nothing else on this route pins that ordering, so this is the case that stops a later reader
+     * tidying the branches into the wrong sequence.
+     */
+    const { app } = directoryApp(undefined, "admin", [], async () => {
+      throw new ServerRowAmbiguousError(
+        "Two rows claim the url composio://slack, and this deployment cannot tell which one an enable belongs to.",
+      );
+    });
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "slack" }),
+      },
+    );
+
+    expect(response.status).toBe(409);
+    const refusal = ((await response.json()) as { error: string }).error;
+    expect(refusal).toContain("Two rows claim the url");
+    expect(refusal).not.toContain("Composio said nothing about why");
   });
 });
 

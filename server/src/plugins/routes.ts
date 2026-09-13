@@ -637,6 +637,34 @@ export function createPluginRoutes(
        * browser fell back to its own "That app could not be added". Everything that explains the
        * failure existed; nothing carried it the last step.
        */
+      /*
+       * WHAT THE MAPPING COST, PUT BACK. A throw used to reach Hono's default handler, which is a
+       * bad answer and a good log: the administrator got a bodyless 500, but the stack was printed
+       * where an operator could find it. Catching everything fixed the answer and silenced the log,
+       * and the failure that needs the log most is the one left here — not a refusal this
+       * deployment authored, which `brokerSentence` names and `isDeploymentFault` already took one
+       * branch above, and not a sentence Composio wrote, which `vendorSentence` reaches for. Both
+       * null is a fault nobody has explained, most often a programmer error on this side, and it
+       * would otherwise leave only the generic "Composio said nothing about why" in a browser
+       * nobody is reading a console from.
+       *
+       * The same shape and the same restraint as the connection-not-recorded log below: the slug,
+       * because it is the app an operator is about to be asked about; what the person was told, so
+       * the console line and the support request can be matched up; and the error stringified,
+       * never spread, logged as an object or reached into. No key, no vendor response, no request
+       * body.
+       */
+      if (brokerSentence(error) === null && vendorSentence(error) === null) {
+        console.error(
+          JSON.stringify({
+            type: "composio-app-not-enabled",
+            slug: app.slug,
+            note: "Enabling a brokered app failed for a reason neither this deployment nor Composio put a sentence to. The administrator was answered 502 with the generic sentence.",
+            error: String(error),
+          }),
+        );
+      }
+
       const refusal = brokerRefusal(
         error,
         `${app.name} could not be enabled, and Composio said nothing about why. Try again, and check this deployment's Composio key if it persists.`,
@@ -663,9 +691,14 @@ export function createPluginRoutes(
      * so the page could only either say "Not connected" over a live account or say nothing at all,
      * and it chose to say nothing.
      *
-     * A brokered row is an ordinary connection — `brokeredConnectionsFor` answers in the shape
-     * `connectionsFor` answers, deliberately — so nothing here marks which source a row came from
-     * and nothing downstream asks.
+     * CONCATENATED WITHOUT REWRITING, because the fields a settings page draws from — the server
+     * id, the scope, the date — line up across the two reads, and one row template can draw either
+     * kind. What does not line up is the pair `brokeredConnectionsFor` adds, `verified` and
+     * `verifiedAt`, so the list that leaves here is not uniform. That pair travels because a
+     * brokered row is the only one with anything to re-check: this deployment holds no secret for
+     * it, only a note that Composio said yes, and that note can drift when somebody ends the
+     * connection in Composio's own dashboard. A held connection has no equivalent question, so its
+     * rows carry no such fields, and their absence is what tells a reader which kind a row is.
      *
      * SORTED, so two requests answer in the same order. Each read is ordered by server id within
      * its own table, and concatenating two sorted lists is not a sorted list. Compared as plain
