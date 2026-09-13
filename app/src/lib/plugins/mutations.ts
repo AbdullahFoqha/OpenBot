@@ -438,10 +438,22 @@ export type BrokeredKeyConnection = {
 /**
  * Finish that connection with what the person typed.
  *
- * The values are passed to the mutation and held nowhere else — no query cache, no router state, no
- * local storage. They are somebody's own key: the request body is the whole of their life in this
- * app, and putting them anywhere a later render could read them back would be keeping a credential
- * we were only ever asked to forward.
+ * The values reach no query cache, no router state and no local storage. They are somebody's own
+ * key: the request body is the whole of their life in this app, and putting them anywhere a later
+ * render could read them back would be keeping a credential we were only ever asked to forward.
+ *
+ * WHICH IS WHY THIS ERASES ITS OWN INPUT. Handing values to a mutation is not the same as sending
+ * them: a mutation keeps the variables it was called with in its state for as long as its observer
+ * lives, so the key stayed legible to anything reading mutation state — devtools included — long
+ * after the one request it was typed for had finished, and longest of all on the refusal, where the
+ * form stays open for as long as somebody spends correcting a key. The `finally` below is what makes
+ * "the request body is the whole of their life" true rather than nearly true.
+ *
+ * IN THE MUTATION FUNCTION RATHER THAN IN A CALLBACK, because callers spread these options and
+ * declare their own `onSuccess` and `onError` over them — the refetch below is called by hand for
+ * exactly that reason. A callback can be shadowed by the next caller who needs one; this cannot.
+ * It replaces the field on the variables object, which is made fresh for each press, so the copy
+ * the form itself is holding is untouched and a refused key is still there to be corrected.
  *
  * Answers with the body rather than a bare success, because Composio does not check a submitted key.
  * `connected` is only that the vendor accepted the row; `verified` is whether a real call was made
@@ -462,15 +474,20 @@ export function connectBrokeredWithFieldsMutationOptions(
       serverId: string;
       values: Record<string, string>;
     }): Promise<BrokeredKeyConnection> => {
-      const response = await client(
-        `/api/plugins/servers/${encodeURIComponent(variables.serverId)}/connect`,
-        {
-          method: "POST",
-          body: { values: variables.values },
-          fallback: "That account could not be connected.",
-        },
-      );
-      return response.json();
+      try {
+        const response = await client(
+          `/api/plugins/servers/${encodeURIComponent(variables.serverId)}/connect`,
+          {
+            method: "POST",
+            body: { values: variables.values },
+            fallback: "That account could not be connected.",
+          },
+        );
+        return response.json();
+      } finally {
+        // Taken or refused, the request is over and this copy has nothing left to do.
+        variables.values = {};
+      }
     },
     onSuccess: () => invalidatePlugins(queryClient),
   });

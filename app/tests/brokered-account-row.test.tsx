@@ -246,6 +246,21 @@ type Deployment = {
 type Server = {
   /** How many DELETEs reached the connection endpoint. */
   deletes: number;
+  /**
+   * What the app publishes as its fields from now on.
+   *
+   * The catalogue is the vendor's, not ours, so what an app asks for is free to change between two
+   * presses of Connect — which is why the row asks again on every open. A test that could not move
+   * this could only ever check the list a form was born with.
+   */
+  publish: (fields: BrokerField[]) => void;
+  /**
+   * The values of each submission that reached the connect route, in order.
+   *
+   * The body rather than the form, because the body is what the server refuses: a name the app no
+   * longer publishes is a 400 on the whole connection, however tidy the screen looked.
+   */
+  submitted: Record<string, string>[];
 };
 
 /**
@@ -268,7 +283,13 @@ function installDeployment(deployment: Deployment): Server {
     recheckAnswer: { verified: true, verifiedAt: RECHECKED_AT, probe: PROBE },
     ...deployment,
   };
-  const server: Server = { deletes: 0 };
+  const server: Server = {
+    deletes: 0,
+    publish: (fields) => {
+      state.fields = fields;
+    },
+    submitted: [],
+  };
 
   global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const requested = typeof input === "string" ? input : String(input);
@@ -342,6 +363,9 @@ function installDeployment(deployment: Deployment): Server {
        * asks the app what it wants and the second hands it over.
        */
       if (typeof init?.body === "string" && init.body.includes("values")) {
+        server.submitted.push(
+          (JSON.parse(init.body) as { values: Record<string, string> }).values,
+        );
         /*
          * The vendor's own refusal, carried on the envelope `client` unwraps. It is the sentence
          * this whole path exists to preserve, and the only thing that tells somebody their key was
@@ -1393,4 +1417,172 @@ test("a key nothing was tried on offers Re-check once the app has something to t
     await admin.findByText(/accepted without being checked against Gmail/),
   ).toBeTruthy();
   expect(await admin.findByRole("button", { name: "Re-check" })).toBeTruthy();
+});
+
+/**
+ * A field with a default most people keep, as Firecrawl publishes its base URL.
+ *
+ * The point of a published default is that nobody should have to type it: a form drawing this row
+ * empty is asking for a value the app has already answered.
+ */
+const FIRECRAWL_BASE_URL: BrokerField = {
+  name: "base_url",
+  label: "Base URL",
+  help: "Where your Firecrawl lives. The hosted one is already filled in.",
+  required: true,
+  secret: false,
+  default: "https://api.firecrawl.dev",
+};
+
+/** A field the app published once and publishes no longer, which is a 400 if it is still sent. */
+const RETIRED_FIELD: BrokerField = {
+  name: "account_subdomain",
+  label: "Subdomain",
+  help: "The subdomain this app used to be reached at.",
+  required: false,
+  secret: false,
+};
+
+test("a form reopened after the app changed its fields draws today's fields, and sends only those", async () => {
+  /*
+   * THE LIST THE FORM IS BORN WITH IS THE PREVIOUS ONE. The row asks the app again on every open —
+   * deliberately, because the catalogue is the vendor's — but it is still holding the last answer
+   * as the dialog opens, so the form mounts on the old list and the new one arrives a moment later
+   * as a changed prop.
+   *
+   * A form seeded once at mount never hears that. It draws today's rows, because those come off the
+   * prop, and fills them from yesterday's list: a field the app has started publishing has no
+   * default in it, and a field the app has stopped publishing is still in it — and that name goes
+   * up with the submission, which is the 400 telling somebody their current form is not the current
+   * form.
+   */
+  const server = installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: false,
+    fields: [RETIRED_FIELD],
+    recorded: false,
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  await userEvent.click(await view.findByRole("button", { name: "Connect" }));
+  const first = await view.findByRole("dialog");
+  await userEvent.type(
+    await within(first).findByLabelText("Subdomain"),
+    "acme",
+  );
+  await userEvent.click(within(first).getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(view.queryByRole("dialog")).toBeNull());
+
+  // What the vendor publishes for this app now, which is not what it published above.
+  server.publish([PERPLEXITY_KEY, FIRECRAWL_BASE_URL]);
+
+  await userEvent.click(view.getByRole("button", { name: "Connect" }));
+  const second = await view.findByRole("dialog");
+  const baseUrl = (await within(second).findByLabelText(
+    "Base URL",
+  )) as HTMLInputElement;
+
+  // The app answered this one itself, and a form ignoring the answer is asking for it again.
+  expect(baseUrl.value).toBe("https://api.firecrawl.dev");
+
+  await userEvent.type(
+    within(second).getByLabelText("API Key"),
+    "pplx-typed-today",
+  );
+  await userEvent.click(
+    within(second).getByRole("button", { name: "Connect" }),
+  );
+
+  await waitFor(() => expect(server.submitted.length).toBe(1));
+  /*
+   * Exactly what the app asks for today: the key just typed, the default it published, and no
+   * trace of the field it retired — which is the name the server refuses the whole connection over.
+   */
+  expect(server.submitted[0]).toEqual({
+    generic_api_key: "pplx-typed-today",
+    base_url: "https://api.firecrawl.dev",
+  });
+});
+
+/** A key worth being careful with, spelled distinctly so a search of held state cannot miss it. */
+const TYPED_SECRET = "pplx-0nly-ever-forwarded";
+
+/** Everything a mutation is still holding as its input, which is where a key was outliving its use. */
+function retainedInputs(client: QueryClient): string {
+  return JSON.stringify(
+    client
+      .getMutationCache()
+      .getAll()
+      .map((mutation) => mutation.state.variables),
+  );
+}
+
+test("a typed key is gone from the mutation's own state once the request has settled", async () => {
+  /*
+   * WHAT THE FORM'S DOCBLOCK PROMISES, CHECKED WHERE IT WAS UNTRUE. The values are the component's
+   * and nowhere else — except that handing them to a mutation is not the same as sending them. A
+   * mutation keeps the input it was called with for as long as its observer lives, so the key stayed
+   * legible in mutation state long after the request it was typed for had finished, to anything
+   * reading that state, devtools included.
+   *
+   * The request body is the whole of its life here, so the retained input is cleared as the request
+   * settles — which is what this asserts, on both endings a submission has.
+   */
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY],
+    recorded: false,
+  });
+
+  const accepted = queryClient();
+  const view = renderAccountScreen(accepted);
+
+  await userEvent.click(await view.findByRole("button", { name: "Connect" }));
+  const dialog = await view.findByRole("dialog");
+  await userEvent.type(await view.findByLabelText("API Key"), TYPED_SECRET);
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "Connect" }),
+  );
+
+  await waitFor(() => expect(view.queryByText("Connected")).toBeTruthy());
+  expect(retainedInputs(accepted)).not.toContain(TYPED_SECRET);
+
+  cleanup();
+
+  /*
+   * AND ON THE REFUSAL, WHICH IS THE LONGER-LIVED HALF. A key the vendor would not take leaves the
+   * form open over the sentence saying why, so the mutation sits settled-and-failed with its input
+   * held for as long as somebody spends correcting a key — and correcting it is what the form is
+   * for, so the form's own copy has to survive the clearing untouched.
+   */
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY],
+    recorded: false,
+    rejects: REFUSED,
+  });
+
+  const refused = queryClient();
+  const second = renderAccountScreen(refused);
+
+  await userEvent.click(await second.findByRole("button", { name: "Connect" }));
+  const refusedDialog = await second.findByRole("dialog");
+  const input = (await second.findByLabelText("API Key")) as HTMLInputElement;
+  await userEvent.type(input, TYPED_SECRET);
+  await userEvent.click(
+    within(refusedDialog).getByRole("button", { name: "Connect" }),
+  );
+
+  await waitFor(() =>
+    expect(within(refusedDialog).queryByText(REFUSED)).toBeTruthy(),
+  );
+  expect(retainedInputs(refused)).not.toContain(TYPED_SECRET);
+  // And the form still holds what was typed, because a mistyped key is corrected, not retyped.
+  expect(input.value).toBe(TYPED_SECRET);
 });
