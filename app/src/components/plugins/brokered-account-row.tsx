@@ -24,6 +24,7 @@ import {
   connectAccountMutationOptions,
   connectBrokeredWithFieldsMutationOptions,
   disconnectBrokeredMutationOptions,
+  recheckBrokeredConnectionMutationOptions,
 } from "@/lib/plugins/mutations";
 
 /**
@@ -75,6 +76,23 @@ export type BrokeredAccount = {
   /** Whether this person's account is live, as the vendor last answered. */
   connected: boolean;
   /**
+   * Whether a real call was last made with this account's key and worked.
+   *
+   * A different fact from `connected`, and the reason both are here. Composio does not check a
+   * submitted key: a connection created with an obviously wrong value comes back ACTIVE and stays
+   * ACTIVE, so `connected` for a key app is only that the vendor accepted the row. This is whether
+   * anything was ever actually read with it.
+   */
+  verified: boolean;
+  /**
+   * When that call was made, as the recorded instant. Null where none ever has been.
+   *
+   * Carried beside `verified` rather than derived from it, because a verification is a past tense
+   * and a screen that says so has to say when: "verified" on its own reads as a present-tense fact
+   * about a key that may have been revoked at the vendor an hour ago.
+   */
+  verifiedAt: string | null;
+  /**
    * Whether this deployment has a Composio key at all.
    *
    * Carried through the hook rather than passed to the row separately, so a caller wires the row up
@@ -106,6 +124,9 @@ export type BrokeredAccount = {
   submitFields: (values: Record<string, string>) => void;
   requestingFields: boolean;
   submittingFields: boolean;
+  /** Spend one read-only call at the vendor to find out whether the key still works. */
+  recheck: () => void;
+  rechecking: boolean;
 };
 
 export function useBrokeredAccount(input: {
@@ -116,6 +137,10 @@ export function useBrokeredAccount(input: {
   configured: boolean;
   /** What this deployment recorded, which is what stands until the vendor has answered anything. */
   recorded: boolean;
+  /** See {@link BrokeredAccount.verified}, as this deployment last wrote it down. */
+  verified: boolean;
+  /** See {@link BrokeredAccount.verifiedAt}, as this deployment last wrote it down. */
+  verifiedAt: string | null;
   /**
    * How the app's authorization config was CREATED, as the vendor's own scheme literal.
    *
@@ -143,6 +168,8 @@ export function useBrokeredAccount(input: {
     report,
     returnTo,
     serverId,
+    verified,
+    verifiedAt,
   } = input;
 
   /*
@@ -246,6 +273,20 @@ export function useBrokeredAccount(input: {
     },
   });
 
+  /*
+   * Find out whether the key still works, when somebody presses for it and at no other time.
+   *
+   * Deliberately not a second effect beside the confirm above. Composio never re-checks a key once
+   * it has taken it, so the only way to learn whether one works is to spend a real read-only call at
+   * the vendor with it — and a verify-on-render would spend the person's own rate limit there, on
+   * every mount of every screen that draws this row, to redraw a word that was already written down.
+   * So the row says when it last checked, and the person decides when to check again.
+   */
+  const recheck = useMutation({
+    ...recheckBrokeredConnectionMutationOptions(queryClient),
+    onError: (thrown: Error) => report(thrown.message),
+  });
+
   return {
     /*
      * What the vendor last answered, and only our own record until it has answered anything. The
@@ -254,6 +295,22 @@ export function useBrokeredAccount(input: {
      * made at all, leaves the recorded row standing rather than inventing either answer.
      */
     connected: confirmation.data?.connected ?? recorded,
+    /*
+     * What the last re-check found, and only our own record until one has been made here — the same
+     * rule `connected` follows above: the answer wins once there is one.
+     *
+     * Both read off the one `recheck.data` rather than each falling back on its own, because
+     * `verifiedAt` is legitimately null in a fresh answer — a check that came back not verified
+     * records no time — and a `??` on it would pair that answer with the time of the check before,
+     * leaving the row saying a key failed as of an hour before it was asked.
+     */
+    verified: recheck.data ? recheck.data.verified : verified,
+    verifiedAt: recheck.data ? recheck.data.verifiedAt : verifiedAt,
+    recheck: () => {
+      report(null);
+      recheck.mutate(serverId);
+    },
+    rechecking: recheck.isPending,
     configured,
     connect: () => {
       report(null);
