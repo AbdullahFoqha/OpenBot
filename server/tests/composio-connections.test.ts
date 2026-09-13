@@ -134,6 +134,30 @@ const probeAction = "PROBED_GET_ME";
  * and the failure tests would pass while asserting nothing about a key.
  */
 const probeVersion = "20260903_00";
+/**
+ * THE PROBED APP UNDER A ROW ID THAT IS NOT `composio-` AND ITS SLUG, which is a legal row.
+ *
+ * Every other brokered fixture here spells the id the way `addBrokeredApp` composes it, and that is
+ * precisely the coincidence a lookup keyed on the id rides on: {@link renamedId} exists for the
+ * same reason on the removal side, and this is its counterpart on the CHECK side. `mcp_servers.id`
+ * is a display name — an operator renames a row, a fixture predates the convention, an app arrives
+ * by some other path — and the slug in the url is what decides which app a call is against.
+ */
+const renamedProbedToolkit = `renamedprobe-${suite}`;
+/** Its row's id, deliberately unrelated to its slug, so a composed id cannot reach it. */
+const renamedProbedId = `display-name-${suite}`;
+/** The one action that app publishes: a read, asking for nothing, at a recorded version. */
+const renamedProbeAction = "RENAMEDPROBE_GET_ME";
+/**
+ * A SECOND, UNRELATED APP sitting exactly where a composed id would look for the first.
+ *
+ * It is an ordinary app of its own — its slug and its row id are spelled the way `addBrokeredApp`
+ * spells them for {@link renamedProbedToolkit}'s name, which is the collision. Its action is what a
+ * probe keyed on a composed id would spend somebody else's key on.
+ */
+const decoyToolkit = `decoy-${suite}`;
+const decoyId = `composio-${renamedProbedToolkit}`;
+const decoyAction = "DECOY_GET_SOMETHING_ELSE";
 /** The account Composio answers with when the key that was just typed is attached. */
 const madeAccountId = `ca_${suite}`;
 /**
@@ -153,6 +177,8 @@ const ownedToolkits = [
   enabledToolkit,
   rekeyedToolkit,
   probedToolkit,
+  renamedProbedToolkit,
+  decoyToolkit,
 ];
 /**
  * An app this file does NOT own, standing in for another run's fixture — or another file's.
@@ -529,6 +555,8 @@ async function clean() {
         rekeyedId,
         probeAppId,
         probedId,
+        renamedProbedId,
+        decoyId,
       ]),
     );
   await database
@@ -541,6 +569,8 @@ async function clean() {
         rekeyedId,
         probeAppId,
         probedId,
+        renamedProbedId,
+        decoyId,
       ]),
     );
   await database
@@ -633,6 +663,33 @@ async function addProbedApp(options: { withProbe?: boolean } = {}) {
   await database.insert(mcpTools).values({
     serverId: probedId,
     name: probeAction,
+    description: "Says who the key belongs to.",
+    effect: "read",
+    version: probeVersion,
+  });
+}
+
+/**
+ * The same app under a row id that is NOT its slug, with one safe read to spend a key on.
+ *
+ * INSERTED BY HAND RATHER THAN ENABLED, which is the one thing it cannot borrow from
+ * {@link addProbedApp}: `addBrokeredApp` composes the id itself, so an app enabled through it can
+ * never have the divergence these two tests are about. Everything the checked paths read off the
+ * row is spelled here the way Add would spell it — `provenance` composio, and the `auth_scheme` a
+ * key-based app is created as, which is what the re-check's own gate admits.
+ */
+async function addRenamedApp() {
+  await database.insert(mcpServers).values({
+    id: renamedProbedId,
+    title: "Renamed Probed App",
+    vendor: "Composio",
+    url: `composio://${renamedProbedToolkit}`,
+    provenance: "composio",
+    authScheme: "API_KEY",
+  });
+  await database.insert(mcpTools).values({
+    serverId: renamedProbedId,
+    name: renamedProbeAction,
     description: "Says who the key belongs to.",
     effect: "read",
     version: probeVersion,
@@ -1804,6 +1861,103 @@ test("a key nothing was spent on becomes checkable when the app publishes someth
   expect(after[0]?.checkable).toBe(true);
   // Both answers are read out of this deployment's own tables.
   expect(reached).toEqual([]);
+});
+
+/**
+ * AND THE PROBE FINDS THE APP THE SAME WAY THE LISTING DOES, OR THE PAIR IS BACK WHERE IT STARTED.
+ *
+ * CRITERION. An app whose `mcp_servers.id` is not `composio-` and its slug — a legal row and an
+ * ordinary one — is listed `checkable: true` off the read it publishes, and a press of Re-check
+ * actually spends that read and records it.
+ *
+ * REASON. `checkable` and `probe` were split so a settings page could offer the button exactly
+ * where there is something to spend a key on, and the split is worth nothing unless both halves
+ * name the same app. The listing joins `mcp_servers` ON THE URL, because the url is where a
+ * brokered row records which app it is; a probe that composed `composio-${toolkit}` instead
+ * re-derived that id from a convention nothing holds a row to — so on any divergence the listing
+ * answered off the app's real row and the probe answered off an id addressing nothing at all. That
+ * is the Re-check deadlock in its original shape, reached from the other end: the button is
+ * offered, the press finds nothing to try, no action is ever recorded, and that press is the only
+ * thing in the product that could record one.
+ *
+ * THE DIVERGENCE IS THE FIXTURE AND IT IS NOT AN EXOTIC ONE. `mcp_servers.id` is a display name an
+ * operator sees and a grant is written against; the slug in the url is what the broker is asked
+ * about. Nothing holds the two equal — which is why every other brokered lookup in the store, the
+ * connect, this re-check's own scheme gate and the disconnect alike, is keyed on the url.
+ */
+test("a re-check of an app whose row id is not its slug spends the key it was offered for", async () => {
+  useAnsweringClient();
+  await addRenamedApp();
+  await database.insert(composioConnections).values({
+    toolkit: renamedProbedToolkit,
+    userId: askerId,
+    verified: false,
+  });
+
+  // THE BUTTON IS OFFERED, which is the listing's half of the pair and the half that was right.
+  const listed = await store.brokeredConnectionsFor(askerId);
+  expect(listed).toHaveLength(1);
+  expect(listed[0]?.serverId).toBe(renamedProbedId);
+  expect(listed[0]?.probe).toBeNull();
+  expect(listed[0]?.checkable).toBe(true);
+
+  // AND THE PRESS SPENDS IT. `probe: null` here is the deadlock itself: a button offered over an
+  // app the check cannot find, on every page load, for good.
+  const answer = await store.recheckBrokeredConnection({
+    toolkit: renamedProbedToolkit,
+    userId: askerId,
+  });
+  expect(answer.probe).toBe(renamedProbeAction);
+  expect(answer.verified).toBe(true);
+  expect(answer.verifiedAt).not.toBeNull();
+  // And the call really went out, against the action the app's own row publishes.
+  expect(reached).toEqual([renamedProbeAction]);
+});
+
+/**
+ * AND IT NEVER SPENDS A KEY ON WHATEVER ROW A COMPOSED ID HAPPENS TO HIT.
+ *
+ * CRITERION. With a SECOND app sitting at the id `composio-${toolkit}` would have composed, the
+ * probe for the first app still calls the FIRST app's own action, and the second app's action is
+ * never reached.
+ *
+ * REASON. The same defect with the null turned into something worse. A composed id does not merely
+ * fail to find the right row — it finds whichever row is called that, and a row called
+ * `composio-gmail` at `composio://slack` is the exact shape every other lookup here is keyed on the
+ * url to refuse. It would put somebody's key against an action chosen from a DIFFERENT app's
+ * listing: the one call this deployment ever makes with a stranger's credential, unrequested, and
+ * decided by a name collision. Nothing downstream would notice, either, because the read-effect and
+ * no-arguments conditions still hold of the action picked — they are the chooser's, and the chooser
+ * was asked about the wrong app.
+ */
+test("a probe never spends a key on the action of a row the composed id would hit", async () => {
+  useAnsweringClient();
+  await addRenamedApp();
+  // The decoy: an app of its own, whose only crime is being called what the first app's id would
+  // have been composed as.
+  await database.insert(mcpServers).values({
+    id: decoyId,
+    title: "Decoy App",
+    vendor: "Composio",
+    url: `composio://${decoyToolkit}`,
+    provenance: "composio",
+    authScheme: "API_KEY",
+  });
+  await database.insert(mcpTools).values({
+    serverId: decoyId,
+    name: decoyAction,
+    description: "Reads something belonging to another app entirely.",
+    effect: "read",
+    version: probeVersion,
+  });
+
+  expect(
+    await store.probeBrokeredConnection({
+      toolkit: renamedProbedToolkit,
+      userId: askerId,
+    }),
+  ).toEqual({ probe: renamedProbeAction, failure: null });
+  expect(reached).toEqual([renamedProbeAction]);
 });
 
 /**

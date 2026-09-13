@@ -4406,8 +4406,9 @@ export function createPluginStore(options: PluginStoreOptions) {
      * THREE ANSWERS AND NOT A BOOLEAN, because `verified: false` means two different things about
      * somebody's key and only the action's name separates them:
      *
-     *   `probe: null`                — the app published nothing safe to call, or nothing at a
-     *                                  version this deployment recorded. NOTHING WAS TRIED.
+     *   `probe: null`                — the app published nothing safe to call, nothing at a version
+     *                                  this deployment recorded, or there is no row for the app at
+     *                                  all any more. NOTHING WAS TRIED.
      *   `probe: <name>, failure null` — it ran in this person's account and answered.
      *   `probe: <name>, failure set`  — it ran and the vendor refused, and `failure` is Composio's
      *                                  own sentence about why.
@@ -4446,9 +4447,29 @@ export function createPluginStore(options: PluginStoreOptions) {
        * page tell somebody their untried key had been rejected — in the days when the connections
        * listing answered by asking the chooser too. It no longer does: what a page says about a
        * check is what the check recorded, and what it recorded is the name this method returns.
+       *
+       * AND THE APP IS RESOLVED BY ITS URL, THE WAY EVERY OTHER BROKERED LOOKUP HERE IS. The url is
+       * where a brokered row records which app it is; `mcp_servers.id` is a display name and
+       * nothing holds the two equal — which is exactly why {@link connectBrokeredWithFields}, {@link
+       * recheckBrokeredConnection} and {@link disconnectBrokered} all key on the url, and why {@link
+       * brokeredConnectionsFor} JOINS on it rather than spelling `composio-${toolkit}` by hand.
+       * Composing it here made this method the one place that re-derived the id from a convention,
+       * and it put the two halves of the `checkable`/`probe` split back into disagreement on any
+       * row where they differ: the listing answered `checkable` off the app's real row while this
+       * answered off an id addressing nothing, so the button was offered and the press could never
+       * find anything to spend — the Re-check deadlock the split exists to prevent, reached from
+       * the other end. Worse where the composed id DID hit something: a row called `composio-gmail`
+       * at `composio://slack` would have this choose a stranger's probe off another app's listing
+       * and spend their key on it. A row this deployment has since removed drops out here as null,
+       * which is the same honest answer the listing gives for it: there is no app left to check.
        */
-      const serverId = `composio-${input.toolkit}`;
-      const candidate = await this.probeActionFor(serverId);
+      const [app] = await database
+        .select({ id: mcpServers.id })
+        .from(mcpServers)
+        .where(eq(mcpServers.url, `composio://${input.toolkit}`))
+        .limit(1);
+
+      const candidate = app ? await this.probeActionFor(app.id) : null;
       if (candidate === null) {
         return { probe: null, failure: null };
       }
