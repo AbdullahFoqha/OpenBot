@@ -354,6 +354,88 @@ export class PluginInvariantError extends Error {
 const NUL = "\u0000";
 
 /**
+ * A schema this deployment cannot turn into a row, whatever the column would have said.
+ *
+ * Its own class so the one place that raises it and the one place that contains it are joined by
+ * something other than a substring: {@link storableSchema} is the only thrower, and the `try`
+ * around the call that turns a listing into rows is the only catcher. Nothing branches on the class
+ * — it is recorded the way anything else a vendor's answer could not be made into would be — but
+ * naming it keeps a later reader from mistaking it for a fault of this deployment's own.
+ */
+class SchemaUnstorableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SchemaUnstorableError";
+  }
+}
+
+/**
+ * The same JSON value with every U+0000 gone from it — out of the strings, and out of the keys
+ * above them.
+ *
+ * CRITERION ONE. What is removed is the CHARACTER. A string that merely SPELLS the escape — a
+ * backslash and then `u0000`, which is how a JSON Schema excludes control characters and is by far
+ * the commonest place those six letters legitimately appear — is handed back untouched.
+ *
+ * CRITERION TWO. Everything else is rebuilt identical: the same keys, the same nesting, the same
+ * scalars.
+ *
+ * WHAT THIS REPLACED, and why walking the DATA is not a stylistic preference. The strip used to run
+ * over the SERIALISED schema — `JSON.stringify(schema).replaceAll("\\u0000", "")` — which is
+ * escape-blind by construction. `JSON.stringify` writes a real backslash inside a string value as
+ * two of them, so a pattern such as `"[^\u0000-\u001f]"` reached the strip with its backslash
+ * doubled and had the TAIL of it eaten, leaving `\-`. That is not a JSON escape, so the
+ * `JSON.parse` wrapped around it threw a `SyntaxError` — from a line that sat outside BOTH `try`
+ * blocks in `refreshTools`. It left as a bodiless 500 with `lastError` still holding whatever it
+ * held before, and on the add path, which refreshes before it answers, it aborted the add AFTER the
+ * server row and its audit row had committed.
+ *
+ * Serialised text cannot tell the byte from the six letters that name it; parsed data can only ever
+ * hold one of them. So walking the data is what makes CRITERION ONE expressible at all.
+ *
+ * A SELF-REFERENTIAL VALUE IS REFUSED rather than quietly truncated, and `ancestors` holds only the
+ * chain currently being descended — so one object reached twice side by side is copied twice, which
+ * is what a plain JSON document does anyway. Nothing off a wire can be cyclic; a value built inside
+ * this process can, and it is a value `jsonb` would refuse in any case. Refused HERE it is a
+ * sentence the caller can record; left to the driver it is a statement dump.
+ */
+function withoutNul(value: unknown, ancestors: Set<object>): unknown {
+  if (typeof value === "string") return value.replaceAll(NUL, "");
+  if (typeof value !== "object" || value === null) return value;
+  if (ancestors.has(value)) {
+    throw new SchemaUnstorableError(
+      "The schema refers back to itself, so it is not a value JSON can hold.",
+    );
+  }
+
+  ancestors.add(value);
+  const stripped: unknown = Array.isArray(value)
+    ? value.map((item) => withoutNul(item, ancestors))
+    : Object.fromEntries(
+        Object.entries(value).map(([key, nested]) => [
+          key.replaceAll(NUL, ""),
+          withoutNul(nested, ancestors),
+        ]),
+      );
+  ancestors.delete(value);
+  return stripped;
+}
+
+/**
+ * {@link withoutNul} over a schema, answering in the type the column and the row builder use.
+ *
+ * The walk rebuilds an object as an object and a list as a list, so what comes back is the shape
+ * that went in — which is the same promise the `JSON.parse(JSON.stringify(...))` round trip this
+ * replaced made about everything except the escape it could not see. The narrowing says out loud
+ * what the parameter type already claims.
+ */
+function storableSchema(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  return withoutNul(schema, new Set()) as Record<string, unknown>;
+}
+
+/**
  * Whether a throw is a query failure carrying the statement and the values bound to it.
  *
  * CRITERION. Anything this answers true for has a message that must never be relayed — not to a
@@ -424,7 +506,14 @@ function databaseComplaint(error: unknown): string {
  *
  * CRITERION ONE. No two rows carry the same name, whatever the vendor listed.
  *
- * CRITERION TWO. No string reaching the insert contains U+0000, in a column or inside a schema.
+ * CRITERION TWO. No string reaching the insert contains U+0000, in a column or inside a schema —
+ * and nothing else about what the vendor wrote is altered to achieve it, which is a criterion of
+ * its own because the first attempt at this one failed it. See {@link storableSchema}.
+ *
+ * CRITERION THREE. Whatever this raises, its caller catches — see the `try` around the one call
+ * site. Everything here runs OUTSIDE the vendor `try` and before the transaction's own, so a throw
+ * from here left `refreshTools` unhandled: a bodiless 500, a `lastError` still holding whatever it
+ * held before, and an add aborted after its server row and its audit row had already committed.
  *
  * REASON. Both of these used to abort the replace from INSIDE the transaction and OUTSIDE the
  * vendor `try` above it, so they came out of `refreshTools` as a raw `DrizzleQueryError` — whose
@@ -474,14 +563,12 @@ function storableTools(serverId: string, listed: ListedTool[]) {
        */
       description: (tool.description ?? "").replaceAll(NUL, ""),
       /*
-       * Through JSON rather than by walking the object, because the escape is what has to go and
-       * the schema is JSON by definition — it is stored in a `jsonb` column and came off the wire
-       * as JSON. `JSON.stringify` writes a literal U+0000 as the six characters `\u0000`, so that
-       * is the sequence removed here; a schema with none is rebuilt identical.
+       * By walking the parsed schema rather than its serialised text, because only one of those two
+       * can tell the character from the six letters that name it. See {@link storableSchema}: this
+       * used to strip the escape out of `JSON.stringify`'s output, which ate the tail of every
+       * legitimately-escaped backslash and left a string `JSON.parse` refused.
        */
-      inputSchema: JSON.parse(
-        JSON.stringify(tool.inputSchema ?? {}).replaceAll("\\u0000", ""),
-      ),
+      inputSchema: storableSchema(tool.inputSchema ?? {}),
       /*
        * What the vendor said, when the vendor said anything.
        *
@@ -3059,8 +3146,57 @@ export function createPluginStore(options: PluginStoreOptions) {
       }
 
       /*
-       * COMMITTING WHAT THE VENDOR SAID. Nothing from here down is a vendor's doing, so nothing from
-       * here down is caught — see the criterion on the `try` above.
+       * TURNING THE VENDOR'S ANSWER INTO ROWS, which is still the vendor's answer and so is still
+       * caught.
+       *
+       * CRITERION. Nothing a vendor can put in a listing leaves this method as an uncaught throw,
+       * and nothing a vendor can put in a listing half-applies the add that called it.
+       *
+       * REASON. Names are deduplicated and vendor text is made storable before a transaction is
+       * opened on any of it, because both of those failures used to abort the replace from inside
+       * one — see {@link storableTools}. Moving the work earlier moved the THROW earlier with it,
+       * to a line between the two `try` blocks and covered by neither. A schema that this could not
+       * make storable then left `refreshTools` raw: the refresh route has no mapping for it, so the
+       * admin page got a bodiless 500 and `lastError` kept whatever it held before; and `addServer`
+       * refreshes before it answers, so the add died AFTER its server row and its audit row had
+       * committed, leaving a configured app nobody had finished configuring.
+       *
+       * RECORDED RATHER THAN RAISED, which is the same answer the vendor `try` gives, because this
+       * is the same kind of event: the app was reached, it answered, and its answer is not something
+       * this deployment can write down. The actions it already holds are kept, no `toolsRefreshedAt`
+       * is stamped — nothing was learned — and the add completes with the failure on the row for an
+       * administrator to read.
+       *
+       * `withoutStatement` rather than `error.message`, so that the one shape whose message must
+       * never travel cannot reach the column even from a line that should never produce one.
+       */
+      let storable: ReturnType<typeof storableTools>;
+      try {
+        storable = storableTools(serverId, listed);
+      } catch (error) {
+        const reason =
+          error instanceof Error ? withoutStatement(error) : String(error);
+        await database
+          .update(mcpServers)
+          .set({
+            // Capped where every other quoted failure in this file is capped, and for the same
+            // reason: part of this sentence comes from elsewhere and none of it is a promise about
+            // length.
+            lastError:
+              `This app answered with an action whose schema could not be stored as it arrived, so the actions already recorded for it were kept rather than replaced. ${reason}`.slice(
+                0,
+                400,
+              ),
+            updatedAt: new Date(),
+          })
+          .where(eq(mcpServers.id, serverId));
+        return { tools: 0 };
+      }
+
+      /*
+       * COMMITTING WHAT THE VENDOR SAID. Nothing from here down is a vendor's doing, so nothing
+       * from here down is recorded as one — see the criterion on the vendor `try` further up, and
+       * the one on the `try` immediately above this, which is the last thing here that still is.
        *
        * ONE STEP, because the paragraph above promises the held actions are left alone.
        *
@@ -3078,11 +3214,6 @@ export function createPluginStore(options: PluginStoreOptions) {
        * rather than being copied into `lastError`, because a transaction this database would not take
        * is not something the vendor did.
        */
-      // Names deduplicated and vendor text made storable before a transaction is opened on any of
-      // it, because both failures used to abort the replace from inside one. See
-      // {@link storableTools}.
-      const storable = storableTools(serverId, listed);
-
       try {
         await database.transaction(async (transaction) => {
           await transaction

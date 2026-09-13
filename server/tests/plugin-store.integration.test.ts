@@ -5616,6 +5616,132 @@ describe("a listing this database would not have taken", () => {
     });
   });
 
+  test("a schema that SPELLS the escape keeps it, because the byte is what the column refuses", async () => {
+    const { store, database } = await freshStore();
+    /*
+     * WHAT THE COLUMN REFUSES IS THE CHARACTER, NOT THE SIX LETTERS THAT NAME IT.
+     *
+     * The strip used to run over the SERIALISED schema and remove the six characters that spell
+     * the escape from it, which is escape-blind: `JSON.stringify` writes a real backslash in a
+     * string value as two of them, so a
+     * pattern excluding control characters — the single most ordinary place those six letters
+     * appear in a JSON Schema — serialised as `\\u0000` and had its TAIL eaten, leaving `\-`,
+     * which is not a JSON escape. `JSON.parse` then threw a `SyntaxError` from a line that sits
+     * outside both `try` blocks in `refreshTools`: a bodiless 500 on the refresh route, a
+     * `lastError` still holding whatever it held before, and — on the add path, which refreshes
+     * before answering — an abort AFTER the server row and its audit row had committed.
+     *
+     * So the assertion is that the schema is stored EXACTLY as the vendor wrote it. Nothing here
+     * contains a U+0000; there is nothing for the strip to do.
+     */
+    const spellsTheEscape = {
+      type: "object",
+      properties: {
+        subject: {
+          type: "string",
+          // Every control character excluded, which is what this pattern is for and why it is the
+          // one a real vendor sends.
+          pattern: "^[^\\u0000-\\u001f]+$",
+          description: "No control characters, written as \\u0000 in the text.",
+        },
+      },
+    };
+    useComposioClient({
+      listActions: async () => [
+        {
+          slug: "GMAIL_SEND_EMAIL",
+          description: "Send an email.",
+          inputParameters: spellsTheEscape,
+          version: "20260903_00",
+        },
+      ],
+      execute: async () => vendorAnswered(),
+    });
+    await seedComposioGmail(database, store);
+
+    expect(await store.refreshTools("gmail", "admin_user")).toEqual({
+      tools: 1,
+    });
+
+    const [stored] = await database
+      .select({ name: mcpTools.name, inputSchema: mcpTools.inputSchema })
+      .from(mcpTools)
+      .where(eq(mcpTools.serverId, "gmail"));
+
+    expect(stored?.name).toBe("GMAIL_SEND_EMAIL");
+    // Byte for byte what arrived, backslashes and all.
+    expect(stored?.inputSchema).toEqual(spellsTheEscape);
+
+    const [row] = await database
+      .select({ lastError: mcpServers.lastError })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, "gmail"));
+    // A healthy refresh, because that is what it was.
+    expect(row?.lastError).toBeNull();
+  });
+
+  test("a schema this deployment cannot make storable is recorded rather than thrown out of the refresh", async () => {
+    const { store, database } = await freshStore();
+    /*
+     * THE CONTAINMENT, asserted on the one shape that still cannot be made into a row.
+     *
+     * A schema that refers to itself cannot be written to a `jsonb` column and cannot be walked to
+     * the end. No wire JSON produces one, which is the point: what is under test is that the line
+     * turning a vendor's answer into rows is INSIDE a `try` at all, so that whatever it cannot do
+     * leaves `refreshTools` the way every other thing a vendor sent leaves it — recorded in
+     * `lastError`, with what the app already holds kept, and the add that called it completed.
+     *
+     * The cycle hangs off `examples`, which `stagesAFile` does not walk, so it arrives here rather
+     * than being refused by the transport's own filter one module earlier.
+     */
+    const selfReferential: Record<string, unknown> = {
+      type: "object",
+      properties: {},
+    };
+    selfReferential.examples = selfReferential;
+
+    useComposioClient({
+      listActions: async () => [
+        {
+          slug: "GMAIL_SEND_EMAIL",
+          description: "Send an email.",
+          inputParameters: selfReferential,
+          version: "20260903_00",
+        },
+      ],
+      execute: async () => vendorAnswered(),
+    });
+    await seedComposioGmail(database, store);
+
+    // Not a throw, and not a count that claims anything was learned.
+    expect(await store.refreshTools("gmail", "admin_user")).toEqual({
+      tools: 0,
+    });
+
+    const [row] = await database
+      .select({
+        lastError: mcpServers.lastError,
+        toolsRefreshedAt: mcpServers.toolsRefreshedAt,
+      })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, "gmail"));
+    // Named on the row an operator reads, rather than lost with the throw.
+    expect(row?.lastError).toContain("could not be stored");
+    // And no statement or bound value in it, on the path that records a failure.
+    expect(row?.lastError).not.toContain("Failed query");
+    expect(row?.lastError).not.toContain("params:");
+    // Nothing was learned about the app, so nothing says otherwise.
+    expect(row?.toolsRefreshedAt).toBeNull();
+
+    // What the app already had is still there, because nothing was replaced.
+    expect(
+      await database
+        .select({ name: mcpTools.name })
+        .from(mcpTools)
+        .where(eq(mcpTools.serverId, "gmail")),
+    ).toEqual([{ name: "GMAIL_FETCH_EMAILS" }]);
+  });
+
   test("a replace this database still refuses raises without the statement", async () => {
     /*
      * A transaction forced to fail, because after the two cases above nothing a vendor can send
