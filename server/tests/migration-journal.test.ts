@@ -73,4 +73,36 @@ describe("the migration journal", () => {
 
     expect(journal.entries.map((entry) => entry.tag).sort()).toEqual(files);
   });
+
+  test("has a snapshot for every migration", async () => {
+    /*
+     * A third way this goes wrong quietly, and the one that bites the NEXT person rather than this
+     * one. `generate` diffs the schema against the newest snapshot in `meta/`, so a migration that
+     * ships without one leaves the previous snapshot as the newest: the columns it added are absent
+     * from what `generate` compares against, and the next migration re-emits them. That migration
+     * then fails on every database the first one already ran on, because `ADD COLUMN` is not
+     * conditional. A hand-written migration needs a hand-written snapshot for the same reason a
+     * generated one gets one for free.
+     */
+    const directory = new URL("../drizzle/", import.meta.url);
+    const snapshots = new Set(
+      (await readdir(new URL("meta/", directory))).filter((name) =>
+        name.endsWith("_snapshot.json"),
+      ),
+    );
+
+    const journal = JSON.parse(
+      await readFile(new URL("meta/_journal.json", directory), "utf8"),
+    ) as { entries: { idx: number; tag: string }[] };
+
+    const missing = journal.entries
+      .map((entry) => ({
+        entry,
+        snapshot: `${entry.tag.split("_")[0]}_snapshot.json`,
+      }))
+      .filter(({ snapshot }) => !snapshots.has(snapshot))
+      .map(({ entry, snapshot }) => `${entry.tag} has no meta/${snapshot}`);
+
+    expect(missing).toEqual([]);
+  });
 });

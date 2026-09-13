@@ -81,8 +81,15 @@ export const mcpServers = pgTable("mcp_servers", {
    *
    * Recorded rather than re-derived, because the catalogue is somebody else's and a vendor that
    * starts publishing a new scheme for an app must not move live connections onto a different
-   * flow underneath them. Null on every row that predates this column, which is exactly the set
-   * that was created by the one path there was: Composio-managed OAuth.
+   * flow underneath them.
+   *
+   * THE VENDOR'S OWN SCHEME LITERAL, NOT A {@link BrokerConnection} KIND — `OAUTH2`, `DCR_OAUTH`,
+   * `API_KEY`, `BASIC`, `BEARER_TOKEN`, `BASIC_WITH_JWT`, `NO_AUTH`. Those two vocabularies name one
+   * fact, and this column is where a reader comes to find out which of them is written down, so it
+   * says: somebody looking here for `consent` or `fields` is reading the other one. Migration 0030
+   * backfilled every row whose provenance is `composio` to `OAUTH2`, because managed OAuth was the
+   * only config this deployment ever created and `addBrokeredApp` writes the row only after that
+   * config stands. A null is therefore not an older brokered row — it is a row that is not brokered.
    */
   authScheme: text("auth_scheme"),
   /** What the deployment last heard back from it. `null` until the first successful listing. */
@@ -204,7 +211,17 @@ export const composioConnections = pgTable(
     connectedAt: timestamp("connected_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
-    /** Whether a real call was made with this connection and answered. See the verify path. */
+    /**
+     * Whether a real call was made with this connection and answered. See the verify path.
+     *
+     * TRUE ON EVERY ROW THAT PREDATES THIS COLUMN WITHOUT A PROBE BEHIND IT. Migration 0030
+     * backfilled them to true with `verified_at = connected_at`, and no call was made to earn it:
+     * every one of those rows is a consent connection, which is verified by construction, because
+     * the only way it exists at all is that the vendor's own screen sent the person back connected.
+     * So on a backfilled row the timestamp is the moment of consent, not the moment of a check, and
+     * a reader treating every `verified_at` as "this connection answered then" would be wrong about
+     * exactly the rows that were here first.
+     */
     verified: boolean("verified").notNull().default(false),
     /** When that check last passed, which is what the page reports instead of a present tense. */
     verifiedAt: timestamp("verified_at", { withTimezone: true }),
