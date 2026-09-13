@@ -72,6 +72,21 @@ config. Making the script itself distinguish them would need a read-only auth-co
 broker seam, which does not exist yet — the seam has `ensureAuthConfig` and `deleteAuthConfig`, both
 of which write, and a read-only diagnostic must not create the object it was asked to look for.
 
+**It names every app's resolved connection kind, and tallies the kinds, because a silent failure
+lives exactly there.** One line per app carries the slug, the kind this deployment resolved it to
+and its action count — and for a `fields` app the scheme too, `fields: API_KEY`, because which of
+API_KEY, BASIC, BEARER_TOKEN or BASIC_WITH_JWT an app resolved to decides what the connect form
+asks somebody to type. The kind is read off the catalogue row rather than derived a second time
+here, so a diagnostic can never disagree with the product about how an app connects. Under the
+lines is a tally: `Kinds: consent 121, self-registering 86, fields 1243, no auth 34, unsupported
+56.` Every known kind is seeded at zero so the zeros print, which is the whole point of it —
+resolution reads a malformed `auth_schemes` as an empty list, so a vendor renaming or reshaping
+that field resolves *every* app to `unsupported`, and the picker hides unsupported apps. From
+every other angle that failure says nothing: the catalogue lists its usual four figures, the
+directory answers 200, not one app is offered. `Kinds: consent 0, self-registering 0, fields 0,
+no auth 0, unsupported 1540` is that state, and it reads as one without anybody scrolling. The
+per-app lines are what to grep afterwards for the app the report was run about.
+
 It is all reads. It mints no connect link and starts no session, because a link is a bearer
 capability and a diagnostic that printed one would leave somebody's mailbox in a terminal scrollback.
 The key is never printed either: every line goes out through a redactor, including the vendor's own
@@ -285,15 +300,17 @@ deployment could not withdraw it — so disconnect it here, or fix the key at Pe
 Re-check.* An audit row naming the action that was tried records the same state for whoever reads
 the trail a week later, because a sentence one person read once outlives nothing.
 
-**Which of the three a row is in is something only an answer can say.** The connections read carries
-the flag and the date and has no column for the action a check was spent on, so a page load knows
-that a key was taken and nothing has tried it, and says exactly that; the fuller sentences — this
-app publishes nothing safe to try a key on, or your key was checked and rejected and the account is
-still standing — are drawn from an answer that has just named the action. A re-check the vendor
-refuses is not one of those: it is raised, and Composio's own sentence for it reaches the person as
-a refusal rather than as a row that quietly changed its wording. A row that guessed between the
-three on every load would tell somebody their app publishes no probe on the strength of never having
-asked.
+**Which of the three a row is in is a fact about the action a check would be spent on, and the page
+keeps it across a reload.** The flag alone cannot say: `false` is both *this app publishes nothing
+safe to try a key on* and *your key was checked and rejected and the account is still standing*.
+So the connections read names the probe beside the flag and the date, deriving it from the app's
+recorded actions without asking the vendor anything, and the sentences are written off that name.
+A re-check or a key just handed over names the action it was actually spent on, and that answer
+wins over the derived name — an answer beats a record, and a check that has just run must not be
+overruled by a read taken before it. A re-check the vendor refuses is not an answer at all: it is
+raised, and Composio's own sentence for it reaches the person as a refusal rather than as a row
+that quietly changed its wording. While the name came only from an answer, a reload collapsed the
+third state into the first and told the one person with a refused key that nothing had been tried.
 
 **Nothing re-checks on page load.** That call is spent on the person's own account and against their
 own rate limit at the vendor, so verifying on every render would burn somebody's quota at Linear to
