@@ -138,11 +138,14 @@ export abstract class ServerUnresolvableError extends Error {}
  * grant instead of the asking person's brokered connection — the wrong vendor on the wrong
  * credential, recorded in the trail as an ordinary call to a reviewed server.
  *
- * THE SAME COLLISION IS ALREADY REFUSED AT THE OTHER END. `addCustomServer` will not let a row take
- * a curated slug, because the slug prefixes tool names and is what a grant and a policy rule are
- * written against. There is no `addComposioServer` to copy that guard into — nothing in the shipped
- * product writes a `composio` row at all — so a colliding row arrives only by hand edit or restore,
- * and only a check at resolution sees one.
+ * THE SAME COLLISION IS ALREADY REFUSED AT THE OTHER END, at three writes rather than one.
+ * `addCustomServer` will not let a row take a curated slug, because the slug prefixes tool names and
+ * is what a grant and a policy rule are written against; it will not take the `composio-` namespace
+ * `addBrokeredApp` mints into either; and both add paths refuse an id whose row is already brokered,
+ * rather than writing a url of their own over the one place the app slug is recorded. `store.ts`'s
+ * `requireNotBrokered` is where that last one is argued. `addBrokeredApp` does write `composio` rows
+ * — it is how an app is enabled — but never at a curated slug, so a row colliding with an ENTRY
+ * still arrives only by hand edit or restore, and only a check at resolution sees one.
  *
  * NOBODY ASKED FOR THIS REFUSAL, so it is not a person's to act on mid-call: it is two of our own
  * columns contradicting each other, the same shelf `PluginInvariantError` sits on. Declared here

@@ -5415,6 +5415,47 @@ describe("a row that resolves to two servers at once", () => {
     expect(answer).toBe("That tool could not be called.");
   });
 
+  /**
+   * AND THE CURATED ADD WILL NOT WRITE THROUGH IT, which is the other end of the same collision.
+   *
+   * CRITERION. `addServer` refuses a catalogue key whose row is brokered, and leaves the row exactly
+   * as it stood.
+   *
+   * REASON. The refusals above are at RESOLUTION — they stop a colliding row being dialled. This one
+   * is at the WRITE, and it protects something resolution cannot. `addServer` puts the catalogue's
+   * url over whatever is there, and for this row that url is the only record of which app the
+   * `composio_connections` rows behind it belong to: `removeServer` reads the app out of
+   * `accessFor`, deliberately with no entry, so that a row in exactly this state is still removable
+   * and its accounts still end at Composio. Overwritten, the app is unnameable, the accounts are
+   * unreachable by any operation in this deployment, and the row is a curated server nobody
+   * reviewed the arrival of.
+   *
+   * Unreachable from the shipped product today — `addBrokeredApp` mints `composio-<slug>` and no
+   * entry is spelled that way — which is what the whole of this `describe` is already about: the
+   * colliding row arrives by hand edit, by restore, or by a build whose catalogue took a name a past
+   * build brokered. The two above say what happens when one is READ. This says what happens when
+   * somebody presses Add on it.
+   */
+  test("the curated add refuses it rather than writing the catalogue's url over it", async () => {
+    const { store, database } = await freshStore();
+    await seedCollidingNotion(database);
+
+    await expect(
+      store.addServer({ key: "notion", by: "admin_user" }),
+    ).rejects.toThrow(CustomServerRefusedError);
+
+    // Untouched, which is what keeps the app removable: the slug is still readable off the url, so
+    // `removeServer` can still find the accounts to end at the vendor.
+    const [row] = await database
+      .select({ url: mcpServers.url, provenance: mcpServers.provenance })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, "notion"));
+    expect(row).toEqual({
+      url: "composio://notion",
+      provenance: "composio",
+    });
+  });
+
   test("it is on the same shelf the store already raises rather than records", async () => {
     /*
      * The distinction, asked the way every audience asks it.

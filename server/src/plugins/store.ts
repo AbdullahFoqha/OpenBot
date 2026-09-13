@@ -2189,6 +2189,47 @@ export function createPluginStore(options: PluginStoreOptions) {
     }
   }
 
+  /**
+   * A brokered app's row is not something another add path may write through.
+   *
+   * CRITERION. `addServer` and `addCustomServer` refuse outright when the id they are about to
+   * upsert already holds a row {@link accessFor} answers `brokered` for. Both of those paths write a
+   * url of their own choosing, and neither may write one over an app somebody is connected to.
+   *
+   * REASON. The url is the ONLY place the app slug is written down. `connectionTokenFor` reads it to
+   * decide whose account a call runs in, `removeServer` reads it to find the accounts to end at
+   * Composio, and `retireConnectionsFor` finds a person's rows by the same string — so the moment
+   * another path rewrites that url, every `composio_connections` row behind it stands for an app
+   * nothing in this deployment can name any more. Consent that no operation can withdraw is the one
+   * state this feature must not reach, and it is reachable by two ordinary administrative acts.
+   *
+   * REFUSED RATHER THAN REPAIRED, WHICH IS NOT THE ANSWER THE OTHER DIRECTION GETS.
+   * {@link addBrokeredApp} converts a row it lands on, because there the url it writes is the app
+   * and the row comes out saying so. Here the opposite is true: writing `provenance = "custom"`
+   * alongside the new url would make the row self-consistent and lose the accounts just the same.
+   * Consistent and orphaned is no better than contradictory and orphaned, so there is nothing to
+   * write — only an act to decline.
+   *
+   * AND THE ADMINISTRATOR IS LEFT A REAL STEP. Removing the app ends every account at the vendor on
+   * the way out and takes the row with it, after which the name is free for an endpoint. The
+   * refusal says that, because the alternative reading — "this name is taken forever" — is not true
+   * and would send somebody editing the database.
+   *
+   * ASKED WITH NO ENTRY, the reading {@link removeServer} uses, and for its reason: an entry can
+   * only ever SUPPRESS the brokered answer, so passing one a colliding id looked up would hide the
+   * brokered state of the very row most in need of protecting.
+   */
+  function requireNotBrokered(
+    serverId: string,
+    existing: { provenance: string; url: string } | undefined,
+  ) {
+    if (!existing) return;
+    if (accessFor(existing, null).credential !== "brokered") return;
+    throw new CustomServerRefusedError(
+      `${serverId} is a Composio app this deployment has enabled, and people may have connected their accounts to it. Remove the app first — which ends those accounts at Composio — and the name is then free.`,
+    );
+  }
+
   async function requireServer(serverId: string) {
     const [row] = await database
       .select()
@@ -2288,6 +2329,21 @@ export function createPluginStore(options: PluginStoreOptions) {
         );
       }
 
+      /*
+       * Not over a brokered row. See {@link requireNotBrokered} for what such a row would lose.
+       *
+       * Unreachable from the shipped product as it stands — `addBrokeredApp` mints `composio-<slug>`
+       * and no catalogue entry is spelled that way — and asked anyway, because the row the check is
+       * about is by definition one that arrived some other way: a hand edit, a restore, a build
+       * whose catalogue named an app a past build brokered. This path writes the catalogue's url
+       * over whatever is there, which is exactly the write that strands the accounts.
+       */
+      const [existing] = await database
+        .select({ provenance: mcpServers.provenance, url: mcpServers.url })
+        .from(mcpServers)
+        .where(eq(mcpServers.id, resolved.entry.key));
+      requireNotBrokered(resolved.entry.key, existing);
+
       await database
         .insert(mcpServers)
         .values({
@@ -2302,6 +2358,25 @@ export function createPluginStore(options: PluginStoreOptions) {
           target: mcpServers.id,
           set: {
             url: resolved.url,
+            /*
+             * THE WHOLE IDENTITY THE CATALOGUE DECIDES, not the url alone.
+             *
+             * These three columns and the url are one statement — this row is that reviewed entry —
+             * and an update that moved one of them and left the rest was a row describing two
+             * different servers at once. `provenance` is read by `requireServer`, which refuses a
+             * `first-party` row with no entry, and by `accessFor`, which reads it whenever there is
+             * no entry to overrule it; `vendor` is what the first-party rule is checked against.
+             * Left behind, a row that arrived by another path kept saying so at an address only the
+             * catalogue chose — so every surface that asks how a server got here answered with the
+             * way it USED to get here.
+             *
+             * The entry wins over the row everywhere else too (see `accessFor`), so this is that
+             * same order written down at the one moment the row is being established rather than
+             * read.
+             */
+            title: resolved.entry.title,
+            vendor: resolved.entry.vendor,
+            provenance: "first-party",
             /*
              * Left alone when the caller sends none, rather than cleared.
              *
@@ -2379,6 +2454,36 @@ export function createPluginStore(options: PluginStoreOptions) {
           "composio is the name of this deployment's own Composio screen, so a server added there could never be opened. Choose another.",
         );
       }
+
+      /*
+       * NOR THE NAMESPACE THE BROKERED ROWS ARE MINTED IN, which is the reservation above one step
+       * further out.
+       *
+       * CRITERION. No server added by URL may take an id beginning `composio-`, whether or not a row
+       * is sitting there today.
+       *
+       * REASON. {@link addBrokeredApp} composes its id as `composio-<slug>` from the app an
+       * administrator enabled, so that space is already spoken for by a path that writes
+       * `composio://` urls into it. Unreserved, the two paths write one row: enabling an app over a
+       * typed endpoint, or typing an endpoint over an app somebody is connected to. The second of
+       * those is the one that cannot be undone — see {@link requireNotBrokered} — and this is what
+       * stops either from arising in the first place, rather than catching them one row at a time.
+       *
+       * A PREFIX RATHER THAN A LOOKUP OF WHAT IS ENABLED TODAY. "Is there a brokered row at this id"
+       * is a question whose answer changes: an app removed this morning frees the name, and the next
+       * press of Add takes it back from whoever typed it in between. The namespace is what a reader
+       * of a grant or a policy rule can rely on without asking the database what year it is.
+       *
+       * It is the same objection the curated-slug refusal above makes, and the same one
+       * `addBrokeredApp` records for its own id: the id prefixes every tool name and is what a grant
+       * and a policy rule are written against, so a row shadowing another path's namespace inherits
+       * rules that were written about something else.
+       */
+      if (input.id.startsWith("composio-")) {
+        throw new CustomServerRefusedError(
+          `Names beginning composio- belong to the Composio apps this deployment enables, so ${input.id} is not a name a server added by URL can take. Choose another.`,
+        );
+      }
       if (!/^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/.test(input.id)) {
         throw new CustomServerRefusedError(
           "A server name is lower-case letters, numbers and hyphens.",
@@ -2426,9 +2531,26 @@ export function createPluginStore(options: PluginStoreOptions) {
        */
       const credentialId = input.credentialId?.trim() || undefined;
       const [existing] = await database
-        .select({ url: mcpServers.url, credentialId: mcpServers.credentialId })
+        .select({
+          url: mcpServers.url,
+          credentialId: mcpServers.credentialId,
+          // Read for the refusal below. The namespace rule above already keeps this path away from
+          // every id `addBrokeredApp` mints; this is the same rule asked of the ROW, which is what
+          // covers one that arrived before the namespace was reserved, or by restore.
+          provenance: mcpServers.provenance,
+        })
         .from(mcpServers)
         .where(eq(mcpServers.id, input.id));
+
+      /*
+       * Before the address rule below, because it is the stronger statement about the same write.
+       *
+       * That one is about a credential being carried to an address, and it lets an add through when
+       * no token is involved. This one is about the address ITSELF being the only record of which
+       * app a set of connections belongs to, and no absence of a credential makes that write
+       * survivable. See {@link requireNotBrokered}.
+       */
+      requireNotBrokered(input.id, existing);
 
       if (
         existing &&
@@ -2467,6 +2589,23 @@ export function createPluginStore(options: PluginStoreOptions) {
           set: {
             title: input.title,
             url: input.url,
+            /*
+             * WHAT THE ROW NOW IS, written beside the address that made it that.
+             *
+             * `vendor` is derived from the url on the way in, so leaving it behind while the url
+             * moved left the column naming a host this row no longer addresses — and it is what the
+             * first-party rule is checked against, not a caption. `provenance` is the same fact one
+             * level up: a row whose entry a build removed still reads `first-party`, and
+             * `requireServer` refuses exactly that shape as a vendor it can no longer check a pinned
+             * host for. Adding it by URL is what makes it a typed address rather than a reviewed
+             * one, so this is the act that settles the column.
+             *
+             * The one conversion this cannot make is out of a brokered row, which is refused above
+             * rather than written here: there the url is the only record of which app a set of
+             * consents belongs to, so a rewrite loses them whatever else is written alongside.
+             */
+            vendor: new URL(input.url).hostname,
+            provenance: "custom",
             /*
              * Kept when the caller names none, rather than cleared, for a reason beyond tidiness.
              *
@@ -2596,6 +2735,40 @@ export function createPluginStore(options: PluginStoreOptions) {
           set: {
             title: input.title,
             url,
+            /*
+             * WRITTEN BESIDE THE URL, BECAUSE THE TWO ARE ONE FACT AND A ROW HOLDING HALF OF IT IS
+             * NOT A SERVER AT ALL.
+             *
+             * CRITERION. Every row this method leaves behind says `composio`, whatever it said
+             * before. The url above and this column are what `accessFor` reads to answer that a call
+             * is brokered and which app it is against, and no path may write one without the other.
+             *
+             * REASON. This branch rewrote the url and left `provenance` standing, so enabling an app
+             * at an id a custom server already held produced a row reading `custom` at a
+             * `composio://` address. That is not a display inconsistency: `accessFor` answers
+             * `deployment-token` for it, so the transport dialled the row as an ordinary MCP
+             * endpoint on the deployment's own credential while the Composio screen went on
+             * attaching people's real accounts to the app its url named. The per-person gate was not
+             * weakened but SKIPPED — `connectionTokenFor` only ever asks for a connection down the
+             * brokered branch — which is the whole property this connector exists for. And
+             * `removeServer` finds the accounts to end at the vendor through that same answer, so it
+             * revoked nothing and reported the connector gone.
+             *
+             * A CONVERSION HERE, A REFUSAL IN THE OTHER DIRECTION, and the asymmetry is the point.
+             * What this method writes IS the app — the auth config stands at Composio before the row
+             * is touched, and the url names the app the connections will be keyed on — so a row it
+             * lands on comes out saying exactly what it now is, with nothing lost. Going the other
+             * way, the url being overwritten is the only record of which app a set of consents
+             * belongs to, and no column written alongside brings it back; see
+             * {@link requireNotBrokered}.
+             *
+             * `vendor` for the same reason one notch quieter: it is what the first-party rule is
+             * checked against, and a row reached over the broker whose vendor column still names the
+             * host somebody typed is answering that rule about a server this deployment no longer
+             * dials.
+             */
+            provenance: "composio",
+            vendor: "Composio",
             addedBy: input.by,
             updatedAt: new Date(),
             /*

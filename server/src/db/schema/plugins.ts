@@ -47,13 +47,24 @@ export const mcpServers = pgTable("mcp_servers", {
   vendor: text("vendor").notNull(),
   url: text("url").notNull(),
   /**
-   * `first-party` for a curated entry, `custom` for one an administrator added by URL.
+   * `first-party` for a curated entry, `custom` for one an administrator added by URL, `composio`
+   * for an app enabled through the broker.
    *
-   * Recorded because the two are not the same risk. A curated entry has reviewed source provenance
+   * Recorded because the three are not the same risk. A curated entry has reviewed source provenance
    * and a pinned host. A custom one is a URL somebody typed, and every surface that lists it says so.
    * Storing which it is means the Plugins page, the audit trail and anybody reading the database
    * later all agree about how a server got here, rather than inferring it from whether the host
    * happens to still be in this build's catalogue.
+   *
+   * AND `composio` IS NOT MERELY A THIRD LABEL — it decides how the row is REACHED. `accessFor`
+   * reads this column to answer that a call is brokered, which is what makes it run in the account
+   * of the person asking rather than on the deployment's own credential, and `toolkitOf` then reads
+   * which app out of {@link mcpServers.url}. So this column and that one are ONE FACT IN TWO PLACES,
+   * and the invariant every writer keeps is that they are written together: a `composio://` url
+   * carries `provenance = composio`, and a row saying `composio` carries a url naming an app. Half
+   * of the pair is not a mislabelled row, it is a row dialled one way and governed another — see
+   * `requireNotBrokered` in `plugins/store.ts` for which writes are refused to keep the pair whole,
+   * and `addBrokeredApp` for the one that converts.
    */
   provenance: text("provenance").notNull().default("first-party"),
   /**

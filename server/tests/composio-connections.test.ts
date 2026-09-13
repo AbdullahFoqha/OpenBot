@@ -17,10 +17,14 @@ import {
   pluginGrants,
   users,
 } from "../src/db/schema";
+import { accessFor } from "../src/plugins/access";
 import type { ComposioBroker } from "../src/plugins/broker";
 import type { ComposioActions, ComposioResult } from "../src/plugins/composio";
 import { useComposioClient } from "../src/plugins/composio";
-import { createPluginStore } from "../src/plugins/store";
+import {
+  CustomServerRefusedError,
+  createPluginStore,
+} from "../src/plugins/store";
 import { TEST_POOL } from "./support/database";
 
 /**
@@ -198,6 +202,18 @@ const madeAccountId = `ca_${suite}`;
  * the vendor still holds afterwards rather than about how a call was spelled.
  */
 const strandedAccountId = `ca_working_${suite}`;
+/**
+ * THE APP WHOSE ROW IS ALREADY TAKEN, which is the one shape the two add paths can collide on.
+ *
+ * `addBrokeredApp` mints `composio-<slug>` and `addCustomServer` takes whatever id an administrator
+ * types, so both can be made to write the SAME row — and a row half-written by each is neither app
+ * nor endpoint. Its own name rather than {@link enabledToolkit}'s because the tests below leave the
+ * row in states no other test here wants to inherit: an endpoint somebody typed, at an id Add
+ * mints.
+ */
+const collidedToolkit = `collided-${suite}`;
+/** What `addBrokeredApp` spells that app's row, which is also the id the custom add aims at. */
+const collidedId = `composio-${collidedToolkit}`;
 /** Every app this run owns, which is the scope of every read and every delete below. */
 const ownedToolkits = [
   toolkit,
@@ -207,6 +223,7 @@ const ownedToolkits = [
   probedToolkit,
   renamedProbedToolkit,
   decoyToolkit,
+  collidedToolkit,
 ];
 /**
  * An app this file does NOT own, standing in for another run's fixture — or another file's.
@@ -587,6 +604,7 @@ async function clean() {
         decoyId,
         twinId,
         schemeTwinId,
+        collidedId,
       ]),
     );
   await database
@@ -603,6 +621,7 @@ async function clean() {
         decoyId,
         twinId,
         schemeTwinId,
+        collidedId,
       ]),
     );
   await database
@@ -3290,4 +3309,192 @@ test("disconnecting a key claims no revocation", async () => {
           .vendorRevocationRequested,
     ),
   ).toEqual([false, true]);
+});
+
+/**
+ * THE TWO ADD PATHS WRITING ONE ROW, which is the only way a row can stop saying what it is.
+ *
+ * `mcp_servers.provenance` and `mcp_servers.url` are one fact in two columns: `accessFor` reads the
+ * first to decide whether a call is brokered at all, and `toolkitOf` reads the app slug out of the
+ * second. Every gate that keeps one person's Composio account out of another's is keyed on the pair
+ * — `connectionTokenFor` refuses a call whose asker has no `composio_connections` row for that app,
+ * and `removeServer` finds the accounts to end at the vendor by the same reading — so a row where
+ * one column has moved and the other has not is not a misfiled display fact. It is a row that is
+ * dialled one way and governed another.
+ *
+ * BOTH DIRECTIONS OF THE COLLISION ARE HERE, and they are not fixed the same way, because what they
+ * destroy is not the same thing.
+ */
+
+/**
+ * ENABLING AN APP OVER A ROW SOMEBODY TYPED, which must leave a row that says it is brokered.
+ *
+ * CRITERION. After `addBrokeredApp` has written `composio://<slug>` into a row, that row's
+ * provenance says `composio` and its vendor says Composio, whatever the row said a moment before —
+ * and it resolves as the brokered app its url names, so removing it ends the accounts behind it.
+ *
+ * REASON. The upsert's update branch rewrote the url and left `provenance` alone, so an app enabled
+ * over a row an administrator had added by URL came out `custom` at a `composio://` address: the
+ * transport dialled it as MCP on the deployment's own token while the connect screen went on
+ * attaching people's real accounts to it. The per-person gate was not weakened, it was BYPASSED —
+ * `accessFor` never answered `brokered` for that row, so nothing ever asked whether the person
+ * asking had connected. And the same silence made the app unremovable in the only sense that
+ * matters: `removeServer` reads the app to revoke out of `accessFor`, so it found none and left
+ * every account live at Composio while reporting the connector gone.
+ *
+ * THE ROW THIS STARTS FROM IS INSERTED BY HAND, because the id it sits at is one `addCustomServer`
+ * now refuses outright — see the test below. That refusal is the forward half; this is the half
+ * that has to hold for a row already in a deployment's database when the refusal arrives.
+ */
+test("enabling an app over a row somebody typed leaves a row that says it is brokered", async () => {
+  useAnsweringClient();
+  await database.insert(mcpServers).values({
+    id: collidedId,
+    title: "Typed By Hand",
+    vendor: "collector.attacker.example",
+    url: "https://collector.attacker.example/mcp",
+    provenance: "custom",
+  });
+
+  await store.addBrokeredApp({
+    slug: collidedToolkit,
+    title: "Collided App",
+    by: admin,
+    connection: { kind: "consent" },
+  });
+
+  const [row] = await database
+    .select({
+      url: mcpServers.url,
+      provenance: mcpServers.provenance,
+      vendor: mcpServers.vendor,
+    })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, collidedId));
+  expect(row).toEqual({
+    url: `composio://${collidedToolkit}`,
+    provenance: "composio",
+    // The broker, because that is who this deployment is now talking to for this row, and the
+    // column is what the first-party rule is checked against.
+    vendor: "Composio",
+  });
+
+  // Asked through the same function every gate asks, rather than by comparing the columns again:
+  // what the row must be is not "these two strings" but the answer those two strings produce.
+  expect(accessFor(row, null)).toMatchObject({
+    credential: "brokered",
+    toolkit: collidedToolkit,
+  });
+
+  /*
+   * AND THE CONSEQUENCE, which is the whole reason the column matters. Somebody connects, an
+   * administrator removes the app, and the account ends at Composio. On the row the upsert used to
+   * leave, `removeServer` read no app off `accessFor` at all: it deleted the row, asked the vendor
+   * nothing, and left the mailbox attached with nothing here left naming it.
+   */
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: collidedToolkit, userId: askerId });
+
+  await store.removeServer(collidedId, admin);
+
+  expect(asksMade()).toEqual([
+    `ensureAuthConfig:${collidedToolkit}/consent`,
+    `revoke:${collidedToolkit}/${askerId}`,
+    `deleteAuthConfig:${collidedToolkit}`,
+  ]);
+  expect(await connectionsHeld()).toEqual([]);
+});
+
+/**
+ * ADDING A SERVER BY URL OVER A BROKERED ROW, which is refused rather than repaired.
+ *
+ * CRITERION. `addCustomServer` refuses an id whose row is a Composio app this deployment has
+ * enabled, with a {@link CustomServerRefusedError} — the class both add routes turn into a 400 an
+ * administrator can act on — and the row is left exactly as it stood, so the accounts behind it are
+ * still revocable.
+ *
+ * REASON. This is the direction that CANNOT be repaired by writing the missing column, and that is
+ * the asymmetry with the test above. The url is the only place the app slug is written down: a
+ * custom add rewrites it to the address somebody typed, and from that moment nothing in this
+ * deployment can name the app those `composio_connections` rows stand for. `removeServer` revokes
+ * nothing, offboarding revokes nothing, and every call the row still serves throws
+ * `PluginInvariantError` because `accessFor` answers `brokered` with a null toolkit. Writing
+ * `provenance = custom` alongside would make the row self-consistent and lose the accounts just the
+ * same — consistent and orphaned is not better than contradictory and orphaned.
+ *
+ * So the add is refused, and the honest act is left to the administrator: remove the app, which
+ * ends every account at Composio on the way out, and then add the endpoint at that name.
+ */
+test("a server added by URL may not take a brokered row, and its accounts stay revocable", async () => {
+  useAnsweringClient();
+  await store.addBrokeredApp({
+    slug: collidedToolkit,
+    title: "Collided App",
+    by: admin,
+    connection: { kind: "consent" },
+  });
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: collidedToolkit, userId: askerId });
+
+  await expect(
+    store.addCustomServer({
+      id: collidedId,
+      title: "Collector",
+      url: "https://collector.attacker.example/mcp",
+      by: admin,
+    }),
+  ).rejects.toThrow(CustomServerRefusedError);
+
+  const [row] = await database
+    .select({ url: mcpServers.url, provenance: mcpServers.provenance })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, collidedId));
+  expect(row).toEqual({
+    url: `composio://${collidedToolkit}`,
+    provenance: "composio",
+  });
+
+  // The property the refusal exists for: the app is still an app, so taking it away still ends the
+  // account at the vendor rather than merely forgetting it here.
+  await store.removeServer(collidedId, admin);
+  expect(asksMade()).toEqual([
+    `ensureAuthConfig:${collidedToolkit}/consent`,
+    `revoke:${collidedToolkit}/${askerId}`,
+    `deleteAuthConfig:${collidedToolkit}`,
+  ]);
+  expect(await connectionsHeld()).toEqual([]);
+});
+
+/**
+ * AND THE NAMESPACE ITSELF, reserved before there is any row to collide with.
+ *
+ * CRITERION. `addCustomServer` refuses every id beginning `composio-`, whether or not a row is
+ * there today.
+ *
+ * REASON. The two tests above are about a row that already exists; this is what stops the pair from
+ * ever existing again. `addBrokeredApp` mints `composio-<slug>` and nothing else may mint into that
+ * space, so the first press of Add for an app can never find somebody's typed endpoint sitting at
+ * its id — and a custom server can never be the thing an enable is about to convert. It is the same
+ * reservation the curated slugs already have one line above, for the same reason: the id prefixes
+ * every tool name and is what a grant and a policy rule are written against, so a row that shadows
+ * another path's namespace inherits rules that were written about something else.
+ */
+test("a server added by URL may not take the namespace brokered rows are minted in", async () => {
+  await expect(
+    store.addCustomServer({
+      id: collidedId,
+      title: "Collector",
+      url: "https://collector.attacker.example/mcp",
+      by: admin,
+    }),
+  ).rejects.toThrow(CustomServerRefusedError);
+
+  expect(
+    await database
+      .select({ id: mcpServers.id })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, collidedId)),
+  ).toEqual([]);
 });
