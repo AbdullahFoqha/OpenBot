@@ -86,8 +86,19 @@ const renamedId = `renamed-${suite}`;
  * itself a guess about the server's locale.
  */
 const secondToolkit = `${toolkit}-more`;
+/**
+ * The app this file ENABLES rather than inserts, and so the only one whose row it did not write.
+ *
+ * Every other fixture here is an `mcp_servers` insert made by hand, because what those tests are
+ * about is what a removal does to a row that already stands. The two tests at the foot of this file
+ * are about the row `addBrokeredApp` writes itself — its `auth_scheme` in particular — so the app
+ * has to arrive the way an administrator's press of Add makes it arrive, id and all.
+ */
+const enabledToolkit = `enablable-${suite}`;
+/** What `addBrokeredApp` spells that app's row, which is the id the two tests below read back. */
+const enabledId = `composio-${enabledToolkit}`;
 /** Every app this run owns, which is the scope of every read and every delete below. */
-const ownedToolkits = [toolkit, secondToolkit];
+const ownedToolkits = [toolkit, secondToolkit, enabledToolkit];
 /**
  * An app this file does NOT own, standing in for another run's fixture — or another file's.
  *
@@ -214,8 +225,13 @@ async function connectionsHeld(): Promise<string[]> {
  * for its reason. "The removal asked the broker to revoke" is worth little beside "and asked it
  * nothing else": a removal that also listed the catalogue or began somebody's connection would be
  * acting on somebody's behalf in a way nothing here has reasoned about, and a stub answering
- * plausibly would let that pass unremarked. Nothing in this file enables an app or confirms a
- * connection, so those four methods have no caller here and say so.
+ * plausibly would let that pass unremarked. Nothing in this file lists the catalogue or confirms a
+ * connection, so those three methods have no caller here and say so.
+ *
+ * `ensureAuthConfig` is the exception, and it is recorded rather than answered silently: the two
+ * tests at the foot of this file enable an app for real, so it has a caller — and every assertion
+ * above compares {@link asksMade} whole, so recording it keeps "and asked it nothing else" true of
+ * the removals as well.
  */
 const unasked = (what: string) => async (): Promise<never> => {
   throw new Error(`this suite's path asked the broker to ${what}`);
@@ -261,7 +277,15 @@ let vendorRefuses: (request: { userId: string; toolkit: string }) => boolean =
 
 const broker: ComposioBroker = {
   listApps: unasked("list the catalogue"),
-  ensureAuthConfig: unasked("create an auth config"),
+  ensureAuthConfig: async (config) => {
+    // Named by app AND kind, because the kind is what decides which config is created: an enable
+    // that forwarded nothing would record an ask whose second half is missing rather than one that
+    // merely differs.
+    asks.push({
+      ask: `ensureAuthConfig:${config.toolkit}/${config.connection.kind}`,
+      held: await connectionsHeld(),
+    });
+  },
   authorize: unasked("begin somebody's connection"),
   isConnected: unasked("check somebody's connection"),
   revoke: async (request) => {
@@ -328,10 +352,10 @@ async function clean() {
   await database.delete(agents).where(eq(agents.id, botId));
   await database
     .delete(mcpTools)
-    .where(inArray(mcpTools.serverId, [toolkit, renamedId]));
+    .where(inArray(mcpTools.serverId, [toolkit, renamedId, enabledId]));
   await database
     .delete(mcpServers)
-    .where(inArray(mcpServers.id, [toolkit, renamedId]));
+    .where(inArray(mcpServers.id, [toolkit, renamedId, enabledId]));
   await database
     .delete(composioConnections)
     .where(inArray(composioConnections.toolkit, ownedToolkits));
@@ -1065,4 +1089,74 @@ test("the refresh that follows an add is attributed to the deployment", async ()
     actor: "deployment",
     refs: [ref],
   });
+});
+
+/**
+ * ENABLING AN APP THAT IS ALREADY HERE, which is what pressing Add a second time is.
+ *
+ * `addBrokeredApp` is idempotent by design — two administrators can press Add together, and an app
+ * can be removed and added again — so the second press takes the upsert's update branch. Everything
+ * on that branch is a display fact the vendor is allowed to restate: the title, the url, who added
+ * it. `auth_scheme` is not. It is what this deployment's authorization config was created AS, and
+ * every connection anybody has made against that config depends on it, so re-enabling has to leave
+ * it standing: a vendor that starts publishing managed OAuth for an app somebody connected by key
+ * would otherwise, one press of Add later, have this deployment minting consent links against a
+ * config full of keys.
+ */
+test("re-enabling never moves a connected app onto a different flow", async () => {
+  useAnsweringClient();
+  await store.addBrokeredApp({
+    slug: enabledToolkit,
+    title: "Enablable App",
+    by: admin,
+    connection: { kind: "fields", authScheme: "API_KEY" },
+  });
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: enabledToolkit, userId: askerId });
+
+  await store.addBrokeredApp({
+    slug: enabledToolkit,
+    title: "Enablable App",
+    by: admin,
+    connection: { kind: "consent" },
+  });
+
+  const [row] = await database
+    .select({ authScheme: mcpServers.authScheme })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, enabledId));
+  expect(row.authScheme).toBe("API_KEY");
+});
+
+/**
+ * AND THE ONE CASE WHERE THE REWRITE IS BOTH SAFE AND THE POINT.
+ *
+ * The rule above is about not stranding connections, so where there are none there is nothing to
+ * strand. Re-enabling is then how an operator picks up a vendor's change — without it the only way
+ * to record a new scheme would be removing the app and adding it back, which takes its grants with
+ * it. So the column is write-once EXCEPT here, and this test is the half of that sentence the test
+ * above cannot state.
+ */
+test("re-enabling an app nobody has connected picks up the vendor's change", async () => {
+  useAnsweringClient();
+  await store.addBrokeredApp({
+    slug: enabledToolkit,
+    title: "Enablable App",
+    by: admin,
+    connection: { kind: "fields", authScheme: "API_KEY" },
+  });
+
+  await store.addBrokeredApp({
+    slug: enabledToolkit,
+    title: "Enablable App",
+    by: admin,
+    connection: { kind: "consent" },
+  });
+
+  const [row] = await database
+    .select({ authScheme: mcpServers.authScheme })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, enabledId));
+  expect(row.authScheme).toBe("OAUTH2");
 });

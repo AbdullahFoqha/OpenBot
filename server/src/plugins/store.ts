@@ -37,7 +37,11 @@ import {
   type ServerAccess,
   ServerUnresolvableError,
 } from "./access";
-import { BrokerUnconfiguredError, type ComposioBroker } from "./broker";
+import {
+  type BrokerConnection,
+  BrokerUnconfiguredError,
+  type ComposioBroker,
+} from "./broker";
 import {
   type CatalogueEntry,
   catalogueEntry,
@@ -922,6 +926,22 @@ export type PluginStoreOptions = {
   /** Where the vendor sends people back; needed to (re)register a dynamic client. */
   redirectUri?: string;
 };
+
+/** The literal recorded on the row, which is the scheme a later call must keep using. */
+function schemeFor(connection: BrokerConnection): string | null {
+  switch (connection.kind) {
+    case "consent":
+      return "OAUTH2";
+    case "self-registering":
+      return "DCR_OAUTH";
+    case "fields":
+      return connection.authScheme;
+    case "no-auth":
+      return "NO_AUTH";
+    case "unsupported":
+      return null;
+  }
+}
 
 export function createPluginStore(options: PluginStoreOptions) {
   const { database, auditStore, credentials, encryptionKey } = options;
@@ -2336,6 +2356,14 @@ export function createPluginStore(options: PluginStoreOptions) {
       slug: string;
       title: string;
       by: string;
+      /**
+       * How this app connects, resolved from the catalogue row the administrator chose.
+       *
+       * Taken rather than derived here, because the caller has already read it off that row and a
+       * second derivation is a second answer — the one thing {@link BrokerConnection} exists to
+       * prevent. It decides what config is created at the vendor, and it is what this row records.
+       */
+      connection: BrokerConnection;
     }): Promise<ServerRecord> {
       // Before anything at all. A deployment with no key has no catalogue for this app to have been
       // chosen from, so there is nothing here to half-do and nothing to say but the setting.
@@ -2348,7 +2376,11 @@ export function createPluginStore(options: PluginStoreOptions) {
         );
       }
 
-      await broker.ensureAuthConfig({ toolkit: input.slug, name: input.title });
+      await broker.ensureAuthConfig({
+        toolkit: input.slug,
+        name: input.title,
+        connection: input.connection,
+      });
 
       const id = `composio-${input.slug}`;
       await database
@@ -2364,6 +2396,10 @@ export function createPluginStore(options: PluginStoreOptions) {
           // Nothing for the vault to hold. A brokered call runs as the person asking, on their own
           // connection at the vendor, which is a `composio_connections` row rather than a secret.
           credentialId: null,
+          // What the config this call just made was created AS, which is the scheme every later
+          // connection against it has to keep using. Written on the way in, and after that only
+          // where nothing is connected to be moved by it — see the statement below the upsert.
+          authScheme: schemeFor(input.connection),
           addedBy: input.by,
         })
         .onConflictDoUpdate({
@@ -2382,8 +2418,43 @@ export function createPluginStore(options: PluginStoreOptions) {
              * `removeServer` retires a server's secret by reading it off this column, and a null
              * written over it leaves that secret live with nothing left to name it.
              */
+            /*
+             * `auth_scheme` is not written here either, and for a neighbouring reason.
+             *
+             * This is the branch a second press of Add takes, and the scheme is the one thing on
+             * the row that live connections depend on rather than merely display. Rewriting it
+             * here would move them; the statement below rewrites it only where there are none.
+             */
           },
         });
+
+      /*
+       * WRITE-ONCE, EXCEPT WHERE THERE IS NOTHING TO STRAND.
+       *
+       * A row's scheme is what its authorization config was created as, and every connection made
+       * against that config depends on it. Re-enabling must not rewrite it underneath them: a
+       * vendor that starts publishing managed OAuth for an app somebody connected by key would,
+       * one press of Add later, leave this deployment minting consent links against a config full
+       * of keys.
+       *
+       * With no connections there is no such dependence, so the rewrite is safe and useful — it is
+       * how an operator picks up a vendor's change without removing and re-adding the app.
+       */
+      const connections = await database
+        .select({ userId: composioConnections.userId })
+        .from(composioConnections)
+        .where(eq(composioConnections.toolkit, input.slug))
+        .limit(1);
+
+      if (connections.length === 0) {
+        await database
+          .update(mcpServers)
+          .set({
+            authScheme: schemeFor(input.connection),
+            updatedAt: new Date(),
+          })
+          .where(eq(mcpServers.id, id));
+      }
 
       await recordAuditEvent(auditStore, {
         eventType: "configuration.changed",
