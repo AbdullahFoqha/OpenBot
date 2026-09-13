@@ -37,7 +37,7 @@ import {
   CatalogueTransportUnroutableError,
   ServerRowAmbiguousError,
 } from "../src/plugins/access";
-import type { ComposioBroker } from "../src/plugins/broker";
+import type { BrokerConnection, ComposioBroker } from "../src/plugins/broker";
 import type { CatalogueEntry } from "../src/plugins/catalogue";
 import { catalogueEntry } from "../src/plugins/catalogue";
 import {
@@ -5987,7 +5987,11 @@ test("an audit write that fails is not recorded as the vendor misbehaving", asyn
  *
  * THE BROKER IS ASKED FIRST AND EXACTLY ONCE. First because a row whose auth config does not exist
  * is an app an administrator can see and nobody can connect to; once because `ensureAuthConfig` is
- * idempotent at the vendor and a second call here would be this deployment leaning on that.
+ * idempotent at the vendor and a second call here would be this deployment leaning on that. The
+ * connection the caller resolved is asserted as it reaches the broker unchanged, because that kind
+ * decides what config is created at the vendor: an enable path that re-derived it here rather than
+ * passing the caller's through would be a second answer to the question this argument exists to
+ * settle once.
  *
  * `composio-linear` is cleaned up in a `finally` rather than by {@link freshDatabase}, which knows
  * only the ids the guard at the top of this file cleared. The row is checked absent before the add
@@ -5995,7 +5999,11 @@ test("an audit write that fails is not recorded as the vendor misbehaving", asyn
  * spells it, so a row already at it would be somebody's app rather than this test's.
  */
 test("enabling an app writes a brokered row, and asks for its auth config first", async () => {
-  const asked: { toolkit: string; name: string }[] = [];
+  const asked: {
+    toolkit: string;
+    name: string;
+    connection: BrokerConnection;
+  }[] = [];
   const rowsWhenAsked: string[] = [];
   const unasked = (what: string) => async (): Promise<never> => {
     throw new Error(`enabling an app asked the broker to ${what}`);
@@ -6051,6 +6059,7 @@ test("enabling an app writes a brokered row, and asks for its auth config first"
       slug: "linear",
       title: "Linear",
       by: "admin@example.com",
+      connection: { kind: "consent" },
     });
 
     expect(record.id).toBe("composio-linear");
@@ -6060,7 +6069,9 @@ test("enabling an app writes a brokered row, and asks for its auth config first"
     // on their connection at the vendor, so there is nothing on this row for a vault to hold.
     expect(record.hasCredential).toBe(false);
 
-    expect(asked).toEqual([{ toolkit: "linear", name: "Linear" }]);
+    expect(asked).toEqual([
+      { toolkit: "linear", name: "Linear", connection: { kind: "consent" } },
+    ]);
     expect(rowsWhenAsked).toEqual([]);
 
     const changes = auditStore
@@ -6685,6 +6696,7 @@ test("removing an app revokes everybody, then clears rows, then drops the config
       slug: "linear",
       title: "Linear",
       by: "admin",
+      connection: { kind: "consent" },
     });
     for (const userId of ["user-b", "user-a"]) {
       expect(
