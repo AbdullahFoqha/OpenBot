@@ -107,6 +107,16 @@ const ownedToolkits = [toolkit, secondToolkit, enabledToolkit];
  * that a sweep keyed on `user_id` alone would take by mistake.
  */
 const foreignToolkit = `foreign-${suite}`;
+/**
+ * The app the probe chooser reads, which holds actions and nothing else.
+ *
+ * Its own `mcp_servers` id rather than {@link toolkit}'s, because every other fixture here seeds
+ * `APP_FETCH_ITEMS` — an argument-less read — and a chooser asked about that app would answer that
+ * action whatever it did with the rows a probe test cares about. Named as an app id and not added to
+ * {@link ownedToolkits}: nobody connects it, so it has no `composio_connections` row to sweep, and
+ * its actions go out with the server rows in {@link clean}.
+ */
+const probeAppId = `probe-${suite}`;
 const admin = "admin@openbot.local";
 
 const policy: ActionPolicy = { mode: "enforce", deny: [], allow: ["true"] };
@@ -364,10 +374,12 @@ async function clean() {
   await database.delete(agents).where(eq(agents.id, botId));
   await database
     .delete(mcpTools)
-    .where(inArray(mcpTools.serverId, [toolkit, renamedId, enabledId]));
+    .where(
+      inArray(mcpTools.serverId, [toolkit, renamedId, enabledId, probeAppId]),
+    );
   await database
     .delete(mcpServers)
-    .where(inArray(mcpServers.id, [toolkit, renamedId, enabledId]));
+    .where(inArray(mcpServers.id, [toolkit, renamedId, enabledId, probeAppId]));
   await database
     .delete(composioConnections)
     .where(inArray(composioConnections.toolkit, ownedToolkits));
@@ -1221,4 +1233,90 @@ test("a confirmed connection is recorded verified, at the moment it was earned",
   expect(row.verified).toBe(true);
   expect(row.verifiedAt).not.toBeNull();
   expect(row.verifiedAt?.getTime()).toBeGreaterThanOrEqual(before.getTime());
+});
+
+/**
+ * CHOOSING THE PROBE: READ EFFECT AND ZERO REQUIRED INPUTS, AND NEITHER ALONE WILL DO.
+ *
+ * CRITERION. Given an app whose alphabetically first argument-less action is a WRITE, the chosen
+ * probe is the argument-less READ that sorts after it, and never the write.
+ *
+ * REASON. The action this picks is the one that will be called with somebody's just-typed API key
+ * to find out whether the key works, so a wrong pick is an unrequested write on a stranger's
+ * account. The fixture is Stripe's own list and not an invention: the first action Composio
+ * publishes for Stripe that requires no arguments is `STRIPE_CREATE_BILLING_METER_EVENT_SESSION`,
+ * so a chooser written on "takes no arguments" — the condition that looks sufficient, because it is
+ * the one that makes a call possible at all — would open a billing meter event session on the
+ * account of every person who typed a key into this deployment. Read effect is what stands between
+ * those two names, and it is a fact the vendor asserted rather than a guess: `effectOf` answers
+ * `read` only where Composio sent `readOnlyHint`, so everything unlabelled is already recorded here
+ * as a write.
+ */
+test("the probe skips an argument-less write for the read that sorts after it", async () => {
+  await database.insert(mcpServers).values({
+    id: probeAppId,
+    title: "Stripe",
+    vendor: "Composio",
+    url: `composio://${probeAppId}`,
+    provenance: "composio",
+  });
+  await database.insert(mcpTools).values([
+    {
+      serverId: probeAppId,
+      // Sorts first, asks for nothing, and charges somebody money. The whole test.
+      name: "STRIPE_CREATE_BILLING_METER_EVENT_SESSION",
+      description: "Creates a billing meter event session.",
+      effect: "write",
+      version: "20260903_00",
+    },
+    {
+      serverId: probeAppId,
+      name: "STRIPE_RETRIEVE_BALANCE",
+      description: "Retrieves the balance.",
+      effect: "read",
+      version: "20260903_00",
+    },
+  ]);
+
+  expect(await store.probeActionFor(probeAppId)).toBe(
+    "STRIPE_RETRIEVE_BALANCE",
+  );
+});
+
+/**
+ * AND AN APP WHOSE ONLY SAFE ACTION WANTS AN ARGUMENT HAS NO PROBE AT ALL.
+ *
+ * CRITERION. Where every read this deployment recorded for an app declares a required input, the
+ * answer is null rather than that action.
+ *
+ * REASON. There is nothing to invent an argument from. A probe is made before anybody has told this
+ * deployment anything about the account beyond the key itself, so a required customer id, project
+ * id or query has no honest value to carry — and a guessed one turns "is this key good" into a
+ * question about whether some made-up identifier exists, which fails for a perfectly good key.
+ * NULL IS A REAL ANSWER AND NOT AN ERROR: sampling the key-based apps in the live catalogue, most
+ * publish some argument-less read and PostHog publishes none, so every caller of this has to have
+ * an answer for an app that cannot be probed.
+ */
+test("an app whose only read takes an argument has no probe", async () => {
+  await database.insert(mcpServers).values({
+    id: probeAppId,
+    title: "Needs An Argument",
+    vendor: "Composio",
+    url: `composio://${probeAppId}`,
+    provenance: "composio",
+  });
+  await database.insert(mcpTools).values({
+    serverId: probeAppId,
+    name: "APP_GET_PROJECT",
+    description: "Reads one project, by id.",
+    effect: "read",
+    inputSchema: {
+      type: "object",
+      properties: { project_id: { type: "string" } },
+      required: ["project_id"],
+    },
+    version: "20260903_00",
+  });
+
+  expect(await store.probeActionFor(probeAppId)).toBeNull();
 });

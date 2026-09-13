@@ -869,6 +869,21 @@ type StoredClient = { client: OAuthClient; registeredAt: Date | null };
  */
 const CLIENT_REREGISTRATION_BACKOFF_MS = 5 * 60_000;
 
+/**
+ * The names that read as "tell me who this key belongs to".
+ *
+ * A PREFERENCE AND NOT THE RULE. What makes an action safe to probe with is decided by
+ * {@link createPluginStore}'s `probeActionFor` on the vendor's own labels; this is only which of the
+ * safe ones to reach for first. An identity call is the cheapest request an app has and the one
+ * whose failure most clearly means "this key is wrong" rather than "that record does not exist" —
+ * but sampling fifteen key-based apps in the live catalogue, only four publish one, so a chooser
+ * that INSISTED on this shape would refuse to probe most of the apps this deployment offers.
+ *
+ * Anchored at the end, because these are suffixes of a prefixed action name — `STRIPE_GET_ME`,
+ * `LINEAR_GET_ME` — and an unanchored match would take `SLACK_PROFILE_SET` for an identity read.
+ */
+const IDENTITY_ACTION = /(_GET_ME|_PROFILE|_CURRENT_USER|_USER_INFO|_WHOAMI)$/;
+
 /** What a vendor's token endpoint gave back for a refresh token. */
 export type AccessToken = {
   accessToken: string;
@@ -3948,6 +3963,68 @@ export function createPluginStore(options: PluginStoreOptions) {
 
       if (!row) return null;
       return { connectedAt: iso(row.connectedAt) ?? "" };
+    },
+
+    /**
+     * The action a key verification should call against this app, or null where it publishes none.
+     *
+     * THIS CHOOSES THE ONE ACTION THAT WILL BE CALLED WITH SOMEBODY'S JUST-TYPED API KEY, which is
+     * what makes it the most dangerous line in the verification: whatever comes back from here runs
+     * against a stranger's account, once, purely to find out whether their key works. So the two
+     * conditions below are BOTH non-negotiable, and neither is a stricter spelling of the other.
+     *
+     * READ EFFECT, because a probe must not change anything. The label is the vendor's own and not
+     * a guess of ours: `effectOf` answers `read` only where Composio sent `readOnlyHint`, and
+     * everything unlabelled was already recorded as a write, so `read` here means Stripe or Linear
+     * or Notion said so. `destructive` is checked beside it rather than trusted to be implied — the
+     * two are separate columns precisely so a vendor can say both things, and a row that somehow
+     * says read AND destructive is a row this deployment has no business calling unasked.
+     *
+     * ZERO REQUIRED INPUTS, because there is nothing to invent an argument from. A probe happens
+     * before this deployment knows anything about the account beyond the key, so a required customer
+     * id or query has no honest value to carry, and a made-up one turns "is this key good" into
+     * "does this identifier exist" — which fails for a perfectly good key.
+     *
+     * BOTH, NEVER EITHER, and the live catalogue is why this sentence is here rather than a comment
+     * saying the checks are belt-and-braces. The first argument-less action on Stripe's own list is
+     * `STRIPE_CREATE_BILLING_METER_EVENT_SESSION`. A probe chosen on "takes no arguments" alone —
+     * the condition that looks sufficient, because it is the one that makes a call possible at all —
+     * would therefore write to somebody's account to find out whether their key works. The read
+     * effect is the whole of what stands between those two names.
+     *
+     * NULL IS AN ANSWER AND NOT A FAILURE. Of fifteen key-based apps sampled, most publish some safe
+     * argument-less read and PostHog publishes none at all, so an app that cannot be probed is an
+     * ordinary app rather than a broken one. What a caller does about it — and running the probe at
+     * all — belongs to the verification path; this function only chooses.
+     */
+    async probeActionFor(serverId: string): Promise<string | null> {
+      // Ordered, because the fallback below is "the first candidate" and Postgres promises no order
+      // without one: an unordered read would make which action gets called with somebody's key a
+      // property of whichever plan the server happened to pick.
+      const actions = await database
+        .select({
+          name: mcpTools.name,
+          inputSchema: mcpTools.inputSchema,
+          effect: mcpTools.effect,
+          destructive: mcpTools.destructive,
+        })
+        .from(mcpTools)
+        .where(eq(mcpTools.serverId, serverId))
+        .orderBy(asc(mcpTools.name));
+
+      const safe = actions.filter((action) => {
+        if (action.effect !== "read" || action.destructive) return false;
+        // Absent and empty are the same answer, and anything that is not a list is neither: the
+        // column is the vendor's JSON Schema stored unchanged, so `required` may be missing, may be
+        // `[]`, and may be some shape no schema should hold. Only a non-empty list of names is a
+        // reason to pass this action over.
+        const schema = action.inputSchema as Record<string, unknown> | null;
+        const required = schema?.required;
+        return !Array.isArray(required) || required.length === 0;
+      });
+
+      const identity = safe.find((action) => IDENTITY_ACTION.test(action.name));
+      return identity?.name ?? safe[0]?.name ?? null;
     },
 
     /**
