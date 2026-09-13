@@ -1297,6 +1297,14 @@ function brokeredApp(
     storeThrows?: unknown;
     /** A broker that will not say what an app asks for, which is the fields call failing. */
     fieldsThrow?: unknown;
+    /**
+     * What the app publishes, when the list itself is what is under test.
+     *
+     * Defaulted to {@link PUBLISHED}, which is the ordinary app with one required box and one
+     * optional one. The case this exists for is the empty list: a scheme whose whole meaning is a
+     * secret somebody types, published with nothing to type it into.
+     */
+    published?: BrokerField[];
     environment?: Record<string, string | undefined>;
   } = {},
 ) {
@@ -1487,7 +1495,7 @@ function brokeredApp(
             }) => {
               asked.push(request);
               if (deployment.fieldsThrow) throw deployment.fieldsThrow;
-              return PUBLISHED;
+              return deployment.published ?? PUBLISHED;
             },
           },
         } as never)
@@ -1915,6 +1923,89 @@ describe("connecting an app whose secret a person types", () => {
     const response = await connectFields({ values: { api_key: 12 } });
 
     expect(response.status).toBe(400);
+    expect(submitted).toEqual([]);
+  });
+
+  test("a required box the submission leaves out is refused, and named", async () => {
+    /*
+     * THE SHAPE WAS NEVER THE QUESTION A REQUIRED FIELD ASKS. Every name here is published and
+     * every value is text — vacuously, because there are none — so a guard that checked only those
+     * two things let an empty body through, and what it made at Composio is an account carrying no
+     * credential at all. Composio does not grade what it is given, and an app with nothing safe to
+     * probe leaves the row written and every screen here drawing it as connected.
+     */
+    const { submitted, connectFields } = brokeredApp();
+
+    const response = await connectFields({ values: {} });
+
+    expect(response.status).toBe(400);
+    const refusal = (await response.json()).error as string;
+    // The app's name and the box that is missing, which is the whole of what fixes it. The name is
+    // the vendor's own here rather than the caller's text, which is what makes it safe to quote.
+    expect(refusal).toContain("Firecrawl");
+    expect(refusal).toContain("api_key");
+    expect(submitted).toEqual([]);
+  });
+
+  test("a required box holding only spaces is the empty box it looks like", async () => {
+    /*
+     * WHITESPACE IS ABSENCE, AND THE SERVER IS THE ONLY PLACE THAT CAN SAY SO. The browser's
+     * `required` attribute refuses an empty box and accepts a space, so a space is exactly what
+     * reaches here from a form that believes it is filled in — and a key made of spaces is a
+     * credential in no sense anything downstream would notice: Composio accepts it, the row is
+     * written, and the person is told they are connected.
+     */
+    const { submitted, connectFields } = brokeredApp();
+
+    const response = await connectFields({
+      values: { api_key: "   ", base_url: "https://api.firecrawl.dev" },
+    });
+
+    expect(response.status).toBe(400);
+    expect(submitted).toEqual([]);
+  });
+
+  test("an optional box left empty is not a refusal", async () => {
+    /*
+     * THE OTHER HALF, AND THE ONE THIS GUARD COULD EASILY BREAK. The form seeds a box from the
+     * default the app published and sends every published name back whether or not it was touched,
+     * so a blank optional value is what an ordinary submission carries — not an incomplete one. A
+     * guard that read "blank" as "missing" without reading `required` first would refuse the
+     * commonest submission this route handles.
+     */
+    const { submitted, connectFields } = brokeredApp();
+
+    const response = await connectFields({
+      values: { api_key: "fc-live-a-secret", base_url: "" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(submitted).toEqual([
+      {
+        toolkit: "firecrawl",
+        userId: ADMIN.id,
+        values: { api_key: "fc-live-a-secret", base_url: "" },
+      },
+    ]);
+  });
+
+  test("an app that publishes no boxes connects nobody, form or no form", async () => {
+    /*
+     * A FIELD SCHEME IS A SECRET SOMEBODY TYPES, so an app publishing nothing to type it into
+     * cannot be connected at all: there is no required box to be missing, and every check the
+     * submission passes it passes for want of anything to check. The press answers with a refusal
+     * rather than an account, and the form press above it still answers the empty list honestly.
+     */
+    const { submitted, connectFields } = brokeredApp(null, AUTHORIZATION_URL, {
+      published: [],
+    });
+
+    expect(await (await connectFields()).json()).toEqual({ fields: [] });
+
+    const response = await connectFields({ values: {} });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error as string).toContain("Firecrawl");
     expect(submitted).toEqual([]);
   });
 

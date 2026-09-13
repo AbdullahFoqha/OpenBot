@@ -922,6 +922,35 @@ export function createPluginRoutes(
         if (submitted === null) return context.json({ fields: published });
 
         /*
+         * AN APP WITH NO BOXES CANNOT BE CONNECTED BY SOMEBODY TYPING, WHICH IS THE ONLY WAY THIS
+         * BRANCH CONNECTS ANYBODY.
+         *
+         * {@link isFieldScheme} admits exactly the schemes whose secret a PERSON holds, so an
+         * empty published list is not a short form — it is a form with nowhere to put the one
+         * thing the scheme is for. Every check below passes such a submission for want of anything
+         * to check, and what it makes is an account Composio marks `ACTIVE` because Composio does
+         * not grade what it is handed. An app with no probeable action then has that row written
+         * and drawn as connected on every screen here.
+         *
+         * ON THE SUBMISSION AND NOT ON THE PRESS ABOVE IT. The empty list is a true answer to
+         * "what does this app ask for" — {@link ComposioBroker.connectionFields} says so, and
+         * distinguishes it there from the scheme the app no longer publishes at all, which refuses.
+         * What is false is the account the next press would make, so that is the press that is
+         * refused.
+         *
+         * THE REMEDY IS AN ADMINISTRATOR'S, because nothing the person pressing Connect can do
+         * changes what the app publishes or which scheme this deployment recorded for it.
+         */
+        if (published.length === 0) {
+          return context.json(
+            {
+              error: `${row.title} publishes no boxes to fill in, so there is nothing you could type that would reach it and no account was made. An administrator has to look at how ${row.title} is set up at Composio; removing it on the Plugins page and adding it again is what records the way Composio connects it now.`,
+            },
+            400,
+          );
+        }
+
+        /*
          * WHAT THE APP PUBLISHED, AND A NAME IT DID NOT IS REFUSED RATHER THAN QUIETLY DROPPED.
          *
          * ONE GUARD, THREE HOLES. What is submitted is spread into the field object the adapter
@@ -968,6 +997,52 @@ export function createPluginRoutes(
             );
           }
           values[name] = value;
+        }
+
+        /*
+         * AND WHAT THE APP SAID IT CANNOT DO WITHOUT HAS TO BE THERE, WHICH THE LOOP ABOVE NEVER
+         * ASKED. That loop checks every name that ARRIVED; `required` is a fact about a name that
+         * did not. A body of `{"values":{}}` passes it vacuously — no name is unpublished, no value
+         * is not text — and what that connects is an account carrying no credential at all, which
+         * Composio accepts because it does not grade what it is handed and which an app with
+         * nothing safe to probe leaves recorded and drawn as connected.
+         *
+         * `required` HAD ONE READER AND IT WAS THE BROWSER. It rode the field out to the form and
+         * became an HTML attribute, which is a courtesy to somebody filling boxes in and no kind of
+         * guard: this route is reachable without that form, and the form itself accepts a space.
+         *
+         * BLANK IS ABSENT, AND WHITESPACE IS BLANK. The person's claim is that they filled the box
+         * in, and a box holding spaces is one they did not — no vendor reads a key made of
+         * whitespace, so admitting it buys exactly the account this guard exists to refuse, with a
+         * value in it that makes the state harder to read rather than easier. The JUDGEMENT is made
+         * on the trimmed text; what travels is what was typed, because trimming somebody's
+         * credential on its way out is editing it, and a key that really does carry padding is the
+         * vendor's to reject in its own words.
+         *
+         * OPTIONAL BOXES ARE UNTOUCHED BY THIS, and the distinction is the whole of why it reads
+         * `required` rather than counting values. The form seeds each box from the default the app
+         * published and posts every published name back whether or not anybody touched it, so a
+         * blank optional value is what an ordinary submission carries.
+         *
+         * THE SENTENCE NAMES THE FIELDS AND NOTHING ELSE. These names are the VENDOR's, read off
+         * the list this deployment just fetched rather than off the request — which is what sets
+         * them apart from the refusal above, where the offending name is the caller's own text —
+         * and no value of any kind appears here, for the reason the whole of this branch is built
+         * around: a submitted value is somebody's own credential and belongs in no message, no log
+         * and no row.
+         */
+        const missing = published
+          .filter(
+            (field) => field.required && !(values[field.name] ?? "").trim(),
+          )
+          .map((field) => field.name);
+        if (missing.length > 0) {
+          return context.json(
+            {
+              error: `${row.title} cannot be connected without ${missing.join(", ")}, so nothing was sent to Composio. Fill in every box the form marks required — a box holding only spaces is an empty one — and press Connect again.`,
+            },
+            400,
+          );
         }
 
         try {
