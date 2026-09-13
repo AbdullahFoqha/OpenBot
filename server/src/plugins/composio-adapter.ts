@@ -174,8 +174,9 @@ type VendorToolkit = {
  * `unknown` FOR THE REASON EVERY OTHER VENDOR TYPE IN THIS FILE SAYS SO. What hangs off
  * `auth_config_details` is a list of modes, each carrying the fields its scheme wants, and every
  * one of those is copied across verbatim — so the declaration would be an assertion about the wire
- * rather than a fact about it. {@link ComposioBroker.connectionFields} reads it a step at a time
- * and shows a person only what it could actually read.
+ * rather than a fact about it. {@link ComposioBroker.connectionFields} reads it a step at a time,
+ * and refuses at whichever step it stops being able to read rather than showing the shorter form
+ * that is left.
  */
 type VendorToolkitDetail = {
   auth_config_details?: unknown;
@@ -683,11 +684,67 @@ const FIELD_SCHEME_ORDER: Record<FieldScheme, number> = {
   BASIC_WITH_JWT: 3,
 };
 
-/** The strings out of an `unknown`, which is all a vendor list promises. */
-function labelsOf(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string")
-    : [];
+/**
+ * The words out of an `unknown`, which is all a vendor list promises — and a refusal for the rest.
+ *
+ * ABSENT IS AN ANSWER AND UNREADABLE IS NOT, WHICH IS THE WHOLE OF THE CORRECTION. Composio
+ * genuinely lists toolkits with no scheme beside them at all, and {@link connectionOf} reads that
+ * as an app nothing here can connect — a true thing to say about a real row. This used to answer
+ * the same empty list for an `auth_schemes` that arrived as a string, and for a list one of whose
+ * members was not a word: the unreadable answer and the honest absence became the same sentence,
+ * and an unsupported app is HIDDEN from the picker, so the one nobody could act on was also the one
+ * nobody could see. On the managed list it is louder still — an app whose consent screen would have
+ * asked a person for nothing drops a rank and starts asking them to go and find a key.
+ *
+ * A MEMBER IS GUARDED AS HARD AS THE LIST, because dropping the ones that are not words leaves a
+ * shorter list that reads exactly like a shorter list the app published, and the decision below is
+ * made on which words are in it.
+ *
+ * `where` IS THE NOUN PHRASE THE SENTENCE IS BUILT AROUND, so the two call sites differ in the one
+ * thing that differs between them: which of an app's two scheme lists could not be read.
+ */
+function labelsOf(value: unknown, where: string): string[] {
+  const listed = value ?? [];
+  if (!Array.isArray(listed)) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(value)} where ${where} belong. This deployment reads that list to decide which flow the app gets, and an app that publishes no scheme at all is ordinary and shows as one nothing here can connect — so a list that is not a list would show as that same app, missing from the picker for a reason nobody could act on. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+  return listed.map((entry: unknown, index: number) => {
+    if (typeof entry !== "string") {
+      throw new BrokerRefusalError(
+        `Composio sent ${sent(entry)} where scheme ${index + 1} of ${where} belongs, and a scheme is the word this deployment matches against the flows it knows how to run. Leaving out the ones that are not words makes a shorter list, which reads exactly like a shorter list the app published. ${VENDOR_SHAPE_REMEDY}`,
+      );
+    }
+    return entry;
+  });
+}
+
+/**
+ * One step of the connection form's read that Composio answered with a shape nothing here can open.
+ *
+ * WHY THIS IS A REFUSAL AND NOT AN EMPTY FORM is the argument {@link labelsOf} makes about an app's
+ * scheme lists, arriving where it costs the most. {@link ComposioBroker.connectionFields}
+ * reads the boxes an app asks for a step at a time off `unknown` — the modes, the recorded one's
+ * `fields`, the initiation block inside that, and the two lists of rows inside that — and every
+ * step of it answered an empty list for a shape it could not make sense of. An empty list is a
+ * sentence some modes truthfully say. A step that arrived as something else says only that Composio
+ * moved the shape, and the two reached the browser as the same empty form: a person presses submit
+ * on it, {@link ComposioBroker.connectWithFields} creates a connection carrying no credential at
+ * all, Composio answers `ACTIVE` because it does not grade what it is given, and the first call
+ * made with the account is what discovers anything is wrong.
+ *
+ * NOT THE SENTENCE FOR A MODE THE APP HAS STOPPED PUBLISHING, which is the other half of the same
+ * confusion. That one is a real drift between the recorded scheme and the vendor, and its remedy is
+ * an administrator's: remove the app and add it again so the scheme is recorded afresh. Nothing an
+ * administrator can do fixes a shape Composio changed, and handing them that remedy sends them to
+ * re-add an app whose publication never moved — after which the re-add reads the same unreadable
+ * answer and records the same word.
+ */
+function unreadableForm(was: unknown, where: string): BrokerRefusalError {
+  return new BrokerRefusalError(
+    `Composio sent ${sent(was)} where ${where} belongs, and this deployment reads that answer to draw the boxes a person types their credential into. An app that asks for nothing and an answer this deployment cannot read would be the same empty form, and submitting an empty form makes a connection carrying no credential at all that Composio accepts and the first tool call discovers — so no form was drawn. ${VENDOR_SHAPE_REMEDY}`,
+  );
 }
 
 /**
@@ -706,8 +763,21 @@ function labelsOf(value: unknown): string[] {
 export function connectionOf(row: VendorToolkit): BrokerConnection {
   if (row.no_auth === true) return { kind: "no-auth" };
 
-  const offered = labelsOf(row.auth_schemes);
-  const managed = labelsOf(row.composio_managed_auth_schemes);
+  /*
+   * THE APP IS NAMED OFF THE ROW RATHER THAN HANDED IN, because a refusal out of {@link labelsOf}
+   * travels up through {@link appOf} and onto an operator's page, where "this app" is a sentence
+   * with nothing to look for in it. {@link appOf} refuses a row with no readable slug before it
+   * reaches here, so the fallback is for the one caller that is a test.
+   */
+  const at = textOf(row.slug) ?? "this app";
+  const offered = labelsOf(
+    row.auth_schemes,
+    `the authentication schemes ${at} offers`,
+  );
+  const managed = labelsOf(
+    row.composio_managed_auth_schemes,
+    `the authentication schemes Composio holds ${at}'s own credentials for`,
+  );
   if (managed.length > 0) return { kind: "consent" };
   if (offered.includes("DCR_OAUTH")) return { kind: "self-registering" };
 
@@ -3390,21 +3460,30 @@ export function buildComposioClient(
      *
      * READ A STEP AT A TIME OFF `unknown`, for the reason every other vendor read here is: the
      * detail's `auth_config_details` is copied across verbatim, so a mode that is not a list and a
-     * field row that is not an object are both shapes the wire can send. Those answer an empty form
-     * rather than a crash — an app whose scheme publishes nothing to fill in is an app with nothing
-     * to ask, which is a true thing to say and the one thing a `[]` here means.
+     * field row that is not an object are both shapes the wire can send.
      *
-     * AND A SCHEME THIS APP NO LONGER PUBLISHES IS THE ONE OF THOSE THAT IS NOT AN EMPTY FORM,
-     * WHICH IS THE CORRECTION. The scheme is the RECORDED one and is never re-derived — that is the
-     * whole point of the column, and {@link ComposioBroker.connectionFields} says so — so "Composio
-     * does not publish this mode for this app" is exactly the drift between the row and the vendor
-     * that recording it anticipates, and it used to surface as a form with no boxes in it. A person
-     * presses submit on that form, {@link ComposioBroker.connectWithFields} creates a connection
+     * AND EVERY ONE OF THOSE STEPS REFUSES RATHER THAN ANSWERING `[]`, WHICH IS WHAT
+     * {@link unreadableForm} IS FOR AND WHY IT IS ONE SENTENCE FOR ALL OF THEM. `[]` here says one
+     * thing and one thing only: this app's scheme publishes nothing to fill in, which is a true
+     * thing about a real app. Every step of this read used to answer it for a shape it could not
+     * make sense of as well — a `fields` that is not an object, an initiation block that arrived as
+     * the rows that used to sit inside it, a `required` that stopped being a list — so an app that
+     * asks for nothing and an answer nothing here can open were the same empty form in the browser,
+     * and the argument two paragraphs down for why that form must never be drawn applied to both.
+     *
+     * AND A SCHEME THIS APP NO LONGER PUBLISHES IS A THIRD ANSWER AGAIN, WITH A REMEDY OF ITS OWN.
+     * The scheme is the RECORDED one and is never re-derived — that is the whole point of the
+     * column, and the store's own column comment says so — so "Composio does not publish this mode
+     * for this app" is exactly the drift between the row and the vendor that recording it
+     * anticipates, and it used to surface as a form with no boxes in it. A person presses submit
+     * on that form, {@link ComposioBroker.connectWithFields} creates a connection
      * carrying no credential at all, Composio answers `ACTIVE` because it does not grade what it is
      * given, and the first call made with the account is what discovers anything is wrong. An empty
      * form is also, from the person's end, a box they cannot fill in. So the two states are told
-     * apart here: no such mode refuses and names the recorded one, and a mode that exists and
-     * publishes nothing visible still answers `[]`.
+     * apart here: no such mode refuses and names the recorded one — an administrator's remedy,
+     * because the recorded scheme is only theirs to rewrite — while a mode that exists and
+     * publishes nothing visible still answers `[]`, and a mode whose published shape cannot be read
+     * refuses with the upgrade that is the only thing which fixes a vendor changing shape.
      *
      * REQUIRED AND OPTIONAL IN THAT ORDER, because the order is what a person reads down. The
      * vendor publishes them as two lists and the required ones are the ones that stop the form; a
@@ -3420,10 +3499,37 @@ export function buildComposioClient(
         () => vendor.toolkits.retrieve(toolkit),
       );
 
-      const modes = Array.isArray(detail?.auth_config_details)
-        ? detail.auth_config_details
-        : [];
-      const mode = modes.find(
+      /*
+       * THE ANSWER IS AN OBJECT BEFORE ANYTHING IS READ OFF IT, and the guard is not ceremony.
+       * `("perplexityai").auth_config_details` is `undefined` rather than a throw, so a retrieve
+       * that answered a bare string reached the refusal below wearing the sentence about a mode the
+       * app has stopped publishing — about an answer that had no app in it at all.
+       */
+      if (
+        typeof detail !== "object" ||
+        detail === null ||
+        Array.isArray(detail)
+      ) {
+        throw unreadableForm(
+          detail,
+          `Composio's own description of ${toolkit}`,
+        );
+      }
+
+      /*
+       * AND THE LIST OF MODES IS THE SAME TWO ANSWERS ONE FIELD IN. An `auth_config_details` that
+       * is not a list became no modes at all, and no modes means the recorded one is not among
+       * them — so an answer this deployment could not read arrived as the drift the refusal below
+       * is written about, with a remedy that cannot work on it.
+       */
+      const listed = detail.auth_config_details ?? [];
+      if (!Array.isArray(listed)) {
+        throw unreadableForm(
+          detail.auth_config_details,
+          `the connection modes ${toolkit} publishes`,
+        );
+      }
+      const mode = listed.find(
         (candidate: { mode?: unknown }) => candidate?.mode === authScheme,
       );
       /*
@@ -3439,10 +3545,59 @@ export function buildComposioClient(
           `Composio no longer publishes a ${authScheme} connection for ${toolkit}, and ${toolkit}'s authorization config here was created as ${authScheme}, so there is nothing to ask this person for — and an empty form is a box they cannot fill in and a connection carrying no credential at all. An administrator removing the app on its Plugins page and adding it again is what records the scheme Composio publishes for it now.`,
         );
       }
-      const published = mode.fields?.connected_account_initiation;
+      /*
+       * EVERY REMAINING STEP TELLS AN ABSENCE FROM AN ANSWER IT CANNOT READ, which is the whole of
+       * what {@link unreadableForm} is for. A mode that publishes no `fields`, no initiation block
+       * or an empty list of rows is saying it asks a person for nothing, and `[]` is the true
+       * reading of that. A `fields` that is not an object, an initiation block that arrived as the
+       * list of rows that used to sit inside it, and a `required` that stopped being a list are
+       * three different vendor changes, none of which is that sentence, and all three used to be
+       * written down as it.
+       */
+      const asked = mode.fields ?? {};
+      if (typeof asked !== "object" || asked === null || Array.isArray(asked)) {
+        throw unreadableForm(
+          mode.fields,
+          `the fields ${toolkit}'s ${authScheme} connection publishes`,
+        );
+      }
+      const initiation =
+        (asked as { connected_account_initiation?: unknown })
+          .connected_account_initiation ?? {};
+      if (
+        typeof initiation !== "object" ||
+        initiation === null ||
+        Array.isArray(initiation)
+      ) {
+        throw unreadableForm(
+          (asked as { connected_account_initiation?: unknown })
+            .connected_account_initiation,
+          `what ${toolkit} asks for when a connection to it is made`,
+        );
+      }
+
+      /*
+       * THE REQUIRED LIST AND THE OPTIONAL ONE ARE ASKED SEPARATELY, because they are separately
+       * published and a guard on one says nothing about the other — and the required one is the one
+       * that stops a form, so a required list read as empty is a form a person can submit blank.
+       */
+      const published = initiation as {
+        required?: unknown;
+        optional?: unknown;
+      };
+      const rowsOf = (value: unknown, which: "required" | "optional") => {
+        const asRows = value ?? [];
+        if (!Array.isArray(asRows)) {
+          throw unreadableForm(
+            value,
+            `the ${which} fields ${toolkit} asks a person to fill in`,
+          );
+        }
+        return asRows;
+      };
       const rows = [
-        ...(Array.isArray(published?.required) ? published.required : []),
-        ...(Array.isArray(published?.optional) ? published.optional : []),
+        ...rowsOf(published.required, "required"),
+        ...rowsOf(published.optional, "optional"),
       ];
 
       return rows

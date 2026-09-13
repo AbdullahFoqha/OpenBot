@@ -5303,6 +5303,114 @@ describe("the fields an app asks a person to fill in", () => {
   });
 
   /**
+   * AND "I COULD NOT READ WHAT IT ASKS FOR" IS A THIRD ANSWER, WHICH WAS THE SAME `[]` AS THE
+   * SECOND.
+   *
+   * The recorded mode is found here, so the refusal above never fires. What hangs off that mode is
+   * then read a step at a time off `unknown` — the mode's `fields`, the initiation block inside it,
+   * and the two lists of rows inside that — and every one of those steps answered an empty list for
+   * a shape it could not make sense of. An empty list is a sentence: this mode asks a person for
+   * nothing, which is a true thing some modes say. A `fields` that is not an object is a different
+   * sentence entirely — Composio moved the shape and the boxes are no longer visible from here —
+   * and the two arrived at the browser as the same empty form. That form is the one this method's
+   * own doc says must never be drawn: the person presses submit, `connectWithFields` creates a
+   * connection carrying no credential at all, Composio answers `ACTIVE` because it does not grade
+   * what it is given, and the first call made with the account is what discovers anything is wrong.
+   *
+   * EVERY STEP IS ITS OWN CASE BECAUSE EVERY STEP IS ITS OWN DRIFT, and a guard on one of them says
+   * nothing whatever about the three beside it.
+   */
+  test("a published shape this deployment cannot read is refused rather than drawn as an empty form", async () => {
+    const unreadable = [
+      // The mode's fields, which stopped being an object at all.
+      { mode: "API_KEY", fields: "generic_api_key" },
+      // The initiation block, which arrived as the list of rows that used to live inside it.
+      {
+        mode: "API_KEY",
+        fields: { connected_account_initiation: ["generic_api_key"] },
+      },
+      // And each list of rows on its own, because the required one is the one that stops a form.
+      {
+        mode: "API_KEY",
+        fields: {
+          connected_account_initiation: {
+            required: "generic_api_key",
+            optional: [],
+          },
+        },
+      },
+      {
+        mode: "API_KEY",
+        fields: {
+          connected_account_initiation: { required: [], optional: "base_url" },
+        },
+      },
+    ];
+
+    for (const mode of unreadable) {
+      const { broker } = buildComposioClient(
+        fakeVendor({
+          toolkits: {
+            retrieve: async () => ({ auth_config_details: [mode] }),
+          },
+        }),
+      );
+
+      const refusal = await failureOf(
+        broker.connectionFields({
+          toolkit: "perplexityai",
+          authScheme: "API_KEY",
+        }),
+      );
+
+      expect(refusal).toBeInstanceOf(BrokerRefusalError);
+      expect(refusal.message).not.toMatch(A_CRASH);
+      expect(refusal.message).toMatch(/perplexityai/);
+      /*
+       * THE REMEDY IS THE WHOLE OF WHAT SEPARATES THIS FROM THE CASE ABOVE. A shape Composio
+       * changed is nobody's setting, so what fixes it is an upgrade; a mode the app stopped
+       * publishing is fixed by an administrator recording the scheme afresh on the Plugins page.
+       * Handing the second sentence to somebody holding the first sends them to remove and re-add
+       * an app whose publication never moved, after which the re-add reads the same unreadable
+       * answer and records the same word.
+       */
+      expect(refusal.message).toMatch(/@composio\/core/);
+      expect(refusal.message).not.toMatch(/Plugins page/);
+    }
+  });
+
+  /**
+   * AND THE SAME DISTINCTION ONE LAYER OUT, WHERE THE WRONG ANSWER WAS A REFUSAL RATHER THAN A FORM.
+   *
+   * An `auth_config_details` that is not a list became no modes at all, and no modes means the
+   * recorded one is not among them — so an unreadable answer reached an administrator wearing the
+   * sentence about a mode this app has stopped publishing. So did a retrieve that answered
+   * something which is not a toolkit: `("perplexityai").auth_config_details` is `undefined` rather
+   * than a throw. Both sent somebody to the Plugins page to remove and re-add an app that publishes
+   * exactly what it always did.
+   */
+  test("an answer whose modes this deployment cannot read is refused as that rather than as a mode the app dropped", async () => {
+    for (const answered of [
+      "perplexityai",
+      { auth_config_details: "API_KEY" },
+    ]) {
+      const { broker } = buildComposioClient(
+        fakeVendor({ toolkits: { retrieve: async () => answered } }),
+      );
+
+      const refusal = await failureOf(
+        broker.connectionFields({ toolkit: "linear", authScheme: "API_KEY" }),
+      );
+
+      expect(refusal).toBeInstanceOf(BrokerRefusalError);
+      expect(refusal.message).not.toMatch(A_CRASH);
+      expect(refusal.message).toMatch(/linear/);
+      expect(refusal.message).toMatch(/@composio\/core/);
+      expect(refusal.message).not.toMatch(/Plugins page/);
+    }
+  });
+
+  /**
    * AND THE NAME IS THE ONE FIELD THAT TRAVELS, WHICH IS WHY IT IS GUARDED LIKE THE TYPE.
    *
    * `label`, `help` and `default` all pass through `textOf` and are read by a person. The name is

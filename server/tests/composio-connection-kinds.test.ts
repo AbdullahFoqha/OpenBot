@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { BrokerRefusalError } from "../src/plugins/broker";
 import { connectionOf } from "../src/plugins/composio-adapter";
 
 /**
@@ -103,4 +104,37 @@ test("an app wanting this deployment's own OAuth client is unsupported, and says
 
 test("an app publishing nothing readable is unsupported rather than guessed at", () => {
   expect(connectionOf({ slug: "mystery" }).kind).toBe("unsupported");
+});
+
+/**
+ * "PUBLISHES NOTHING" AND "PUBLISHES SOMETHING THIS DEPLOYMENT CANNOT READ" ARE TWO ANSWERS.
+ *
+ * The case above is the first of them and is real: Composio genuinely lists toolkits with no
+ * scheme beside them, and unsupported is the honest reading of one. The second wore the first's
+ * sentence. A scheme list that is not a list, or a member of one that is not a word, was filtered
+ * down to nothing and reported to an administrator as an app Composio published no authentication
+ * scheme for — and an unsupported app is HIDDEN from the picker, so the answer nobody could act on
+ * was also the answer nobody could see. A managed list that stopped being readable is worse than
+ * quiet: the app keeps its place in the picker and drops a rank, so an app whose consent screen
+ * asks a person for nothing starts asking them to go and find a key instead.
+ */
+test("a scheme list this deployment cannot read is refused rather than read as an app publishing none", () => {
+  const unreadable = [
+    // The schemes the app offers, which stopped being a list.
+    { slug: "mystery", auth_schemes: "API_KEY" },
+    // One member of it, which stopped being the word it is matched against.
+    { slug: "mystery", auth_schemes: [{ name: "API_KEY" }] },
+    // And the managed list, which decides the one flow that asks a person for nothing.
+    {
+      slug: "mystery",
+      auth_schemes: ["OAUTH2"],
+      composio_managed_auth_schemes: "OAUTH2",
+    },
+  ];
+
+  for (const row of unreadable) {
+    expect(() => connectionOf(row)).toThrow(BrokerRefusalError);
+    // Nobody's setting is wrong here, so the remedy named is the upgrade rather than a dashboard.
+    expect(() => connectionOf(row)).toThrow(/@composio\/core/);
+  }
 });
