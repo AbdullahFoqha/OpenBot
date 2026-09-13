@@ -80,6 +80,34 @@ const leaverId = `user_leaver_${suite}`;
  */
 const renamedId = `renamed-${suite}`;
 /**
+ * A SECOND ROW AT {@link toolkit}'S OWN URL, which the schema permits and nothing in it prevents.
+ *
+ * `mcp_servers.url` carries no unique index — the only one in that schema file is `skills_slug_key`
+ * on `skills.slug` — so two rows may perfectly well name one app, and a development database
+ * reaches that state by the most ordinary route there is: a fixture row at `gmail` standing beside
+ * the `composio-gmail` an administrator really added. Every read that resolves a connection to a
+ * server row THROUGH THE URL therefore has to say which of them it means.
+ *
+ * NAMED TO SORT BEFORE {@link toolkit} AND INSERTED AFTER IT, which is the whole of why the
+ * assertion is worth making. `duplicate-` precedes `revocable-`, so the row the rule picks is not
+ * the row an unordered scan meets first, and a listing that answered out of the scan would answer
+ * something else.
+ */
+const twinId = `duplicate-${suite}`;
+/**
+ * THE SAME SHAPE ON THE PROBED APP, recorded under a scheme that app is not connected with.
+ *
+ * The three reads that decide whether an app is one this deployment holds a key for are keyed on
+ * the url too, and they answer out of ONE row's `auth_scheme` — so two rows at one url is two
+ * possible answers to "may this be re-checked", and the wrong one refuses a live key connection in
+ * words about a sign-in screen nobody used.
+ *
+ * NAMED TO SORT AFTER {@link probedId} AND INSERTED BEFORE IT, the opposite way round from
+ * {@link twinId} and for the same reason: `zz-` follows `composio-`, so the row the rule picks is
+ * again not the one physically first, and the pre-fix reading and the post-fix one differ.
+ */
+const schemeTwinId = `zz-twin-${suite}`;
+/**
  * A SECOND app the same person connected, which is what makes an offboarding's answer per-app.
  *
  * Spelled as an extension of {@link toolkit} rather than as an independent name, so that `toolkit`
@@ -557,6 +585,8 @@ async function clean() {
         probedId,
         renamedProbedId,
         decoyId,
+        twinId,
+        schemeTwinId,
       ]),
     );
   await database
@@ -571,6 +601,8 @@ async function clean() {
         probedId,
         renamedProbedId,
         decoyId,
+        twinId,
+        schemeTwinId,
       ]),
     );
   await database
@@ -2242,6 +2274,76 @@ test("a confirm does not redate a key the last check verified", async () => {
 
   // One probe, spent by the connect, and nothing since.
   expect(reached).toEqual([probeAction]);
+ * ONE CONNECTION IS ONE LISTED ROW, EVEN WHERE TWO SERVER ROWS NAME THE APP.
+ *
+ * CRITERION. With two `mcp_servers` rows at one app's url and one person connected to that app,
+ * the listing answers exactly once, under the lower of the two ids — and under it whichever order
+ * the rows were written in.
+ *
+ * REASON. The listing resolves a connection to a server row by matching `mcp_servers.url` against
+ * `composio://` and the toolkit, and `url` has no unique index behind it. So the match is one row
+ * per PAIR rather than one per connection, and a second row at the same url puts the same account
+ * on the settings page twice: two rows saying the same app, with two different server ids on them,
+ * both offering to disconnect the single connection that stands behind both. That is not a state
+ * somebody has to arrange, either — it is what a development database looks like the moment a
+ * fixture sits beside a real brokered row for the same app.
+ *
+ * AND THE ID DECIDES, SO THAT TWO READS AGREE. Something has to answer for the app, and the choice
+ * has to be a rule rather than whatever the scan met first: a page that redrew with a different
+ * `serverId` each load would offer buttons keyed on a value that moved underneath it. The lower id
+ * is that rule, and the fixtures here are named and ordered to tell it from an accident — see
+ * {@link twinId}.
+ */
+test("a connection is listed once where two server rows name its app", async () => {
+  await seedApp();
+  await database.insert(mcpServers).values({
+    id: twinId,
+    title: "Revocable App, added a second time",
+    vendor: "Composio",
+    url: `composio://${toolkit}`,
+    provenance: "composio",
+  });
+
+  const listed = await store.brokeredConnectionsFor(askerId);
+  expect(listed.map((row) => row.serverId)).toEqual([twinId]);
+});
+
+/**
+ * AND THE SAME ROW ANSWERS WHAT THE APP IS CONNECTED WITH.
+ *
+ * CRITERION. With two `mcp_servers` rows at the probed app's url — the one Add wrote, recorded
+ * `API_KEY`, and an older one recorded `OAUTH2` — a re-check reads the key scheme and runs.
+ *
+ * REASON. `recheckBrokeredConnection`, `connectBrokeredWithFields` and `disconnectBrokered` all
+ * find the app by its url and then read `auth_scheme` off the single row they took, and none of
+ * them said which row that was. Two rows at one url therefore left the answer to the planner: this
+ * person holds a key at the vendor, and the reading that lands on the other row refuses the button
+ * in a sentence about a sign-in screen they never saw, telling them to disconnect and reconnect an
+ * account that is working. The same lower-id rule the listing uses is what makes the three of them
+ * agree with it and with each other.
+ */
+test("a re-check reads the app's scheme off the same row the listing names it by", async () => {
+  useAnsweringClient();
+  // Before the app's own row, and named to sort after it. See {@link schemeTwinId}: the pre-fix
+  // reading is the row physically first, and the rule's is the row that sorts first.
+  await database.insert(mcpServers).values({
+    id: schemeTwinId,
+    title: "Probed App, as it was recorded before",
+    vendor: "Composio",
+    url: `composio://${probedToolkit}`,
+    provenance: "composio",
+    authScheme: "OAUTH2",
+  });
+  await addProbedApp();
+  await holdProbedApp();
+
+  const answer = await store.recheckBrokeredConnection({
+    toolkit: probedToolkit,
+    userId: askerId,
+  });
+
+  expect(answer.verified).toBe(true);
+  expect(answer.probe).toBe(probeAction);
 });
 
 /**

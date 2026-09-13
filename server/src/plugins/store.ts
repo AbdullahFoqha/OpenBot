@@ -2216,6 +2216,39 @@ export function createPluginStore(options: PluginStoreOptions) {
     return { row, entry, access: accessFor(row, entry) };
   }
 
+  /**
+   * The scheme recorded for the app one url names, out of the one row that answers for that app.
+   *
+   * KEYED ON THE URL, which is where a brokered row records which app it is; `mcp_servers.id` is a
+   * display name and nothing holds the two equal. A row called `gmail` at `composio://slack` would
+   * have somebody's Slack key attached to a scheme read off Gmail's row, which is the stake all
+   * three callers share — {@link connectBrokeredWithFields}, {@link recheckBrokeredConnection} and
+   * {@link disconnectBrokered}.
+   *
+   * AND ORDERED, BECAUSE THE URL IS NOT A KEY. `mcp_servers.url` has no unique index behind it, so
+   * two rows may name one app and `limit(1)` over them is the planner's choice rather than an
+   * answer. Each of the three used to take it unordered and separately: the same person, the same
+   * app, and three readings free to disagree with each other and with themselves between two page
+   * loads. What that costs is a live key connection refused in words about a sign-in screen nobody
+   * used — "connect it the way it asks for", over an app connected exactly the way it asked.
+   *
+   * The lower id answers, which is the rule {@link brokeredConnectionsFor} names the app by, so the
+   * row the page shows an app under is the row these three read its scheme off.
+   *
+   * NULL FOR AN APP WITH NO ROW AT ALL, and that is an answer rather than a gap: a person can hold
+   * an account at an app this deployment has since removed, nothing names the scheme it was
+   * connected under any more, and every caller treats the null as "not an app we hold a key for".
+   */
+  async function brokeredAppScheme(toolkit: string): Promise<string | null> {
+    const [app] = await database
+      .select({ authScheme: mcpServers.authScheme })
+      .from(mcpServers)
+      .where(eq(mcpServers.url, `composio://${toolkit}`))
+      .orderBy(asc(mcpServers.id))
+      .limit(1);
+    return app?.authScheme ?? null;
+  }
+
   return {
     /**
      * Add a server from the catalogue.
@@ -4109,7 +4142,8 @@ export function createPluginStore(options: PluginStoreOptions) {
      * moment one is asked to answer both questions the two failures simply trade places.
      *
      * WHICH COSTS ONE QUERY PER CONNECTED APP, AND THAT IS THE RIGHT PRICE. Making `probe` a stored
-     * column took the per-row call out and left a listing that was one query; this puts it back.
+     * column took the per-row call out and left a listing that was one query; this puts it back —
+     * on top of the two the rows themselves now take, which the body below says why.
      * The alternative is to fold the chooser's rule into the join — vendor-labelled read, not
      * destructive, no required inputs, a recorded version — and that rule has no honest spelling in
      * SQL: `required` is the vendor's own JSON Schema stored unchanged, and deciding whether it is
@@ -4141,21 +4175,81 @@ export function createPluginStore(options: PluginStoreOptions) {
         checkable: boolean;
       }[]
     > {
-      const rows = await database
+      const connections = await database
         .select({
-          serverId: mcpServers.id,
+          toolkit: composioConnections.toolkit,
           connectedAt: composioConnections.connectedAt,
           verified: composioConnections.verified,
           verifiedAt: composioConnections.verifiedAt,
           probeAction: composioConnections.probeAction,
         })
         .from(composioConnections)
-        .innerJoin(
-          mcpServers,
-          sql`${mcpServers.url} = 'composio://' || ${composioConnections.toolkit}`,
-        )
-        .where(eq(composioConnections.userId, userId))
-        .orderBy(asc(mcpServers.id));
+        .where(eq(composioConnections.userId, userId));
+
+      /*
+       * THE APP IS RESOLVED PER CONNECTION, NOT JOINED TO IT, BECAUSE THE URL IS NOT A KEY.
+       *
+       * CRITERION. One connection is one row out of here, whatever `mcp_servers` holds.
+       *
+       * REASON. This read used to be an inner join on `mcp_servers.url = 'composio://' || toolkit`,
+       * and nothing in the schema makes that column unique — the one `uniqueIndex` in
+       * `db/schema/plugins.ts` is `skills_slug_key` on `skills.slug`. A join answers one row per
+       * PAIR, so a second row at an app's url listed the same account twice: two rows on the
+       * settings page saying the same app under two different server ids, each offering to
+       * disconnect the single connection standing behind both. And it is not an exotic state — it
+       * is what any database looks like the moment a row at `gmail` sits beside the
+       * `composio-gmail` an administrator really added, which is how a development database
+       * routinely looks.
+       *
+       * A UNIQUE INDEX WOULD BE THE OTHER FIX AND IS THE WRONG ONE. Two rows at one address is a
+       * state this product means to allow — a deployment holding two accounts at one vendor adds
+       * the same URL twice under two ids with two credentials, and `addCustomServer` refuses only a
+       * re-add that MOVES an existing id's address. Constraining the column would forbid that for
+       * everybody to tidy a display defect, and the migration that added it would fail outright on
+       * any deployment already holding a duplicate, taking the whole boot with it.
+       *
+       * SO THE LOWER ID ANSWERS FOR THE APP, and it is a rule rather than whatever the scan met
+       * first: a page that redrew under a different `serverId` each load would be offering buttons
+       * keyed on a value moving underneath it. The same rule decides the scheme reads — see
+       * {@link brokeredAppScheme} — so nothing in this file can name one row for an app while
+       * something else names another.
+       *
+       * A CONNECTION WITH NO ROW AT ITS URL IS STILL LISTED BY NOTHING, which is what the inner
+       * join answered and what the empty `serverId` below drops. A person can hold an account at an
+       * app this deployment has since removed, and the settings page has no row to draw for it.
+       */
+      const named = new Map<string, string>();
+      if (connections.length > 0) {
+        const servers = await database
+          .select({ id: mcpServers.id, url: mcpServers.url })
+          .from(mcpServers)
+          .where(
+            inArray(
+              mcpServers.url,
+              connections.map((row) => `composio://${row.toolkit}`),
+            ),
+          );
+        for (const server of servers) {
+          const held = named.get(server.url);
+          if (held === undefined || server.id < held) {
+            named.set(server.url, server.id);
+          }
+        }
+      }
+
+      const rows = connections
+        .flatMap((row) => {
+          const serverId = named.get(`composio://${row.toolkit}`);
+          return serverId === undefined ? [] : [{ ...row, serverId }];
+        })
+        // By server id, as the join's own `order by` was, so this read and `connectionsFor` hand the
+        // route two lists ordered alike. Compared as plain strings rather than through a collation,
+        // for the reason the route gives where it merges them: the order only has to be the same
+        // one every time.
+        .sort((left, right) => {
+          if (left.serverId < right.serverId) return -1;
+          return left.serverId > right.serverId ? 1 : 0;
+        });
 
       return await Promise.all(
         rows.map(async (row) => ({
@@ -4763,18 +4857,11 @@ export function createPluginStore(options: PluginStoreOptions) {
       // connect anybody at, and the refusal must happen before the values are touched at all.
       if (!broker) throw new BrokerUnconfiguredError();
 
-      // Keyed on the url, which is where a brokered row records which app it is; `mcp_servers.id`
-      // is a display name and nothing holds the two equal. It is the same reasoning the connection
-      // gate in `connectionTokenFor` is keyed on, and for the sharper version of the same stake: a
-      // row called `gmail` at `composio://slack` would have somebody's Slack key attached to a
-      // scheme read off Gmail's row.
-      const [app] = await database
-        .select({ authScheme: mcpServers.authScheme })
-        .from(mcpServers)
-        .where(eq(mcpServers.url, `composio://${input.toolkit}`))
-        .limit(1);
-
-      const authScheme = app?.authScheme ?? null;
+      // Keyed on the url and on the one row that answers for it — see `brokeredAppScheme`. It is
+      // the same reasoning the connection gate in `connectionTokenFor` is keyed on, and for the
+      // sharper version of the same stake: a row called `gmail` at `composio://slack` would have
+      // somebody's Slack key attached to a scheme read off Gmail's row.
+      const authScheme = await brokeredAppScheme(input.toolkit);
       if (!isFieldScheme(authScheme)) {
         throw new BrokerRefusalError(
           `${input.toolkit} is not an app this deployment connects with values somebody types, so nothing was sent. Open the app on the Plugins page and connect it the way it asks for; if it is not listed there at all, an administrator has to enable it first.`,
@@ -5070,17 +5157,11 @@ export function createPluginStore(options: PluginStoreOptions) {
     }> {
       if (!broker) throw new BrokerUnconfiguredError();
 
-      // Keyed on the url, which is where a brokered row records which app it is; `mcp_servers.id`
-      // is a display name and nothing holds the two equal. It is the lookup
-      // `connectBrokeredWithFields` and `disconnectBrokered` both make, for the same stake: a row
-      // called `gmail` at `composio://slack` would decide a Slack re-check on Gmail's scheme.
-      const [app] = await database
-        .select({ authScheme: mcpServers.authScheme })
-        .from(mcpServers)
-        .where(eq(mcpServers.url, `composio://${input.toolkit}`))
-        .limit(1);
-
-      if (!isFieldScheme(app?.authScheme ?? null)) {
+      // Keyed on the url and on the one row that answers for it — see `brokeredAppScheme`. It is
+      // the read `connectBrokeredWithFields` and `disconnectBrokered` both make, for the same
+      // stake: a row called `gmail` at `composio://slack` would decide a Slack re-check on Gmail's
+      // scheme.
+      if (!isFieldScheme(await brokeredAppScheme(input.toolkit))) {
         throw new PluginRefusedError(
           `${input.toolkit} is not an app this deployment holds a key for, so there is nothing here to re-check. It was connected at ${input.toolkit}'s own sign-in screen, and if it has stopped working, disconnecting it on the Plugins page and connecting it again is what fixes it.`,
           null,
@@ -5282,11 +5363,10 @@ export function createPluginStore(options: PluginStoreOptions) {
       if (!broker) throw new BrokerUnconfiguredError();
 
       /*
-       * Keyed on the url, which is where a brokered row records which app it is; `mcp_servers.id`
-       * is a display name and nothing holds the two equal. It is the lookup
-       * {@link connectBrokeredWithFields} makes, for the same stake: a row called `gmail` at
-       * `composio://slack` would have this disconnect reading Gmail's scheme to describe what
-       * happened to a Slack account.
+       * Keyed on the url and on the one row that answers for it — see {@link brokeredAppScheme}.
+       * It is the read {@link connectBrokeredWithFields} makes, for the same stake: a row called
+       * `gmail` at `composio://slack` would have this disconnect reading Gmail's scheme to describe
+       * what happened to a Slack account.
        *
        * AN APP WITH NO ROW HERE IS NOT A FIELD APP. A person can hold an account at Composio for
        * an app this deployment has since removed — the row is a cache and the removal takes no
@@ -5294,12 +5374,7 @@ export function createPluginStore(options: PluginStoreOptions) {
        * names the scheme it was connected under any more, so the honest reading is the broker's
        * own answer, which is what an absent row falls through to.
        */
-      const [app] = await database
-        .select({ authScheme: mcpServers.authScheme })
-        .from(mcpServers)
-        .where(eq(mcpServers.url, `composio://${input.toolkit}`))
-        .limit(1);
-      const fieldScheme = isFieldScheme(app?.authScheme ?? null);
+      const fieldScheme = isFieldScheme(await brokeredAppScheme(input.toolkit));
 
       // Whether there was an account to end at all, which is what decides if anybody was
       // disconnected. Named apart from the field below because for a key the two differ: something
