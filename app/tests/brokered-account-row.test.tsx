@@ -851,9 +851,9 @@ test("a connected consent app offers no Re-check at all", () => {
  *
  * The row used to collapse all three into "It was accepted without being checked against Gmail",
  * which is vague for two of them and FALSE for the third: there the key was checked, the vendor
- * refused it, and the account that check ran in could not be withdrawn — so the one person whose
- * key is definitely bad, and whose account is definitely standing at Composio, was told nothing had
- * ever been tried. `probe` is what tells them apart, and these are the three shapes it arrives in.
+ * refused it, and the account that check ran in is still standing — so the one person whose key is
+ * definitely bad, and whose account is definitely live at Composio, was told nothing had ever been
+ * tried. `probe` is what tells them apart, and these are the three shapes it arrives in.
  */
 
 test("an app with nothing to check a key against says that about the app", () => {
@@ -904,11 +904,12 @@ test("a key that passed its check says when it passed", () => {
 
 test("a key the vendor rejected says so, and that the account still stands", () => {
   /*
-   * STATE THREE, AND THE WHOLE REASON `probe` TRAVELS. It is reachable only on the worst path: the
-   * check ran, the vendor refused the key, and the account it had just created could NOT be
-   * withdrawn. All three facts are the person's to act on — the key is bad, an account of theirs is
-   * live at Composio that this deployment could not take back, and the row says which button ends
-   * which.
+   * STATE THREE, AND THE WHOLE REASON `probe` TRAVELS. It is reachable on the worst path from
+   * either producer: the check ran, the vendor refused the key, and the account it ran in is still
+   * standing — a connect whose withdrawal failed, or a re-check that never withdraws one. All three
+   * facts are the person's to act on: the key is bad, an account of theirs is live at Composio, and
+   * the row says which button ends which. WHY it stands is the one thing the sentence must not
+   * assert, because the two paths stand for different reasons.
    */
   const view = renderRow(
     accountState({
@@ -920,9 +921,14 @@ test("a key the vendor rejected says so, and that the account still stands", () 
     }),
   );
 
-  expect(view.getByText(/was checked against Gmail and rejected/)).toBeTruthy();
-  expect(view.getByText(/still stands at Composio/)).toBeTruthy();
-  expect(view.getByText(/could not withdraw it/)).toBeTruthy();
+  expect(
+    view.getByText(
+      /was checked against Gmail and rejected, and the account it was checked in still stands at Composio/,
+    ),
+  ).toBeTruthy();
+  // And never a cause for it: a failed re-check leaves the account standing without trying to take
+  // it back, so a sentence blaming a failed withdrawal would be false on that path.
+  expect(view.queryByText(/could not withdraw it/)).toBeNull();
   /*
    * AND NOT THE OTHER SENTENCE. This is the state that sentence was false in: saying nothing had
    * been checked, to the one person whose key has definitely been checked and definitely refused.
@@ -1054,9 +1060,8 @@ test("a rejected key still says so on a page that has only read, and still offer
    * one `verified: false` survive a refresh.
    *
    * Before it did, this exact page said "accepted without being checked" — to the one person whose
-   * key HAS been checked and refused, and whose account is standing at Composio because this
-   * deployment could not take it back. The button they would reach for was withheld at the same
-   * time, on the only render where they would look for it.
+   * key HAS been checked and refused, and whose account is standing at Composio. The button they
+   * would reach for was withheld at the same time, on the only render where they would look for it.
    */
   installDeployment({
     authScheme: "API_KEY",

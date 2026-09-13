@@ -3917,15 +3917,27 @@ export function createPluginStore(options: PluginStoreOptions) {
      *   no probe, not verified   — the app publishes nothing safe to spend a key on. Nothing was
      *                              tried, and nothing can be. A fact about the app, not the key.
      *   a probe, verified        — it ran in this person's account and the vendor took the key.
-     *   a probe, NOT verified    — it ran and the vendor refused, and the account could not be
-     *                              withdrawn. A live account with a bad key behind it.
+     *   a probe, NOT verified    — it ran and the vendor refused the key, and the account it ran in
+     *                              is still standing. A live account with a bad key behind it.
      *
      * AND THE THIRD LINE IS AN INFERENCE THIS METHOD IS ENTITLED TO MAKE, which is what makes the
-     * derived field honest rather than a guess. A key connection is ALWAYS probed at connect time
-     * ({@link connectBrokeredWithFields}), and a probe that fails withdraws the account it just
-     * made — so the only way to be holding an unverified row for an app that HAS a probe is that
-     * the probe ran, the vendor refused, and the withdrawal did not succeed. The row could not
+     * derived field honest rather than a guess. TWO PATHS PRODUCE IT and both end the same way, in
+     * a refused key over an account that is still there. A key connection is ALWAYS probed at
+     * connect time ({@link connectBrokeredWithFields}), and a probe that fails withdraws the
+     * account it just made — so one way to be holding an unverified row for an app that HAS a probe
+     * is that the probe ran, the vendor refused, and the withdrawal did not succeed.
+     *
+     * THE SECOND IS A RE-CHECK THE VENDOR REFUSED ({@link recheckBrokeredConnection}), which writes
+     * the same unverified row over an account it deliberately never withdraws: that account predates
+     * the press and is the person's own, so taking it away to report a bad key would destroy the
+     * thing they are trying to repair. Nothing else can write this pair — an app with no probe never
+     * reaches it, and a re-check that could try nothing writes nothing at all — so the row could not
      * otherwise exist.
+     *
+     * WHICH OF THE TWO IS NOT RECOVERABLE FROM HERE, and a reader must not invent one. What the pair
+     * warrants is the refusal and the standing account; a page that goes on to blame a failed
+     * withdrawal is right on the connect path and FALSE on the re-check, where nothing ever tried to
+     * remove anything.
      *
      * CHOSEN PER ROW RATHER THAN FOLDED INTO THE QUERY ABOVE, and deliberately: the chooser reads
      * every recorded action for one app and applies a rule — vendor-labelled read, not destructive,

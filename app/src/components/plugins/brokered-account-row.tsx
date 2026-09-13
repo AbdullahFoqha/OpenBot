@@ -112,9 +112,10 @@ export type BrokeredAccount = {
    *   `null`      — the answer said this app publishes nothing safe to spend a key on. Nothing was
    *                 tried and nothing can be, which is a fact about the app and not about the key.
    *   a name, verified — the action ran in this person's account and the vendor took the key.
-   *   a name, NOT verified — it ran, the vendor refused the key, and the account it had just made
-   *                 could not be withdrawn. The row exists, the key is bad, and something of theirs
-   *                 is standing at Composio. This is the worst state the feature has.
+   *   a name, NOT verified — it ran and the vendor refused the key, and the account it ran in is
+   *                 still there: a connect leaves it because its withdrawal failed, a re-check
+   *                 because it never withdraws one. The row exists, the key is bad, and something
+   *                 of theirs is standing at Composio. This is the worst state the feature has.
    *   `undefined` — NOT A FOURTH VERDICT BUT THE ABSENCE OF ONE. Nothing has said anything about a
    *                 probe for this row: a held connection, whose rows carry none of this, or an app
    *                 nobody has connected. Nothing may read it as either of the two the server sends.
@@ -511,19 +512,23 @@ function accountSentence(input: {
         return `Connected with a key you provided, last checked ${formatDate(account.verifiedAt)}.`;
       }
       /*
-       * THE KEY WAS CHECKED AND THE VENDOR REFUSED IT, and the account it was checked in could not
-       * be withdrawn — the one state where the sentence below was not vague but FALSE. Three facts
-       * are this person's to act on and all three go in: their key is bad, an account of theirs is
-       * live at Composio, and this deployment tried to take it back and could not. Reachable only
-       * from the answer to a key just handed over; a re-check the vendor refuses is raised instead,
-       * and the banner and the dialog carry Composio's own sentence for it.
+       * THE KEY WAS CHECKED AND THE VENDOR REFUSED IT, and the account it was checked in is still
+       * there — the one state where the sentence below was not vague but FALSE. Three facts are
+       * this person's to act on and all three go in: their key is bad, an account of theirs is live
+       * at Composio, and the row says which button ends which.
+       *
+       * WHY THE ACCOUNT STANDS IS NOT ASSERTED, because two paths reach this state and they stand
+       * for different reasons. A connect whose probe failed tried to withdraw the account it had
+       * just made and could not; a re-check that failed never tried, deliberately, because the
+       * account predates the press and is the person's own. Naming a failed withdrawal would be
+       * false on the second path, and the standing account is the actionable half either way.
        *
        * BOTH WAYS OUT ARE NAMED, because neither is obvious from a row that says "Connected": the
        * account ends with the button beside this line, and a key corrected at the vendor is worth a
        * second check rather than a second connection.
        */
       if (account.probe && !account.verified) {
-        return `Your key was checked against ${title} and rejected. The account it was checked in still stands at Composio — this deployment could not withdraw it — so disconnect it here, or fix the key at ${title} and press Re-check.`;
+        return `Your key was checked against ${title} and rejected, and the account it was checked in still stands at Composio, so disconnect it here, or fix the key at ${title} and press Re-check.`;
       }
       /*
        * NOTHING TO CHECK IT WITH, WHICH IS A FACT ABOUT THE APP. The answer named no probe at all:
@@ -535,10 +540,12 @@ function accountSentence(input: {
         return `Connected with a key you provided. It was accepted without being checked against ${title}, which publishes nothing safe to try a key on — that is about the app, not about your key.`;
       }
       /*
-       * AND NO ANSWER HERE HAS SAID WHICH, which is every page load: the connections read carries
-       * the flag and the date and not the probe, so all this row knows is that the key was taken and
-       * that nothing it has been told about has tried it. The two sentences above are the two things
-       * an answer can say; this is what stands until one does, and it must not borrow either.
+       * AND NOTHING HAS SAID WHICH, which is no longer the page load: the connections read derives
+       * the probe now, so a reload lands on one of the two sentences above. What is left here is a
+       * row nothing has told about a probe either way — a held connection, whose rows carry none of
+       * this, or an answer that named none — and all it knows is that the key was taken. Those two
+       * sentences are the two things a verdict can say; this is what stands where there is no
+       * verdict, and it must not borrow either.
        */
       return `Connected with a key you provided. It was accepted without being checked against ${title}.`;
     }
