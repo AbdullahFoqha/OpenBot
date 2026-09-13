@@ -76,6 +76,7 @@ function fakeVendor(parts: {
     },
     toolkits: {
       list: refuse("toolkits.list"),
+      retrieve: refuse("toolkits.retrieve"),
       ...parts.toolkits,
     },
     authConfigs: {
@@ -2449,6 +2450,12 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
       because:
         "The account listing did not answer. This is a gate rather than a page, and its caller refuses the run either way.",
     },
+    {
+      method: "connectionFields",
+      kind: "an outage",
+      because:
+        "Reading what the app asks a person for did not answer. No form was drawn and nothing was attached, so there is nothing about this app to say that the route's own advice — the deployment's key, the vendor's status page — does not already cover.",
+    },
     /*
      * THE TWO REASONS BELOW USED TO BE FALSE, AND THIS IS THE CASE THE ALLOW-LIST CANNOT CATCH BY
      * ITSELF. Its assertion asks whether an AUTHORED sentence reached the reader, so an entry whose
@@ -2547,6 +2554,15 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
       }),
       ask: ({ broker }) =>
         broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    },
+    {
+      method: "connectionFields",
+      vendor: (raise) => ({ toolkits: { retrieve: raise } }),
+      ask: ({ broker }) =>
+        broker.connectionFields({
+          toolkit: "perplexityai",
+          authScheme: "API_KEY",
+        }),
     },
     {
       method: "listActions",
@@ -5020,5 +5036,147 @@ describe("listings Composio pages, read to the end", () => {
     expect(refusal.message).toMatch(
       /sent a string where gmail's categories belong/,
     );
+  });
+});
+
+/**
+ * What an app asks a person to type, read off the vendor rather than written down here.
+ *
+ * THE FIXTURES ARE MEASURED ANSWERS RATHER THAN INVENTED ONES. The first is `perplexityai`'s
+ * `API_KEY` mode as Composio publishes it, down to the `legacy_template_name` this deployment does
+ * not read — because the value of asking the vendor at all is that the form follows what the app
+ * actually wants, and a fixture composed of the four fields the mapping happens to touch would
+ * assert that mapping against a shape no app sends.
+ */
+describe("the fields an app asks a person to fill in", () => {
+  test("the fields an app wants come back as the app describes them", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [
+                      {
+                        name: "generic_api_key",
+                        displayName: "API Key",
+                        description:
+                          "Your secret Perplexity API key, starting with 'pplx-'.",
+                        type: "string",
+                        required: true,
+                        is_secret: true,
+                        user_visible: true,
+                      },
+                    ],
+                    optional: [],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    expect(
+      await broker.connectionFields({
+        toolkit: "perplexityai",
+        authScheme: "API_KEY",
+      }),
+    ).toEqual([
+      {
+        name: "generic_api_key",
+        label: "API Key",
+        help: "Your secret Perplexity API key, starting with 'pplx-'.",
+        required: true,
+        secret: true,
+      },
+    ]);
+  });
+
+  test("a field of a type this deployment cannot draw is refused rather than drawn blind", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [
+                      {
+                        name: "cert",
+                        displayName: "Certificate",
+                        type: "file",
+                        required: true,
+                        is_secret: true,
+                        user_visible: true,
+                      },
+                    ],
+                    optional: [],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectionFields({ toolkit: "mystery", authScheme: "API_KEY" }),
+    );
+
+    /*
+     * A TEXT BOX DRAWN FOR A FILE IS THE FAILURE THIS PREVENTS: somebody types a path into a box
+     * labelled Certificate, the connection is made, and the first tool call is what discovers it.
+     * Every required field measured across the catalogue is a plain string, so this is a guard
+     * against the vendor changing rather than a routine case.
+     */
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(/cannot be filled in here/);
+  });
+
+  test("a field Composio marks invisible is not shown", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [
+                      {
+                        name: "internal_tenant",
+                        displayName: "Tenant",
+                        description: "",
+                        type: "string",
+                        required: true,
+                        is_secret: false,
+                        user_visible: false,
+                      },
+                    ],
+                    optional: [],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    expect(
+      await broker.connectionFields({
+        toolkit: "hidden",
+        authScheme: "API_KEY",
+      }),
+    ).toEqual([]);
   });
 });

@@ -2,6 +2,7 @@ import { Composio } from "@composio/core";
 import {
   type BrokerApp,
   type BrokerConnection,
+  type BrokerField,
   BrokerRefusalError,
   type ComposioBroker,
   type FieldScheme,
@@ -161,6 +162,23 @@ type VendorToolkit = {
   no_auth?: unknown;
   auth_schemes?: unknown;
   composio_managed_auth_schemes?: unknown;
+};
+
+/**
+ * One toolkit read on its own, which this file wants for exactly one thing: what it asks a person.
+ *
+ * ONE FIELD, BECAUSE ONE FIELD IS WHAT IS READ. The per-app retrieve answers everything the
+ * catalogue row does and a good deal more, and naming any of it here would be this file declaring
+ * knowledge of a shape nothing below opens.
+ *
+ * `unknown` FOR THE REASON EVERY OTHER VENDOR TYPE IN THIS FILE SAYS SO. What hangs off
+ * `auth_config_details` is a list of modes, each carrying the fields its scheme wants, and every
+ * one of those is copied across verbatim — so the declaration would be an assertion about the wire
+ * rather than a fact about it. {@link ComposioBroker.connectionFields} reads it a step at a time
+ * and shows a person only what it could actually read.
+ */
+type VendorToolkitDetail = {
+  auth_config_details?: unknown;
 };
 
 /**
@@ -1663,6 +1681,19 @@ export type ComposioVendor = {
       /** The vendor's own word for "there is another page", read by {@link everyRowOf}. */
       next_cursor?: unknown;
     } | null>;
+    /**
+     * ONE app, read for the one thing the catalogue listing does not carry: what it asks a person.
+     *
+     * The listing above answers which apps exist and which scheme each of them authenticates with;
+     * it does not answer which boxes a form for that scheme needs. That is published per app and it
+     * moves — one app wants a key, the next wants a key and a workspace subdomain — so it is asked
+     * for at the moment a person presses Connect rather than derived from anything held here. See
+     * {@link ComposioBroker.connectionFields}.
+     *
+     * NO PAGE AND NO CURSOR, because a toolkit is one object rather than a listing: this is the one
+     * vendor read in this file where there is no second page to be mistaken for the whole answer.
+     */
+    retrieve(slug: string): Promise<VendorToolkitDetail>;
   };
   authConfigs: {
     list(query: {
@@ -3285,6 +3316,67 @@ export function buildComposioClient(
        */
       return ids.length > 0;
     },
+
+    /**
+     * What the app itself says it wants typed in, mapped onto the boxes a form can draw.
+     *
+     * READ A STEP AT A TIME OFF `unknown`, for the reason every other vendor read here is: the
+     * detail's `auth_config_details` is copied across verbatim, so a mode that is not a list, a
+     * scheme this app does not publish and a field row that is not an object are all shapes the
+     * wire can send. Each of those answers an empty form rather than a crash — an app whose scheme
+     * publishes nothing to fill in is an app with nothing to ask, which is a true thing to say and
+     * the one thing a `[]` here means.
+     *
+     * REQUIRED AND OPTIONAL IN THAT ORDER, because the order is what a person reads down. The
+     * vendor publishes them as two lists and the required ones are the ones that stop the form; a
+     * form that interleaved them, or put the optional base-url box above the key, would be asking
+     * somebody to hunt for the field they came to fill in.
+     */
+    async connectionFields({ toolkit, authScheme }): Promise<BrokerField[]> {
+      const detail = await askVendor(
+        {
+          outcome: `what ${toolkit} asks for could not be read, so there is nothing to show`,
+          app: toolkit,
+        },
+        () => vendor.toolkits.retrieve(toolkit),
+      );
+
+      const modes = Array.isArray(detail?.auth_config_details)
+        ? detail.auth_config_details
+        : [];
+      const mode = modes.find(
+        (candidate: { mode?: unknown }) => candidate?.mode === authScheme,
+      );
+      const published = mode?.fields?.connected_account_initiation;
+      const rows = [
+        ...(Array.isArray(published?.required) ? published.required : []),
+        ...(Array.isArray(published?.optional) ? published.optional : []),
+      ];
+
+      return rows
+        .filter((row) => row?.user_visible !== false)
+        .map((row) => {
+          /*
+           * A TYPE THIS DEPLOYMENT CANNOT DRAW IS A REFUSAL RATHER THAN A TEXT BOX. Every required
+           * field measured across the catalogue is a plain string, so this is a guard against the
+           * vendor rather than a routine case — and the failure it prevents is somebody typing a
+           * path into a box labelled Certificate and being told they are connected.
+           */
+          if (row?.type !== "string") {
+            throw new BrokerRefusalError(
+              `${toolkit} asks for ${textOf(row?.displayName) ?? "a value"} as ${sent(row?.type)}, which cannot be filled in here. Connecting this app is not something this deployment can offer yet.`,
+            );
+          }
+          return {
+            name: String(row.name),
+            label: textOf(row.displayName) ?? String(row.name),
+            help: textOf(row.description) ?? "",
+            required: row.required === true,
+            secret: row.is_secret === true,
+            ...(textOf(row.default) ? { default: String(row.default) } : {}),
+          };
+        });
+    },
   };
 
   return { actions, broker };
@@ -3340,7 +3432,10 @@ export function createComposioClient(apiKey: string): {
         composio.tools.getRawComposioToolBySlug(slug, options),
       execute: (slug, body) => composio.tools.execute(slug, body),
     },
-    toolkits: { list: (query) => client.toolkits.list(query) },
+    toolkits: {
+      list: (query) => client.toolkits.list(query),
+      retrieve: (slug) => client.toolkits.retrieve(slug),
+    },
     authConfigs: {
       list: (query) => composio.authConfigs.list(query),
       create: (toolkit, options) =>
