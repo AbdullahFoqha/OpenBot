@@ -87,6 +87,14 @@ function RouteComponent() {
     report: setNotice,
     returnTo: "settings",
     serverId: key,
+    /*
+     * Off the same row `recorded` is read from, and absent where you have never connected this app:
+     * with no row there is nothing that could have been checked, which is what the server's own
+     * columns default to. The pair is optional on the type because that endpoint concatenates two
+     * reads and only a brokered row carries it.
+     */
+    verified: connection?.verified ?? false,
+    verifiedAt: connection?.verifiedAt ?? null,
   });
 
   if (plugins.isPending) {

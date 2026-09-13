@@ -147,9 +147,15 @@ function RouteComponent() {
    */
   const connections = useQuery(connectionsQueryOptions());
   const { data: agents } = useQuery(agentListQueryOptions());
-  const youConnected = (connections.data?.connections ?? []).some(
+  /*
+   * The row itself rather than whether there is one, because the brokered row below wants what the
+   * last re-check found and that is written on this same row. Asking a second time for it would be
+   * a second answer to a question this read already carried.
+   */
+  const connection = (connections.data?.connections ?? []).find(
     (row) => row.serverId === key,
   );
+  const youConnected = connection !== undefined;
   const nameFor = useBotNames();
 
   const [error, setError] = useState<string | null>(null);
@@ -233,6 +239,14 @@ function RouteComponent() {
     // Back to this page afterwards, not to the personal settings screen.
     returnTo: "admin",
     serverId: key,
+    /*
+     * Absent where this person has never connected the app, and false rather than asserted: with no
+     * row there is nothing that could have been checked, which is exactly what the server's own
+     * columns default to. The pair is optional on the type because that endpoint concatenates two
+     * reads and only a brokered row carries it.
+     */
+    verified: connection?.verified ?? false,
+    verifiedAt: connection?.verifiedAt ?? null,
   });
 
   /** Adding is two writes when a token was typed: the credential, then the record pointing at it. */
