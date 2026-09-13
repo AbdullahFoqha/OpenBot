@@ -5172,6 +5172,98 @@ describe("the fields an app asks a person to fill in", () => {
     expect(refusal.message).toMatch(/cannot be filled in here/);
   });
 
+  /**
+   * "NO SUCH MODE" AND "THIS MODE ASKS FOR NOTHING" ARE TWO ANSWERS, AND THEY USED TO BE ONE `[]`.
+   *
+   * The scheme handed in is the RECORDED one and is never re-derived — that is the entire point of
+   * the column — so a mode Composio has stopped publishing for this app is exactly the drift
+   * recording it anticipates. As an empty form it is invisible: the person presses submit, a
+   * connection is created carrying no credential at all, Composio answers `ACTIVE` because it does
+   * not grade what it is given, and the later probe is the first thing that notices. From their end
+   * it is a box they cannot fill in.
+   */
+  test("a mode this app no longer publishes is refused rather than drawn as an empty form", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          // The app publishes OAuth2 today; the row here was enabled as API_KEY and still says so.
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "OAUTH2",
+                fields: {
+                  connected_account_initiation: { required: [], optional: [] },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectionFields({ toolkit: "linear", authScheme: "API_KEY" }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    // The app and the RECORDED scheme, because those two are the whole of the finding — and the one
+    // act that rewrites the recorded scheme, which is an administrator's rather than this person's.
+    expect(refusal.message).toMatch(/linear/);
+    expect(refusal.message).toMatch(/API_KEY/);
+    expect(refusal.message).toMatch(/Plugins page/);
+  });
+
+  /**
+   * AND THE NAME IS THE ONE FIELD THAT TRAVELS, WHICH IS WHY IT IS GUARDED LIKE THE TYPE.
+   *
+   * `label`, `help` and `default` all pass through `textOf` and are read by a person. The name is
+   * sent back to Composio verbatim and is the key `connectWithFields` spreads into the connection's
+   * `val`. Coerced with `String(...)`, this row drew a box literally called "undefined" and then
+   * submitted whatever was typed into it under that key: a value no app reads, inside a connection
+   * Composio accepts.
+   */
+  test("a field with no name is refused rather than drawn as a box called undefined", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [
+                      {
+                        displayName: "API Key",
+                        description: "",
+                        type: "string",
+                        required: true,
+                        is_secret: true,
+                        user_visible: true,
+                      },
+                    ],
+                    optional: [],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectionFields({ toolkit: "nameless", authScheme: "API_KEY" }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/cannot be filled in here/);
+    // And never the coercion itself, which is what the form used to be handed.
+    expect(refusal.message).not.toMatch(/"undefined"/);
+  });
+
   test("a field Composio marks invisible is not shown", async () => {
     const { broker } = buildComposioClient(
       fakeVendor({
@@ -5493,6 +5585,106 @@ describe("connecting one person with the secret they typed", () => {
     expect(refusal.message).toMatch(NO_CONFIG_REMEDY);
     expect(refusal.message).not.toContain(TYPED_SECRET);
   });
+
+  /**
+   * THE TWO BELOW ASSERT AN ORDER RATHER THAN A SENTENCE, AND THE ORDER IS THE WHOLE STANCE.
+   *
+   * A create that ANSWERS is what makes them able to fail. Left at {@link fakeVendor}'s refusal, an
+   * implementation that sent the key would throw the double's own error, {@link failureOf} would
+   * hand back a refusal, and a test asking only "did this refuse" would be green over the exact
+   * defect — the secret having travelled. So the double here succeeds like the real vendor does on
+   * a key it has not graded, and what is asserted is that it was never called: `created` empty is
+   * the statement that the person's credential did not leave this process.
+   */
+  test("a config of ours that is disabled is refused before the key is sent", async () => {
+    const created: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        /*
+         * `configsFor` LISTS WITH `showDisabled: true`, so this row is one this read can meet and
+         * `ours[0]` cannot tell it from a working config. Composio does not grade a submitted key,
+         * so a create against it is a request that carries the secret out of this process and comes
+         * back with an account that cannot work.
+         */
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_ours", name: "Linear (OpenBot)", status: "DISABLED" },
+            ],
+          }),
+        },
+        connectedAccounts: {
+          create: async (body: unknown) => {
+            created.push(body);
+            return { id: "ca_new", status: "ACTIVE" };
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectWithFields({
+        userId: "user_1",
+        toolkit: "linear",
+        authScheme: "API_KEY",
+        values: { generic_api_key: TYPED_SECRET },
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(DISABLED_REMEDY);
+    expect(refusal.message).not.toMatch(NO_CONFIG_REMEDY);
+    expect(refusal.message).not.toContain(TYPED_SECRET);
+    // The point of the test: the refusal arrived before the credential did, not after Composio had
+    // been handed it and answered.
+    expect(created).toEqual([]);
+  });
+
+  test("a listing this deployment cannot read does not send an administrator round a loop", async () => {
+    const created: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [{ id: "ac_nameless" }] }),
+        },
+        connectedAccounts: {
+          create: async (body: unknown) => {
+            created.push(body);
+            return { id: "ca_new", status: "ACTIVE" };
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectWithFields({
+        userId: "user_1",
+        toolkit: "linear",
+        authScheme: "API_KEY",
+        values: { generic_api_key: TYPED_SECRET },
+      }),
+    );
+
+    /*
+     * NOT THE NO-CONFIG REMEDY, which is the finding. The unreadable row may itself BE ours, in
+     * which case removing the app meets `deleteAuthConfig`'s refusal over the same row and adding
+     * it again meets `ensureAuthConfig`'s — an administrator sent round a loop that cannot close.
+     * `authorize` tells the two states apart against this same listing; this path handed out the
+     * wrong one of the two.
+     */
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).not.toMatch(NO_CONFIG_REMEDY);
+    expect(refusal.message).not.toMatch(DISABLED_REMEDY);
+    expect(refusal.message).toMatch(
+      /upgrading this deployment's @composio\/core/,
+    );
+    expect(refusal.message).not.toContain(TYPED_SECRET);
+    // And no `cause`, because this method's refusals carry none — see the describe above.
+    expect(refusal.cause).toBeUndefined();
+    expect(created).toEqual([]);
+  });
 });
 
 /**
@@ -5549,4 +5741,108 @@ describe("taking back the one account a verification just made", () => {
     expect(deleted).toEqual([["ca_new", { revoke_on_delete: true }]]);
     expect(listed).toEqual([]);
   });
+
+  /**
+   * AND WHAT COMPOSIO ANSWERED IS READ, BECAUSE THE CALLER BRANCHES ON THIS CALL RETURNING CLEANLY.
+   *
+   * The await used to drop the reply, so a 200 carrying `success: false` — Composio saying it did
+   * NOT delete the account and started no revocation — resolved like a withdrawal that happened.
+   * The verification step above this reads exactly that: a key that fails verification has its
+   * account withdrawn, and where the WITHDRAWAL fails the row is written unverified so the account
+   * stays named on a screen and disconnectable. A `success: false` resolving normally takes the
+   * other branch, writes no row, and leaves a live account holding a credential that nothing in
+   * this deployment names and nobody can press disconnect on.
+   *
+   * THE SENTENCES ARE THIS METHOD'S OWN, which is why they are asserted rather than assumed from
+   * {@link withdrawalDeclined}. That function's two are written around a toolkit and around
+   * pressing disconnect again; this call was handed an id, and the second press it would invite is
+   * a button on no page.
+   */
+  test("the one account's delete answered `success: false` is not a withdrawal", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          // A 200 whose body says the account was not deleted: the flag went out, Composio read the
+          // request and answered it. This is the vendor declining rather than failing.
+          delete: async () => ({ success: false }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(broker.revokeAccount("ca_new"));
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/success: false/);
+    // The two facts the caller has to be able to act on: the account stands, and the credential
+    // behind it was never withdrawn.
+    expect(refusal.message).toMatch(/still standing at Composio/);
+    expect(refusal.message).not.toMatch(
+      /upgrading this deployment's @composio\/core/,
+    );
+  });
+
+  test("the one account's delete with no verdict in it is not counted as one either", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          /*
+           * A DOCUMENT THAT ARRIVED WITHOUT ITS VERDICT, which is not the same thing as no document
+           * at all. `success` is required in the declaration and absent on this wire, and the
+           * generated client parses the body and hands it over — so the schema's "required" is a
+           * promise about what Composio means to send rather than a fact about what came.
+           */
+          delete: async () => ({}),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(broker.revokeAccount("ca_new"));
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    /*
+     * A DIFFERENT SENTENCE FROM THE ONE ABOVE. "Composio said no" is a fact about this account;
+     * "Composio answered something where its verdict belongs" is a fact about the package, which
+     * nobody holding an admin page can correct — so it carries the remedy that names the upgrade
+     * and the other one must not.
+     */
+    expect(refusal.message).toMatch(
+      /upgrading this deployment's @composio\/core/,
+    );
+    expect(refusal.message).not.toMatch(/success: false/);
+  });
+
+  /**
+   * AND NO DOCUMENT AT ALL IS COMPOSIO SAYING IT DID DELETE, which is the opposite mistake and the
+   * one {@link withdrawalDeclined} was corrected for once already. The installed client resolves a
+   * 204 to `null` and a JSON reply carrying `content-length: 0` to `undefined`, and neither can be
+   * a rejection: every `!response.ok` is thrown as an `APIError` before parsing, so an answer
+   * arriving here at all is Composio having accepted the request. Reading those as "no verdict"
+   * would turn a completed withdrawal into a failure — which, on this path, has the caller write
+   * the account's row as unverified over an account that is already gone.
+   */
+  for (const { shape, answer } of [
+    { shape: "a 204 carrying no content", answer: null },
+    { shape: "a JSON reply of content-length zero", answer: undefined },
+  ]) {
+    test(`the one account's withdrawal answered with ${shape} is a withdrawal`, async () => {
+      const deleted: unknown[] = [];
+      const { broker } = buildComposioClient(
+        fakeVendor({
+          connectedAccounts: {
+            delete: async (...call: unknown[]) => {
+              deleted.push(call);
+              return answer;
+            },
+          },
+        }),
+      );
+
+      expect(await broker.revokeAccount("ca_new")).toBeUndefined();
+      // And the flag still went out, so what resolved is a delete that asked for the grant behind
+      // the account to be withdrawn rather than one that quietly filed the account away.
+      expect(deleted).toEqual([["ca_new", { revoke_on_delete: true }]]);
+    });
+  }
 });

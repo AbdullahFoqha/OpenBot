@@ -3362,11 +3362,22 @@ export function buildComposioClient(
      * What the app itself says it wants typed in, mapped onto the boxes a form can draw.
      *
      * READ A STEP AT A TIME OFF `unknown`, for the reason every other vendor read here is: the
-     * detail's `auth_config_details` is copied across verbatim, so a mode that is not a list, a
-     * scheme this app does not publish and a field row that is not an object are all shapes the
-     * wire can send. Each of those answers an empty form rather than a crash — an app whose scheme
-     * publishes nothing to fill in is an app with nothing to ask, which is a true thing to say and
-     * the one thing a `[]` here means.
+     * detail's `auth_config_details` is copied across verbatim, so a mode that is not a list and a
+     * field row that is not an object are both shapes the wire can send. Those answer an empty form
+     * rather than a crash — an app whose scheme publishes nothing to fill in is an app with nothing
+     * to ask, which is a true thing to say and the one thing a `[]` here means.
+     *
+     * AND A SCHEME THIS APP NO LONGER PUBLISHES IS THE ONE OF THOSE THAT IS NOT AN EMPTY FORM,
+     * WHICH IS THE CORRECTION. The scheme is the RECORDED one and is never re-derived — that is the
+     * whole point of the column, and {@link ComposioBroker.connectionFields} says so — so "Composio
+     * does not publish this mode for this app" is exactly the drift between the row and the vendor
+     * that recording it anticipates, and it used to surface as a form with no boxes in it. A person
+     * presses submit on that form, {@link ComposioBroker.connectWithFields} creates a connection
+     * carrying no credential at all, Composio answers `ACTIVE` because it does not grade what it is
+     * given, and the first call made with the account is what discovers anything is wrong. An empty
+     * form is also, from the person's end, a box they cannot fill in. So the two states are told
+     * apart here: no such mode refuses and names the recorded one, and a mode that exists and
+     * publishes nothing visible still answers `[]`.
      *
      * REQUIRED AND OPTIONAL IN THAT ORDER, because the order is what a person reads down. The
      * vendor publishes them as two lists and the required ones are the ones that stop the form; a
@@ -3388,7 +3399,20 @@ export function buildComposioClient(
       const mode = modes.find(
         (candidate: { mode?: unknown }) => candidate?.mode === authScheme,
       );
-      const published = mode?.fields?.connected_account_initiation;
+      /*
+       * THE REMEDY IS AN ADMINISTRATOR'S BECAUSE THE RECORDED SCHEME IS ONLY THEIRS TO REWRITE.
+       * Nothing a person pressing Connect can do changes which mode this app was enabled as, and
+       * nothing on this path may quietly pick a different one — a form drawn for whatever Composio
+       * publishes today, in front of an authorization config created for the word on the row, is
+       * the same disagreement one layer further in. Removing the app and adding it again is the one
+       * path that records the scheme afresh, so it is the one named.
+       */
+      if (mode === undefined) {
+        throw new BrokerRefusalError(
+          `Composio no longer publishes a ${authScheme} connection for ${toolkit}, and ${toolkit}'s authorization config here was created as ${authScheme}, so there is nothing to ask this person for — and an empty form is a box they cannot fill in and a connection carrying no credential at all. An administrator removing the app on its Plugins page and adding it again is what records the scheme Composio publishes for it now.`,
+        );
+      }
+      const published = mode.fields?.connected_account_initiation;
       const rows = [
         ...(Array.isArray(published?.required) ? published.required : []),
         ...(Array.isArray(published?.optional) ? published.optional : []),
@@ -3402,10 +3426,19 @@ export function buildComposioClient(
            * field measured across the catalogue is a plain string, so this is a guard against the
            * vendor rather than a routine case — and the failure it prevents is somebody typing a
            * path into a box labelled Certificate and being told they are connected.
+           *
+           * AND THE NAME IS IN THE SAME GUARD, because it is the least guarded field here and the
+           * only one that travels. `label`, `help` and `default` all pass through {@link textOf}
+           * and are read by a person; the name is sent back to Composio verbatim and is the key
+           * {@link ComposioBroker.connectWithFields} spreads into the connection's `val`. Coerced
+           * with `String(...)`, a row carrying `type: "string"` and no name drew a box literally
+           * called "undefined" and then submitted whatever was typed in it under that key — a value
+           * no app reads, in a connection Composio accepts.
            */
-          if (row?.type !== "string") {
+          const name = textOf(row?.name);
+          if (row?.type !== "string" || name === null) {
             throw new BrokerRefusalError(
-              `${toolkit} asks for ${textOf(row?.displayName) ?? "a value"} as ${sent(row?.type)}, which cannot be filled in here. Connecting this app is not something this deployment can offer yet.`,
+              `${toolkit} asks for ${textOf(row?.displayName) ?? "a value"} as ${sent(row?.type)} under the name ${sent(row?.name)}, which cannot be filled in here: a box this deployment can draw is a string, and a box whose answer can be sent back has a name. Connecting this app is not something this deployment can offer yet.`,
             );
           }
           /*
@@ -3417,8 +3450,8 @@ export function buildComposioClient(
            */
           const suggested = textOf(row.default);
           return {
-            name: String(row.name),
-            label: textOf(row.displayName) ?? String(row.name),
+            name,
+            label: textOf(row.displayName) ?? name,
             help: textOf(row.description) ?? "",
             required: row.required === true,
             secret: row.is_secret === true,
@@ -3472,11 +3505,74 @@ export function buildComposioClient(
        * restrictions it cannot read, an object it must not delete — is not a guess that can be
        * corrected afterwards.
        */
-      const { ours } = await configsFor(toolkit);
-      const config = ours[0];
-      if (!config) {
+      const { ours, unreadable } = await configsFor(toolkit);
+      if (ours.length === 0) {
+        /*
+         * A ROW THIS FILE COULD NOT READ IS NOT AN APP WITH NO CONFIG, AND IT IS THE SAME TWO
+         * REMEDIES {@link ComposioBroker.authorize} TELLS APART. "Remove the app and add it again"
+         * is right where the listing was legible and said none of these is ours, and wrong here:
+         * the row that could not be sorted may BE ours, in which case the removal meets
+         * {@link ComposioBroker.deleteAuthConfig}'s own refusal and the re-enable meets
+         * `ensureAuthConfig`'s. That is an administrator sent round a loop that cannot close, and
+         * this method used to hand them exactly that sentence.
+         *
+         * NO `cause` ON ANY OF THE REFUSALS IN THIS METHOD, which is the local rule rather than the
+         * file's. Not one of the four refusals this config read can raise carries a vendor object at
+         * all — they are this file's own reading of a listing — but attaching
+         * `everyRefusal(unreadable)` here, as `authorize` correctly does, would put an error chain
+         * on the one method whose call frame holds somebody's API key, and the whole of this
+         * method's doc comment is about not doing that. The count is the finding, and the count is
+         * in the sentence.
+         */
+        if (unreadable.length > 0) {
+          throw new BrokerRefusalError(
+            `Composio described ${unreadable.length} of its authorization configs for ${toolkit} in a way this deployment cannot read and none of the rest is one it made, so there is nothing it can show is its own to connect an account against and what was typed into the form was not sent anywhere. ${VENDOR_SHAPE_REMEDY}`,
+          );
+        }
         throw new BrokerRefusalError(
           `This deployment has no authorization config at Composio for ${toolkit}, so there is nothing to connect an account against and nothing was sent. An administrator removing the app on its Plugins page and adding it again creates one.`,
+        );
+      }
+
+      /*
+       * THE ENABLED ONE, WHICH IS THE SAME CHOICE {@link ComposioBroker.authorize} MAKES AND FOR ONE
+       * REASON MORE. `configsFor` lists with `showDisabled: true` — it has to, or `ensureAuthConfig`
+       * creates a second config beside one it cannot see — so `ours[0]` could perfectly well be a
+       * DISABLED config, and an account created against one cannot work. Reading that state only
+       * after the create is the wrong order on this path more than on any other: the body of that
+       * request is the key somebody just pasted in, so the refusal has to arrive BEFORE the
+       * credential leaves this process rather than after Composio has been handed it and declined.
+       *
+       * AND IT IS THE SAME CONFIG THE CONSENT PATH WOULD HAVE PICKED, which is the other half.
+       * Two configs from a lost enable race, the first of them disabled, and `ours[0]` against
+       * `find(ENABLED)` attach one app's accounts to two different configs depending on which door
+       * a person came through — after which removing "the" config drops half of them.
+       */
+      const config = ours.find((held) => held.status === "ENABLED");
+      if (!config) {
+        /*
+         * "DISABLED" IS ONLY THIS DEPLOYMENT'S CLAIM TO MAKE WHEN COMPOSIO MADE IT, for the reason
+         * spelled out at length in {@link ComposioBroker.authorize}: the test above is
+         * `=== "ENABLED"`, so a config with no status and a config wearing a word this deployment's
+         * `@composio/core` has never heard of both fall through here, and telling an operator those
+         * are disabled sends them to enable something that may already be enabled.
+         */
+        const unsettled = ours.filter((held) => held.status !== "DISABLED");
+        if (unsettled.length > 0) {
+          const words = [
+            ...new Set(unsettled.map((held) => named(held.status))),
+          ];
+          const shown = words.slice(0, STATUSES_NAMED);
+          const said =
+            words.length > shown.length
+              ? `${shown.join(", ")} and ${words.length - shown.length} other words`
+              : shown.join(", ");
+          throw new BrokerRefusalError(
+            `Composio describes ${unsettled.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether an account connected against one could work is not something this deployment can tell. Nothing was sent, and what was typed into the form did not leave this deployment. ${VENDOR_SHAPE_REMEDY}`,
+          );
+        }
+        throw new BrokerRefusalError(
+          `Every authorization config this deployment holds at Composio for ${toolkit} is disabled, so an account connected against one could not work and nothing was sent. An administrator can enable it in Composio's dashboard, or remove the app on its Plugins page and add it again.`,
         );
       }
 
@@ -3551,9 +3647,29 @@ export function buildComposioClient(
      * NOTHING IS ANSWERED AND NOTHING IS SWALLOWED. There is no count to report — the id names one
      * account that existed moments ago — so a failure is a failure, and it leaves through
      * {@link askVendor} like every other vendor call in this file.
+     *
+     * AND "I DID NOT DELETE IT" IS ONE OF THOSE FAILURES, WHICH THE AWAIT USED TO DISCARD. The
+     * delete answers `{ success?: unknown }` for the reason {@link ComposioVendor}'s declaration
+     * gives: a 200 carrying `success: false` is Composio saying it did NOT delete the account, so
+     * no revocation was started and nothing was asked of the provider — the same lie
+     * {@link withdrawalDeclined} exists to stop one method away. It matters MORE here than there,
+     * because of what this call's caller does with a clean return. The verification step withdraws
+     * the account behind a key that failed, and where the withdrawal ITSELF fails it writes the row
+     * unverified so the account stays reachable and disconnectable. A `success: false` resolving
+     * normally takes the other branch: no row is written, and what is left standing is a live
+     * account holding a working-or-not credential that nothing on any screen names and nobody can
+     * press disconnect on.
+     *
+     * ITS OWN SENTENCES RATHER THAN {@link withdrawalDeclined}'s, because that function's two are
+     * written around a toolkit and around pressing disconnect again, and this method has neither: it
+     * was handed an id, the app is the caller's to name, and the second press it would invite is a
+     * button that is not on any page for an account no row points at. What carries across unchanged
+     * is the null/undefined exemption — a 204 or a body of content-length zero is the vendor saying
+     * it DID delete and having nothing to add, and reading those as a refusal is the same lie
+     * pointing the other way.
      */
     async revokeAccount(accountId): Promise<void> {
-      await askVendor(
+      const answer = await askVendor(
         {
           outcome:
             "the one account this call was handed was not withdrawn and may be standing at Composio",
@@ -3567,6 +3683,18 @@ export function buildComposioClient(
           vendor.connectedAccounts.delete(accountId, {
             revoke_on_delete: true,
           }),
+      );
+
+      if (answer === null || answer === undefined) return;
+      const verdict = answer.success;
+      if (verdict === true) return;
+      if (verdict === false) {
+        throw new BrokerRefusalError(
+          `Composio answered the withdrawal of the account this connection just made with success: false, so it did not delete the account and started no revocation of the credential behind it. That account is still standing at Composio and the credential behind it is still live there.`,
+        );
+      }
+      throw new BrokerRefusalError(
+        `Composio sent ${sent(verdict)} where its verdict on the withdrawal of the account this connection just made belongs, and that field is the only thing in the reply that says whether the account was deleted at all. This deployment cannot tell a withdrawal that happened from one that did not, so the account is reported as still standing and the credential behind it as not withdrawn. ${VENDOR_SHAPE_REMEDY}`,
       );
     },
   };
