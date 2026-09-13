@@ -1865,6 +1865,232 @@ test("a consent connection records no action, because none was spent", async () 
 });
 
 /**
+ * A CONFIRM DOES NOT ERASE WHAT A CHECK SPENT ON A KEY CONNECTION.
+ *
+ * CRITERION. A key connection sitting in the worst of the four states — a NAMED probe beside
+ * `verified: false`, which is "it ran, the vendor refused the key, and the account is still
+ * standing" — is confirmed, the vendor answers yes, and the row afterwards still names the action
+ * that was spent, still says the check did not pass, and still carries no date.
+ *
+ * REASON. The confirm runs from an EFFECT ON MOUNT: both brokered account screens fire it on every
+ * page load, so whatever it writes is written again every time somebody opens the page. It wrote
+ * `verified: true, probeAction: null` for any app — and that pair is not a neutral heal, it is
+ * literally one of the four states {@link composioConnections.probeAction} enumerates: the CONSENT
+ * state, "the vendor's own yes is the evidence and no call was ever made against the account". So a
+ * page load turned a key whose vendor had just refused it into a connection that reads as verified
+ * today with nothing spent — the accusation reversed into a reassurance, and the one row an
+ * operator has to act on made unfindable. It also moved `verified_at` to the moment of the page
+ * load, so the row's own sentence, "last checked 13 Sep", named a day on which nothing was checked.
+ *
+ * WHAT THE CONFIRM ACTUALLY LEARNED IS THAT AN ACCOUNT IS ATTACHED, and for a key app that is not
+ * the same question as whether the key works. Composio takes a key when it is typed and never tests
+ * it again — which is the whole reason the probe exists — so `isConnected` saying yes about a key
+ * connection is exactly what the row's existence already said. It is evidence for `verified` only
+ * where consent IS the check, and the scheme recorded on the app's row is what tells the two apart,
+ * asked through {@link isFieldScheme} the way {@link connectBrokeredWithFields} and {@link
+ * recheckBrokeredConnection} both ask it.
+ *
+ * AND THE NEGATIVE HEAL IS UNTOUCHED, which is why the confirm still runs for a key app at all: a
+ * vendor answering NO still deletes the row, here as everywhere. What this asserts is only that a
+ * YES writes no verdict it did not earn.
+ */
+test("a confirm does not erase what a check spent on a key connection", async () => {
+  useAnsweringClient({
+    execute: async ({ slug }) => {
+      reached.push(slug);
+      return {
+        data: {},
+        error: "Invalid API key provided.",
+        successful: false,
+      };
+    },
+  });
+  // The vendor will not take the account back, which is what leaves the row standing in the state
+  // this test is about rather than cleaning it away.
+  vendorKeepsAccount = true;
+  await addProbedApp();
+
+  await expect(
+    store.connectBrokeredWithFields({
+      toolkit: probedToolkit,
+      userId: askerId,
+      values: { generic_api_key: typedKey },
+    }),
+  ).rejects.toThrow(/would not take the account back/);
+
+  // THE STATE BEFORE THE PAGE LOAD, asserted in full rather than assumed from the throw: a named
+  // probe, no flag, no date. This is also the only assertion in the file that holds the failed-undo
+  // branch to the action it recorded — without it that writer could pass `null` and nothing would
+  // notice, which is the same hole in the same column this whole test is about.
+  const [before] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(before.probeAction).toBe(probeAction);
+  expect(before.verified).toBe(false);
+  expect(before.verifiedAt).toBeNull();
+
+  // THE PAGE LOAD. Nothing a person did — an effect on mount, on whichever of the two screens draws
+  // this row, as many times as they open it.
+  expect(
+    await store.confirmBrokeredConnection({
+      toolkit: probedToolkit,
+      userId: askerId,
+    }),
+  ).toEqual({ connected: true });
+
+  const [after] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  // The record of the check survives the mount, whole: the action it spent, the verdict it reached,
+  // and the absence of a date for a claim nobody is making.
+  expect(after.probeAction).toBe(probeAction);
+  expect(after.verified).toBe(false);
+  expect(after.verifiedAt).toBeNull();
+
+  // And the settings page goes on drawing the sentence that state is for, which is the sentence the
+  // person has to act on: the key was checked and refused, and the account still stands.
+  const listed = await store.brokeredConnectionsFor(askerId);
+  expect(listed).toHaveLength(1);
+  expect(listed[0]?.probe).toBe(probeAction);
+  expect(listed[0]?.verified).toBe(false);
+  expect(listed[0]?.verifiedAt).toBeNull();
+
+  // The confirm asked the vendor and spent nothing on the person's account: the only action ever
+  // called here is the probe the connect made, before the confirm ran at all.
+  expect(reached).toEqual([probeAction]);
+  expect(asksMade()).toEqual([
+    `ensureAuthConfig:${probedToolkit}/fields`,
+    `connectWithFields:${probedToolkit}/${askerId}`,
+    `revokeAccount:${madeAccountId}`,
+    `isConnected:${probedToolkit}/${askerId}`,
+  ]);
+});
+
+/**
+ * AND IT DOES NOT REDATE A KEY THE LAST CHECK PASSED, EITHER.
+ *
+ * CRITERION. A key connection a probe verified at a known moment is confirmed, and afterwards its
+ * `verified_at` is still that moment and its `probe_action` is still that action — while a CONSENT
+ * connection, confirmed the same way against the same vendor answer, IS written and IS redated.
+ *
+ * REASON. The clobber has a quiet half as well as a loud one. On the refused-key row above the
+ * damage is a false sentence; here both rows say "verified", and what a mount-time write destroys
+ * is the DATE — the page prints "last checked" off `verified_at`, so a confirm stamping today would
+ * have every key connection in the deployment claim it was checked on whatever day its owner last
+ * opened the page, forever, without a single call being made. A row that has not been checked since
+ * August must go on saying August; that is the whole value of the column.
+ *
+ * WHY BOTH SCHEMES IN ONE TEST. The consent half is what separates a confirm that learned to tell
+ * the two kinds apart from one that simply stopped writing. Consent IS the check — the vendor's own
+ * yes at the end of its own screen is the evidence, and it is fresh evidence on every confirm — so
+ * that row is written, dated now, and keeps the null that says no action was ever spent on it. One
+ * app under each scheme, the same act against the same stub, so the only thing that differs between
+ * the two outcomes is the scheme recorded on the app's row.
+ */
+test("a confirm does not redate a key the last check verified", async () => {
+  useAnsweringClient();
+  await addProbedApp();
+  await store.connectBrokeredWithFields({
+    toolkit: probedToolkit,
+    userId: askerId,
+    values: { generic_api_key: typedKey },
+  });
+
+  const [checked] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(checked.verified).toBe(true);
+  expect(checked.probeAction).toBe(probeAction);
+  const earned = checked.verifiedAt;
+  expect(earned).not.toBeNull();
+
+  expect(
+    await store.confirmBrokeredConnection({
+      toolkit: probedToolkit,
+      userId: askerId,
+    }),
+  ).toEqual({ connected: true });
+
+  const [after] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  // The moment the probe earned, unmoved: the date on the row is the date of a check, and a page
+  // load is not one.
+  expect(after.verifiedAt?.toISOString()).toBe(earned?.toISOString());
+  expect(after.probeAction).toBe(probeAction);
+  expect(after.verified).toBe(true);
+
+  // THE OTHER KIND, against the same stub and the same act. A consent connection's evidence IS the
+  // vendor's yes, so this one is written and dated by the confirm — and keeps the null that says
+  // nothing of the app's was ever called against it.
+  const consentSeeded = new Date("2026-08-30T09:00:00.000Z");
+  await store.addBrokeredApp({
+    slug: enabledToolkit,
+    title: "Enablable App",
+    by: admin,
+    connection: { kind: "consent" },
+  });
+  await database.insert(composioConnections).values({
+    toolkit: enabledToolkit,
+    userId: askerId,
+    verified: true,
+    verifiedAt: consentSeeded,
+  });
+
+  expect(
+    await store.confirmBrokeredConnection({
+      toolkit: enabledToolkit,
+      userId: askerId,
+    }),
+  ).toEqual({ connected: true });
+
+  const [consent] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, enabledToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(consent.verified).toBe(true);
+  expect(consent.probeAction).toBeNull();
+  expect(consent.verifiedAt?.toISOString()).not.toBe(
+    consentSeeded.toISOString(),
+  );
+  expect(consent.verifiedAt?.getTime()).toBeGreaterThan(
+    consentSeeded.getTime(),
+  );
+
+  // One probe, spent by the connect, and nothing since.
+  expect(reached).toEqual([probeAction]);
+});
+
+/**
  * CONNECTING WITH A KEY SOMEBODY TYPED: THE VALUES REACH COMPOSIO AND NOTHING ELSE.
  *
  * CRITERION. After a connection made from typed values, the secret is in the vendor's hands and in

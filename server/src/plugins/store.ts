@@ -4510,6 +4510,24 @@ export function createPluginStore(options: PluginStoreOptions) {
      * the next confirm on any page load, in whichever direction it drifted: by the upsert here
      * where the vendor says yes, and by the delete above where it says no.
      *
+     * AND THE YES WRITES A VERDICT ONLY WHERE CONSENT IS THE CHECK, which is the one thing a reader
+     * of this method has to carry away. `verified: true` beside a null `probeAction` is not a
+     * neutral heal: it is a NAMED one of the four states {@link composioConnections.probeAction}
+     * enumerates — the consent state — and this method runs from an effect on mount, so writing it
+     * unconditionally meant every page load restated it over whatever a real check had recorded.
+     * For a key connection that erased the record, worst of all over "a named probe beside
+     * `verified: false`", the live account with a bad key behind it that is the one state somebody
+     * must act on; and it re-dated `verified_at` to the page load, so the row claimed a check on a
+     * day nothing was checked. The yes itself does not bear on a key: {@link
+     * ComposioBroker.isConnected} says an account is attached, Composio takes a key when it is
+     * typed and never tests it again, so for a key app that answer is what the row's existence
+     * already said. The branch is on the scheme recorded on the app's row, read through {@link
+     * isFieldScheme} as {@link connectBrokeredWithFields} and {@link recheckBrokeredConnection}
+     * read theirs, and a key row already here is left untouched — the evidence about a key is a
+     * call, and those two are the only writers of this row's verdict. A key app the vendor holds an
+     * account for with no row here still gets one, written UNCHECKED, because the row is the gate
+     * every later brokered call passes through and the only thing Disconnect works off.
+     *
      * `scope` IS EMPTY BECAUSE COMPOSIO GRANTS NONE THAT IT TELLS US ABOUT. The field exists so a
      * later refusal for want of a permission can be explained by what the vendor actually granted,
      * and Composio's connection answer is a boolean with no scope in it. Writing a plausible claim
@@ -4559,27 +4577,89 @@ export function createPluginStore(options: PluginStoreOptions) {
       // apart, and whether a row was already here is the whole of what decides if anybody acted.
       const existing = await this.brokeredConnection(input);
 
-      // VERIFIED, BECAUSE A CONSENT SCREEN IS A VERIFICATION AND NOT A LESSER KIND OF ONE. The
-      // vendor has just answered that this person's account is attached, which is the same
-      // question a probe goes and asks; that the evidence arrived through a consent flow rather
-      // than through a call this deployment made does not make it weaker. Writing on the column
-      // defaults instead left every consent connection reading `false` with a null `verified_at` —
-      // the pair a key somebody typed in and nobody ever checked reads — so the settings page could
-      // not tell the two apart. Written through the single writer above rather than here, so this
-      // path and the verify path cannot come to write two different row shapes; see
-      // {@link composioConnections.verified}.
-      await this.recordBrokeredConnection({
-        toolkit: input.toolkit,
-        userId: input.userId,
-        verified: true,
-        // NOTHING WAS SPENT TO EARN THAT FLAG, and that is what the null records rather than an
-        // absence of information. A consent connection is verified by the vendor's own yes at its
-        // own screen; no action of the app's is ever called against it, here or later, so there is
-        // no name to write and there never will be. The derived field could not say so — it
-        // answered with whatever the app happened to publish — and a consent row was listed as
-        // having been checked with an action nothing had called.
-        probeAction: null,
-      });
+      /*
+       * THE SCHEME ON THE APP'S ROW, WHICH IS WHAT DECIDES WHETHER THE YES ABOVE IS A CHECK.
+       *
+       * Keyed on the url, for the reason {@link connectBrokeredWithFields} and {@link
+       * recheckBrokeredConnection} both key their copy of this lookup on it: `mcp_servers.id` is a
+       * display name and nothing holds the two equal, so a row called `gmail` at `composio://slack`
+       * would decide a Slack confirm on Gmail's scheme. Asked through {@link isFieldScheme} rather
+       * than compared as a string, so the schemes this branches on cannot drift from the schemes
+       * that have a key behind them.
+       */
+      const [app] = await database
+        .select({ authScheme: mcpServers.authScheme })
+        .from(mcpServers)
+        .where(eq(mcpServers.url, `composio://${input.toolkit}`))
+        .limit(1);
+      const holdsKey = isFieldScheme(app?.authScheme ?? null);
+
+      if (!holdsKey) {
+        // VERIFIED, BECAUSE A CONSENT SCREEN IS A VERIFICATION AND NOT A LESSER KIND OF ONE. The
+        // vendor has just answered that this person's account is attached, which is the same
+        // question a probe goes and asks; that the evidence arrived through a consent flow rather
+        // than through a call this deployment made does not make it weaker. Writing on the column
+        // defaults instead left every consent connection reading `false` with a null `verified_at` —
+        // the pair a key somebody typed in and nobody ever checked reads — so the settings page could
+        // not tell the two apart. Written through the single writer above rather than here, so this
+        // path and the verify path cannot come to write two different row shapes; see
+        // {@link composioConnections.verified}.
+        await this.recordBrokeredConnection({
+          toolkit: input.toolkit,
+          userId: input.userId,
+          verified: true,
+          // NOTHING WAS SPENT TO EARN THAT FLAG, and that is what the null records rather than an
+          // absence of information. A consent connection is verified by the vendor's own yes at its
+          // own screen; no action of the app's is ever called against it, here or later, so there is
+          // no name to write and there never will be. The derived field could not say so — it
+          // answered with whatever the app happened to publish — and a consent row was listed as
+          // having been checked with an action nothing had called.
+          probeAction: null,
+        });
+      } else if (!existing) {
+        /*
+         * A KEY APP THE VENDOR HOLDS AN ACCOUNT FOR AND NOTHING HERE HAS A ROW FOR: recorded as
+         * UNCHECKED, which is the honest one of the four states for it. The account was made
+         * somewhere this deployment did not watch — in Composio's own dashboard, or by a connect
+         * whose row was lost — so no key of theirs has ever been tried from here, and null beside
+         * `false` is exactly "nothing was spent". The row still has to exist: it is the gate every
+         * later brokered call passes through, and the only thing Disconnect works off.
+         */
+        await this.recordBrokeredConnection({
+          toolkit: input.toolkit,
+          userId: input.userId,
+          verified: false,
+          probeAction: null,
+        });
+      }
+      /*
+       * AND AN EXISTING KEY ROW IS LEFT EXACTLY AS IT IS, which is the whole of what this branch
+       * does and the reason there is a branch at all.
+       *
+       * THIS RUNS FROM AN EFFECT ON MOUNT. Both brokered account screens confirm on every page
+       * load, so whatever is written here is written again every time somebody opens the page —
+       * and `verified: true` beside a null `probeAction` is not a neutral heal. It is one of the
+       * four states {@link composioConnections.probeAction} enumerates, and specifically the
+       * CONSENT one: "the vendor's own yes is the evidence and no call was ever made against the
+       * account". Written over a key row it erased the record of the last check and replaced it
+       * with that sentence, including over the worst state this feature has — a named probe beside
+       * `verified: false`, "it ran, the vendor refused the key, and the account is still standing"
+       * — which is the one state an operator has to act on. It also moved `verified_at` to the
+       * moment of the page load, so the row's own sentence, "last checked 13 Sep", named a day on
+       * which nothing was checked.
+       *
+       * BECAUSE THE YES IS NOT EVIDENCE ABOUT A KEY. {@link ComposioBroker.isConnected} answers
+       * that an account is attached, which for a key app is what the row's existence already said:
+       * Composio takes a key when it is typed and never tests it again — the whole reason the probe
+       * exists — so nothing in that answer bears on whether the key still works. Consent is the one
+       * scheme where the vendor's yes IS the check, and it earns the flag above for that reason
+       * alone. The evidence about a key is a call, and the two places that make one — {@link
+       * connectBrokeredWithFields} and {@link recheckBrokeredConnection} — are the only writers of
+       * this row's verdict. This one records what it learned by not writing.
+       *
+       * THE NEGATIVE HEAL IS UNTOUCHED, for both kinds. A vendor answering NO still deletes the
+       * row above, which is what a confirm on a key app is still worth running for.
+       */
 
       if (!existing) {
         await recordAuditEvent(auditStore, {

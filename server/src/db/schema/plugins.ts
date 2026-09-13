@@ -234,6 +234,16 @@ export const composioConnections = pgTable(
      * has ever checked reads — so nothing could tell the two apart, and the rows the migration
      * touched were the only ones in the table saying anything true.
      *
+     * ON A CONSENT ROW, AND ONLY THERE. That confirm runs from an effect on mount, so what it
+     * writes it writes on every page load — and the vendor's yes is evidence about a KEY of
+     * nothing, because Composio takes a key when it is typed and never tests it again. So the
+     * confirm branches on the scheme recorded on the app's row: it writes this flag where consent
+     * IS the check, and leaves a key connection's recorded verdict exactly as the last real call
+     * left it. Written across a key row instead, it restated the consent pair below — `verified`
+     * true beside a null `probe_action` — over the record of a check that had actually happened,
+     * and moved this timestamp to the page load, so the page's own sentence named a day on which
+     * nothing was checked.
+     *
      * WHAT THE PAIR SEPARATES IS A CHECKED CONNECTION FROM AN UNCHECKED ONE, and never one KIND of
      * connection from another. Which kind a row is comes from the app's own `auth_scheme`, which
      * the settings page branches on first; this column says only that somebody established the
@@ -272,6 +282,9 @@ export const composioConnections = pgTable(
      *   null, verified       — a CONSENT connection. The vendor's own yes at the end of its own
      *                          screen is the evidence, and no call was ever made against the
      *                          account, so there is no action to name and there never will be.
+     *                          Which is why `confirmBrokeredConnection`, the one writer of this
+     *                          pair, writes it only for a consent app: on a key row it is not a
+     *                          heal but one of the other three states overwritten by a page load.
      *   a name, verified     — it ran in this person's account and the vendor took the key.
      *   a name, not verified — it ran and the vendor refused the key, and the account it ran in is
      *                          still standing. A live account with a bad key behind it.
