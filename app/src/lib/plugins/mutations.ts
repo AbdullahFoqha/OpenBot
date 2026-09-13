@@ -257,19 +257,57 @@ export function registerOAuthClientMutationOptions(queryClient: QueryClient) {
  *
  * A name rather than a URL. The server narrows it to a known set before signing it into the state,
  * so this parameter cannot become an open redirect however it is called.
+ *
+ * NO URL IS A REAL ANSWER AND THE CALLER HAS TO BRANCH ON IT. One route serves both kinds of
+ * brokered app: it answers `{ authorizationUrl }` to a press on an app somebody consents to, and
+ * `{ fields }` to a press on one whose key somebody types. This unwraps the first key, so a press
+ * that landed on the second kind unwraps nothing — and while this was declared `Promise<string>`
+ * the one caller assigned that nothing to `window.location.href`, which the browser resolves
+ * against the current document and follows: a person pressing Connect was taken to a page called
+ * `undefined` on this deployment's own origin, having been told nothing.
+ *
+ * AND IT IS NOT A HYPOTHETICAL, because the two processes decide it from two copies of one list.
+ * The screen's `FIELD_SCHEMES` says which schemes are typed and the server's `isFieldScheme` says
+ * the same thing again; Composio's catalogue is the vendor's and may name a new typed scheme
+ * tomorrow, which the screen would read as consent — deliberately, because an unknown scheme is
+ * better sent to a consent screen than to an empty form — and the route would answer a form to.
+ * That is the state this type now describes rather than hides.
+ *
+ * `null` RATHER THAN `undefined`, AND THE DIFFERENCE IS THE WHOLE OF WHY THIS WENT UNNOTICED.
+ * `mutationFn` is an OPTIONAL property, so `useMutation` infers its data type out of
+ * `MutationFunction<T, …> | undefined` — and matching that against the source strips the
+ * `undefined` from both sides, `T`'s own included. A `Promise<string | undefined>` here therefore
+ * reaches every caller as a bare `string`: `onSuccess` binds its parameter to `string`, the
+ * assignment to `window.location.href` typechecks, and the compiler has been told the same lie in
+ * a second place. `null` is the one absent-value this inference cannot quietly discard, which is
+ * what makes the branch below it obligatory rather than advisory.
  */
 export function connectAccountMutationOptions(
   returnTo: "settings" | "admin" = "settings",
 ) {
   return mutationOptions({
-    mutationFn: (serverId: string): Promise<string> =>
-      client<string>(
+    mutationFn: async (serverId: string): Promise<string | null> => {
+      const authorizationUrl = await client<string | undefined>(
         `/api/plugins/servers/${encodeURIComponent(serverId)}/connect?returnTo=${returnTo}`,
         "authorizationUrl",
         { method: "POST", fallback: "That account could not be connected." },
-      ),
+      );
+      return authorizationUrl ?? null;
+    },
   });
 }
+
+/**
+ * What asking the vendor about an account comes back with.
+ *
+ * NAMED RATHER THAN WRITTEN INTO THE SIGNATURE AND AGAIN INTO A CAST. Every one of these three
+ * answer shapes was stated twice — once as the declared return type and once as an `as` on the
+ * parsed body — and the second copy is worse than redundant: a declared type corrected in one place
+ * goes on being asserted in the other, which is how a shape nothing produces survives being fixed.
+ * The sibling reads in `./queries.ts` have never done it, and these now read the same way: one name,
+ * declared once, and `response.json()` under it.
+ */
+export type BrokeredConnectionConfirmation = { connected: boolean };
 
 /**
  * Ask the vendor whether a brokered connection actually completed.
@@ -290,12 +328,14 @@ export function confirmBrokeredConnectionMutationOptions(
   queryClient: QueryClient,
 ) {
   return mutationOptions({
-    mutationFn: async (serverId: string): Promise<{ connected: boolean }> => {
+    mutationFn: async (
+      serverId: string,
+    ): Promise<BrokeredConnectionConfirmation> => {
       const response = await client(
         `/api/plugins/servers/${encodeURIComponent(serverId)}/connection/confirm`,
         { method: "POST", fallback: "That connection could not be confirmed." },
       );
-      return (await response.json()) as { connected: boolean };
+      return response.json();
     },
     onSuccess: () => invalidatePlugins(queryClient),
   });
@@ -358,20 +398,42 @@ export type BrokerField = {
  * types it in — so the same connect route answers a field list on the first press and takes the
  * values on the second. Nothing is written by this half: it is a question about the app, not about
  * anybody's account, which is why it refetches nothing.
+ *
+ * NO FIELDS IS A REAL ANSWER HERE TOO, and it is the same defect as
+ * {@link connectAccountMutationOptions} seen from the other side: that route answers a URL to a
+ * press on an app somebody consents to, so this unwraps nothing whenever the screen asked for a
+ * form and the server decided the app takes none. The two mis-read each other in exactly the
+ * states the other does, for the one reason — two copies of the list of typed schemes — so neither
+ * of these two types may claim a value the route only sometimes sends.
+ *
+ * `null` for the reason spelled out over {@link connectAccountMutationOptions}: an `undefined` in
+ * this position is inferred away by `useMutation` and reaches the caller as a plain `BrokerField[]`.
  */
 export function brokeredConnectionFieldsMutationOptions() {
   return mutationOptions({
-    mutationFn: (serverId: string): Promise<BrokerField[]> =>
-      client<BrokerField[]>(
+    mutationFn: async (serverId: string): Promise<BrokerField[] | null> => {
+      const fields = await client<BrokerField[] | undefined>(
         `/api/plugins/servers/${encodeURIComponent(serverId)}/connect`,
         "fields",
         {
           method: "POST",
           fallback: "That app could not be asked what it needs.",
         },
-      ),
+      );
+      return fields ?? null;
+    },
   });
 }
+
+/**
+ * What handing a key over comes back with. Declared once, for the reason
+ * {@link BrokeredConnectionConfirmation} gives.
+ */
+export type BrokeredKeyConnection = {
+  connected: boolean;
+  verified: boolean;
+  probe: string | null;
+};
 
 /**
  * Finish that connection with what the person typed.
@@ -399,11 +461,7 @@ export function connectBrokeredWithFieldsMutationOptions(
     mutationFn: async (variables: {
       serverId: string;
       values: Record<string, string>;
-    }): Promise<{
-      connected: boolean;
-      verified: boolean;
-      probe: string | null;
-    }> => {
+    }): Promise<BrokeredKeyConnection> => {
       const response = await client(
         `/api/plugins/servers/${encodeURIComponent(variables.serverId)}/connect`,
         {
@@ -412,15 +470,25 @@ export function connectBrokeredWithFieldsMutationOptions(
           fallback: "That account could not be connected.",
         },
       );
-      return (await response.json()) as {
-        connected: boolean;
-        verified: boolean;
-        probe: string | null;
-      };
+      return response.json();
     },
     onSuccess: () => invalidatePlugins(queryClient),
   });
 }
+
+/**
+ * What spending a call on a key comes back with. Declared once, for the reason
+ * {@link BrokeredConnectionConfirmation} gives.
+ *
+ * No `connected` here, and the absence is the point: this route is only ever aimed at an account
+ * that already exists, so it answers what the check found and never re-asserts that the row is
+ * there.
+ */
+export type BrokeredKeyCheck = {
+  verified: boolean;
+  verifiedAt: string | null;
+  probe: string | null;
+};
 
 /**
  * Spend one read-only call at the vendor to find out whether a key still works.
@@ -444,22 +512,12 @@ export function recheckBrokeredConnectionMutationOptions(
   queryClient: QueryClient,
 ) {
   return mutationOptions({
-    mutationFn: async (
-      serverId: string,
-    ): Promise<{
-      verified: boolean;
-      verifiedAt: string | null;
-      probe: string | null;
-    }> => {
+    mutationFn: async (serverId: string): Promise<BrokeredKeyCheck> => {
       const response = await client(
         `/api/plugins/servers/${encodeURIComponent(serverId)}/connection/recheck`,
         { method: "POST", fallback: "That connection could not be checked." },
       );
-      return (await response.json()) as {
-        verified: boolean;
-        verifiedAt: string | null;
-        probe: string | null;
-      };
+      return response.json();
     },
     onSuccess: () => invalidatePlugins(queryClient),
   });

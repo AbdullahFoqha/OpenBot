@@ -356,6 +356,28 @@ export function useBrokeredAccount(input: {
     onSuccess: (authorizationUrl) => {
       forgetConfirmation();
       forgetRecheck();
+      /*
+       * NO URL IS AN ANSWER, NOT A URL TO FOLLOW.
+       *
+       * The route this pressed serves both kinds of brokered app and answers a field list to the
+       * kind whose key somebody types — so a 200 with nothing to leave for means this press went to
+       * a key app that `kindOf` above read as consent, which is what happens the day Composio names
+       * a typed scheme this app's copy of `FIELD_SCHEMES` does not carry. Assigning that nothing
+       * navigated: the browser resolved the string `undefined` against the current document and
+       * followed it, putting the person on a page of that name on this deployment's own origin,
+       * with no sentence anywhere saying why.
+       *
+       * Reported rather than recovered from. This hook could press the other half of the route and
+       * open the form, but a screen that quietly repaired a disagreement between the two lists
+       * would leave nobody any reason to correct it — and the sentence names the one act that ends
+       * the state, which is a reload against a deployment whose app has caught up.
+       */
+      if (authorizationUrl === null) {
+        report(
+          "This app is connected with a key you hold rather than through a consent screen, so there was no page to send you to and nothing was connected. Reload this page and press Connect again.",
+        );
+        return;
+      }
       window.location.href = authorizationUrl;
     },
   });

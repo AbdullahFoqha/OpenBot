@@ -80,6 +80,68 @@ const RECHECKED_AT = "2026-09-13T09:00:00.000Z";
  */
 const PROBE = "GMAIL_FETCH_EMAILS";
 
+/**
+ * The schemes the SERVER answers a form for, which is the list `isFieldScheme` holds.
+ *
+ * The screen holds its own copy of this — `FIELD_SCHEMES` in `brokered-account-row.tsx` — because
+ * the two processes share no module, and the copy is what decides which of the two presses a
+ * Connect becomes. Kept here rather than imported from the screen so a test can make them disagree,
+ * which is the one thing an imported copy could never express.
+ */
+const SERVER_FIELD_SCHEMES = [
+  "API_KEY",
+  "BASIC",
+  "BEARER_TOKEN",
+  "BASIC_WITH_JWT",
+  /*
+   * AND ONE THE SCREEN HAS NEVER HEARD OF. Composio's catalogue is the vendor's, so it may name a
+   * typed scheme tomorrow that this app's copy of the list does not carry — and the screen's own
+   * comment says an unknown scheme is read as consent on purpose. That is the drift: the server
+   * answers a form and the screen asked for a URL.
+   */
+  "API_KEY_HEADER",
+];
+
+/**
+ * A typed scheme the server knows and the screen does not. See {@link SERVER_FIELD_SCHEMES}.
+ *
+ * Not a made-up string for its own sake: it stands for any scheme added at the vendor between one
+ * deployment of the server and the next of the app, which is a state this product reaches by doing
+ * nothing at all.
+ */
+const DRIFTED_FIELD_SCHEME = "API_KEY_HEADER";
+
+/** Where a real consent app's connect route sends somebody, as the vendor's own page. */
+const CONSENT_URL = "https://accounts.google.com/o/oauth2/v2/auth?state=sealed";
+
+/**
+ * Watch what gets assigned to `window.location.href` without letting it be assigned.
+ *
+ * happy-dom does not navigate, and silently keeps `about:blank` whatever is written here — so the
+ * one act this row performs on the consent path leaves no trace a test could read. The property is
+ * replaced on the instance, over the `Location` prototype's own accessor, and deleted again by the
+ * returned restore so the next test in this bun process gets the real one back.
+ */
+function watchNavigation(): {
+  navigations: string[];
+  restore: () => void;
+} {
+  const navigations: string[] = [];
+  Object.defineProperty(window.location, "href", {
+    configurable: true,
+    get: () => "about:blank",
+    set: (value: string) => {
+      navigations.push(String(value));
+    },
+  });
+  return {
+    navigations,
+    restore: () => {
+      delete (window.location as unknown as Record<string, unknown>).href;
+    },
+  };
+}
+
 /** The same day, spelled the way the row spells it — the reader's own locale, not this file's. */
 function asDay(iso: string): string {
   return new Date(iso).toLocaleDateString();
@@ -209,7 +271,17 @@ function installDeployment(deployment: Deployment): Server {
   const server: Server = { deletes: 0 };
 
   global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const path = typeof input === "string" ? input : String(input);
+    const requested = typeof input === "string" ? input : String(input);
+    /*
+     * The route, with any query taken off it.
+     *
+     * The consent press carries `?returnTo=` and the field press carries nothing, so a stub
+     * matching on the whole string answered only one of the two — `endsWith("/connect")` is false
+     * for `/connect?returnTo=settings`, and the consent press fell through to the plugins-page
+     * branch and was answered a page. That is a stub disagreeing with the server, which serves one
+     * route for both presses and forks on the row rather than on the query.
+     */
+    const path = requested.split("?")[0] ?? requested;
     const method = init?.method ?? "GET";
     const json = (body: unknown) =>
       new Response(JSON.stringify(body), {
@@ -294,7 +366,16 @@ function installDeployment(deployment: Deployment): Server {
          */
         return json({ connected: true, verified: false, probe: null });
       }
-      return json({ fields: state.fields });
+      /*
+       * THE FIRST PRESS FORKS ON THE RECORDED SCHEME, exactly as the route does: a typed scheme is
+       * answered the form, and everything else is answered the vendor's URL. A stub that answered a
+       * form to every bodyless press would agree with the screen by construction, and the whole
+       * question here is what the screen does when the two disagree.
+       */
+      if (SERVER_FIELD_SCHEMES.includes(state.authScheme)) {
+        return json({ fields: state.fields });
+      }
+      return json({ authorizationUrl: CONSENT_URL });
     }
     if (path.endsWith("/connection/recheck") && method === "POST") {
       state.verified = state.recheckAnswer.verified;
@@ -692,6 +773,66 @@ test("a key the broker refuses says so inside the dialog, not only behind it", a
   expect(view.getAllByText(REFUSED).length).toBe(2);
   // And the form stays up holding what was typed. A mistyped key is corrected, not retyped.
   expect(within(dialog).queryByLabelText("API Key")).toBeTruthy();
+});
+
+test("a consent app's Connect leaves for the vendor's own page", async () => {
+  installDeployment({
+    authScheme: "OAUTH2",
+    composioConfigured: true,
+    confirms: false,
+    recorded: false,
+  });
+  const watched = watchNavigation();
+
+  try {
+    const view = renderAccountScreen(queryClient());
+
+    await userEvent.click(await view.findByRole("button", { name: "Connect" }));
+
+    /*
+     * The whole of what this press does, and the reason the case below is worth having: the row
+     * hands the browser whatever the route answered with, and there is nothing between the two.
+     */
+    await waitFor(() => expect(watched.navigations).toEqual([CONSENT_URL]));
+  } finally {
+    watched.restore();
+  }
+});
+
+test("a typed scheme this screen does not know is refused, not navigated to undefined", async () => {
+  installDeployment({
+    /*
+     * The server knows this one and the screen does not. So the screen reads it as consent, presses
+     * the consent half of the route, and the route answers the form a typed scheme gets — a body
+     * with no `authorizationUrl` in it at all.
+     */
+    authScheme: DRIFTED_FIELD_SCHEME,
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY],
+    recorded: false,
+  });
+  const watched = watchNavigation();
+
+  try {
+    const view = renderAccountScreen(queryClient());
+
+    await userEvent.click(await view.findByRole("button", { name: "Connect" }));
+
+    /*
+     * THE DEFECT THIS IS ABOUT. The mutation was declared to answer a `string`, the unwrapped key
+     * was missing, and what reached the assignment was `undefined` — which the browser resolves
+     * against the current document and follows, landing the person on a page called `undefined` on
+     * this deployment's own origin, having been told nothing.
+     */
+    await waitFor(() =>
+      expect(view.queryByText(/no page to send you to/)).toBeTruthy(),
+    );
+    // The defect in its plainest form: before the fix this array held the one string "undefined".
+    expect(watched.navigations).toEqual([]);
+  } finally {
+    watched.restore();
+  }
 });
 
 test("the row names the app rather than calling it the app", async () => {

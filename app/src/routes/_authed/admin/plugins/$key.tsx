@@ -210,6 +210,18 @@ function RouteComponent() {
      * complete it for them, and nothing about being an administrator changes that.
      */
     onSuccess: (authorizationUrl) => {
+      /*
+       * A 200 with no url on it is not a url to follow. This press is on a `user-oauth` catalogue
+       * entry, whose half of that route always mints one or refuses, so this is the server having
+       * answered something this page does not understand. Assigning it navigated to a page called
+       * `undefined` on this deployment's own origin. See `connectAccountMutationOptions`.
+       */
+      if (authorizationUrl === null) {
+        setError(
+          "This deployment answered without a consent link, so there was nowhere to send you and nothing was connected. Try again, and check this connector's setup if it persists.",
+        );
+        return;
+      }
       window.location.href = authorizationUrl;
     },
   });
