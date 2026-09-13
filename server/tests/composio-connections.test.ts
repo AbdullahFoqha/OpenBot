@@ -1522,6 +1522,71 @@ test("an app whose only read takes an argument has no probe", async () => {
 });
 
 /**
+ * AND THE LISTING CARRIES THAT CHOICE, WHICH IS WHAT SURVIVES A RELOAD.
+ *
+ * CRITERION. A brokered connection to an app that publishes a safe argument-less read is listed
+ * with that action's name in `probe`; a connection to an app that publishes none is listed with
+ * null. Both read out of recorded metadata, and neither spends a call at the vendor.
+ *
+ * REASON. `probe` was only ever a field of an ANSWER — to a key handed over, or to a re-check — so
+ * a page that reloaded lost it, and the row fell back to the sentence that says a key was accepted
+ * without being checked. For the worst state this feature has that sentence is FALSE: a named probe
+ * beside `verified: false` means the check ran, the vendor refused the key, and the account it ran
+ * in could not be withdrawn. The one person with a live account and a bad key behind it was told
+ * nothing was wrong, and the Re-check button was taken away from them at the same moment — on the
+ * page load where they would reach for it.
+ *
+ * WHICH IS DERIVABLE RATHER THAN STORED, and that is the whole design: the chooser above answers
+ * from `mcp_tools` alone, so the listing can say what this deployment WOULD check an app with
+ * without asking Composio anything. What makes the derived field honest is that a key connection is
+ * always probed at connect time — so for an app that HAS a probe, the only way to be holding an
+ * unverified row is that the probe ran, failed, and the account could not be taken back.
+ */
+test("a listed brokered connection names the action its app would be checked with", async () => {
+  useAnsweringClient();
+  await addProbedApp();
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: probedToolkit, userId: askerId, verified: false });
+
+  const listed = await store.brokeredConnectionsFor(askerId);
+  expect(listed).toHaveLength(1);
+  expect(listed[0]?.serverId).toBe(probedId);
+  expect(listed[0]?.verified).toBe(false);
+  // The name, and not merely "something": it is the name that separates a key the vendor refused
+  // from an app with nothing to refuse it with.
+  expect(listed[0]?.probe).toBe(probeAction);
+  // And nothing was spent finding that out. The chooser reads the recorded listing.
+  expect(reached).toEqual([]);
+});
+
+/**
+ * AND AN APP WITH NOTHING SAFE TO SPEND A KEY ON IS LISTED AS EXACTLY THAT.
+ *
+ * CRITERION. Where the app publishes no action a probe may use, the listed connection's `probe` is
+ * null rather than a name.
+ *
+ * REASON. Null is the first of the three states and the only one that is a fact about the APP: most
+ * key-based apps in the live catalogue publish some argument-less read and PostHog publishes none,
+ * so an unverified row under such an app means nothing was tried rather than that something failed.
+ * A listing that could not say null would leave the screen unable to tell that apart from a refused
+ * key, which is the distinction the whole field exists for — and it would offer a Re-check that
+ * could only come back with the same null.
+ */
+test("a listed brokered connection for an app with no probe says there is none", async () => {
+  useAnsweringClient();
+  await addProbedApp({ withProbe: false });
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: probedToolkit, userId: askerId, verified: false });
+
+  const listed = await store.brokeredConnectionsFor(askerId);
+  expect(listed).toHaveLength(1);
+  expect(listed[0]?.serverId).toBe(probedId);
+  expect(listed[0]?.probe).toBeNull();
+});
+
+/**
  * CONNECTING WITH A KEY SOMEBODY TYPED: THE VALUES REACH COMPOSIO AND NOTHING ELSE.
  *
  * CRITERION. After a connection made from typed values, the secret is in the vendor's hands and in

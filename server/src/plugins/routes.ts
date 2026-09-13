@@ -729,15 +729,17 @@ export function createPluginRoutes(
      *
      * CONCATENATED WITHOUT REWRITING, because the fields a settings page draws from — the server
      * id, the scope, the date — line up across the two reads, and one row template can draw either
-     * kind. What does not line up is the pair `brokeredConnectionsFor` adds, `verified` and
-     * `verifiedAt`, so the list that leaves here is not uniform. That pair travels because a
-     * brokered row is the only one with anything to re-check: this deployment holds no secret for
-     * it, only a note that Composio said yes, and that note can drift when somebody ends the
-     * connection in Composio's own dashboard. A held connection has no equivalent question, so its
-     * rows carry no such fields, and their absence is what tells the two READS apart. It is not how
-     * a reader learns how an app connects: that is the app's recorded `authScheme`, and a page
-     * asking this list instead would be deriving a second answer to a question the row already
-     * carries.
+     * kind. What does not line up is what `brokeredConnectionsFor` adds — `verified`, `verifiedAt`
+     * and `probe` — so the list that leaves here is not uniform. Those travel because a brokered
+     * row is the only one with anything to re-check: this deployment holds no secret for it, only a
+     * note that Composio said yes, and that note can drift when somebody ends the connection in
+     * Composio's own dashboard. `probe` rides with the other two because the first of them cannot
+     * be read alone — three situations share one `verified: false`, and which action the app would
+     * be checked with is what separates them on a page that has done nothing but load. A held
+     * connection has no equivalent question, so its rows carry no such fields, and their absence is
+     * what tells the two READS apart. It is not how a reader learns how an app connects: that is
+     * the app's recorded `authScheme`, and a page asking this list instead would be deriving a
+     * second answer to a question the row already carries.
      *
      * SORTED, so two requests answer in the same order. Each read is ordered by server id within
      * its own table, and concatenating two sorted lists is not a sorted list. Compared as plain

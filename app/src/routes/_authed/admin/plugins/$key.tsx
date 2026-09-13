@@ -247,11 +247,18 @@ function RouteComponent() {
     /*
      * Absent where this person has never connected the app, and false rather than asserted: with no
      * row there is nothing that could have been checked, which is exactly what the server's own
-     * columns default to. The pair is optional on the type because that endpoint concatenates two
-     * reads and only a brokered row carries it.
+     * columns default to. The three are optional on the type because that endpoint concatenates two
+     * reads and only a brokered row carries them.
      */
     verified: connection?.verified ?? false,
     verifiedAt: connection?.verifiedAt ?? null,
+    /*
+     * AND THIS ONE IS NOT FLATTENED, for the reason the personal screen gives: the two above fall
+     * back on the server's own column defaults, while a null here is the server's answer that the
+     * app publishes nothing safe to spend a key on — not the absence of an answer. The row draws a
+     * different sentence for each, so the difference has to reach it.
+     */
+    probe: connection?.probe,
   });
 
   /** Adding is two writes when a token was typed: the credential, then the record pointing at it. */

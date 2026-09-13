@@ -90,11 +90,19 @@ function RouteComponent() {
     /*
      * Off the same row `recorded` is read from, and absent where you have never connected this app:
      * with no row there is nothing that could have been checked, which is what the server's own
-     * columns default to. The pair is optional on the type because that endpoint concatenates two
-     * reads and only a brokered row carries it.
+     * columns default to. The three are optional on the type because that endpoint concatenates two
+     * reads and only a brokered row carries them.
      */
     verified: connection?.verified ?? false,
     verifiedAt: connection?.verifiedAt ?? null,
+    /*
+     * PASSED THROUGH UNFLATTENED, unlike the two above. Their fallbacks are the server's own column
+     * defaults, so an absent field and a recorded one mean the same thing; this one's null is the
+     * server saying the app publishes nothing safe to check a key against, which is a different
+     * fact from having been told nothing. Collapsing the two would hand the row a verdict on every
+     * page load that has no answer behind it.
+     */
+    probe: connection?.probe,
   });
 
   if (plugins.isPending) {

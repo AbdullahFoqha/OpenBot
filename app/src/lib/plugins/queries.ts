@@ -226,6 +226,23 @@ export type PluginConnection = {
    * consent rather than of a probe, so it is not read as "this connection answered then".
    */
   verifiedAt?: string | null;
+  /**
+   * Which action this deployment would check this key against, present only on a brokered row.
+   *
+   * DERIVED BY THE SERVER OUT OF THE APP'S RECORDED ACTIONS, not stored and not asked of the
+   * vendor — which is why it can be here at all, and why it survives a reload where the answer to a
+   * connect or a re-check cannot. Read together with {@link PluginConnection.verified} it separates
+   * the three situations that share the one word `false`: no probe means the app publishes nothing
+   * safe to spend a key on and nothing was tried; a probe with `verified` means the check ran and
+   * passed; and a probe WITHOUT it means the check ran, the vendor refused the key, and the account
+   * could not be withdrawn — because a key connection is always probed as it is made, so no other
+   * history leaves that pair behind.
+   *
+   * Optional for the same reason the pair above is: that endpoint concatenates two reads, and only
+   * the brokered one carries any of this. Undefined is the absence of the field and not a fourth
+   * state.
+   */
+  probe?: string | null;
 };
 
 export type PluginConnections = {

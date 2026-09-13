@@ -3896,6 +3896,39 @@ export function createPluginStore(options: PluginStoreOptions) {
      * row is comes from the app's recorded {@link ServerRecord.authScheme}, which the page branches
      * on first, and not from anything answered here.
      *
+     * `probe` IS DERIVED HERE RATHER THAN STORED, AND IT IS WHAT SURVIVES A RELOAD. The pair above
+     * says whether a key connection was ever checked; it cannot say WHY one was not, and three
+     * different situations share the one word `false`. Until this field, only the answer to a
+     * connect or a re-check could tell them apart — so a page reload lost the distinction, and the
+     * worst of the three degraded into the mildest: a row saying the key was accepted without being
+     * checked, over an account whose key the vendor had actually REFUSED.
+     *
+     * THERE IS NO COLUMN AND THERE NEED NOT BE, because {@link probeActionFor} already answers the
+     * question from recorded metadata alone — which action this deployment would check this app
+     * with — and asks the vendor nothing. Read together with `verified`, its answer separates the
+     * three:
+     *
+     *   no probe, not verified   — the app publishes nothing safe to spend a key on. Nothing was
+     *                              tried, and nothing can be. A fact about the app, not the key.
+     *   a probe, verified        — it ran in this person's account and the vendor took the key.
+     *   a probe, NOT verified    — it ran and the vendor refused, and the account could not be
+     *                              withdrawn. A live account with a bad key behind it.
+     *
+     * AND THE THIRD LINE IS AN INFERENCE THIS METHOD IS ENTITLED TO MAKE, which is what makes the
+     * derived field honest rather than a guess. A key connection is ALWAYS probed at connect time
+     * ({@link connectBrokeredWithFields}), and a probe that fails withdraws the account it just
+     * made — so the only way to be holding an unverified row for an app that HAS a probe is that
+     * the probe ran, the vendor refused, and the withdrawal did not succeed. The row could not
+     * otherwise exist.
+     *
+     * CHOSEN PER ROW RATHER THAN FOLDED INTO THE QUERY ABOVE, and deliberately: the chooser reads
+     * every recorded action for one app and applies a rule — vendor-labelled read, not destructive,
+     * no required inputs, identity action preferred — that has no honest spelling in SQL. Folding
+     * it in would mean a second copy of that rule, and a second copy is how a listing comes to name
+     * an action the verification would never call. The rows read are the same either way (the
+     * chooser selects the same actions whether asked once per app or once for all of them), the
+     * calls are made together, and the count is bounded by the apps ONE person has connected.
+     *
      * `verifiedAt` STAYS NULL WHERE IT IS NULL, unlike `connectedAt`, which collapses to `""`
      * because a row cannot exist without one and the fallback is unreachable. Null here is
      * reachable and it means something: never checked. Folding it into `""` would hand the page a
@@ -3911,6 +3944,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         connectedAt: string;
         verified: boolean;
         verifiedAt: string | null;
+        probe: string | null;
       }[]
     > {
       const rows = await database
@@ -3928,13 +3962,16 @@ export function createPluginStore(options: PluginStoreOptions) {
         .where(eq(composioConnections.userId, userId))
         .orderBy(asc(mcpServers.id));
 
-      return rows.map((row) => ({
-        serverId: row.serverId,
-        scope: "",
-        connectedAt: iso(row.connectedAt) ?? "",
-        verified: row.verified,
-        verifiedAt: iso(row.verifiedAt),
-      }));
+      return await Promise.all(
+        rows.map(async (row) => ({
+          serverId: row.serverId,
+          scope: "",
+          connectedAt: iso(row.connectedAt) ?? "",
+          verified: row.verified,
+          verifiedAt: iso(row.verifiedAt),
+          probe: await this.probeActionFor(row.serverId),
+        })),
+      );
     },
 
     /**

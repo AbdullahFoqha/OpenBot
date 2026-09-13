@@ -115,15 +115,16 @@ export type BrokeredAccount = {
    *   a name, NOT verified — it ran, the vendor refused the key, and the account it had just made
    *                 could not be withdrawn. The row exists, the key is bad, and something of theirs
    *                 is standing at Composio. This is the worst state the feature has.
-   *   `undefined` — NOT A FOURTH VERDICT BUT THE ABSENCE OF ONE. No answer has been given here,
-   *                 which is every first render: the connections read carries the flag and the date
-   *                 and has no column for this, so a page load knows whether a check passed and
-   *                 never what it was spent on, nor whether there was anything to spend one on.
-   *                 Nothing may read it as either of the two answers the server actually sends.
+   *   `undefined` — NOT A FOURTH VERDICT BUT THE ABSENCE OF ONE. Nothing has said anything about a
+   *                 probe for this row: a held connection, whose rows carry none of this, or an app
+   *                 nobody has connected. Nothing may read it as either of the two the server sends.
    *
-   * Carried out of the answers rather than out of the recorded row, because only the answers have
-   * it: a re-check and a key handed over both come back naming the action, and neither writes the
-   * name anywhere a later read could find it.
+   * CARRIED BY THE READ AS WELL AS BY THE ANSWERS, which is what keeps the three states apart after
+   * a reload. A re-check and a key handed over both come back naming the action, and neither writes
+   * the name down — so while this came only from an answer, a refresh collapsed the third state
+   * into the first and told the one person with a refused key that nothing had been tried. The
+   * connections read derives it instead, from the app's recorded actions and without asking the
+   * vendor anything, and the freshest answer still wins over it.
    */
   probe: string | null | undefined;
   /**
@@ -193,6 +194,16 @@ export function useBrokeredAccount(input: {
   /** See {@link BrokeredAccount.verifiedAt}, as this deployment last wrote it down. */
   verifiedAt: string | null;
   /**
+   * Which action a check of this key WOULD be spent on, as the connections read derived it.
+   *
+   * The read's answer and not an answer to anything pressed here, which is exactly what makes it
+   * worth passing: it is all the row has on a page that has only loaded. Undefined where the
+   * recorded row carries no such field — a held connection, or an app nobody has connected — and
+   * null where the app publishes nothing safe to spend a key on. See {@link BrokeredAccount.probe}
+   * for what each of those means to the sentence the row draws.
+   */
+  probe: string | null | undefined;
+  /**
    * How the app's authorization config was CREATED, as the vendor's own scheme literal.
    *
    * Read off the recorded server row rather than off a connection row: the connections endpoint
@@ -216,6 +227,7 @@ export function useBrokeredAccount(input: {
     brokered,
     configured,
     recorded,
+    probe,
     report,
     returnTo,
     serverId,
@@ -387,13 +399,18 @@ export function useBrokeredAccount(input: {
     verified: recheck.data ? recheck.data.verified : verified,
     verifiedAt: recheck.data ? recheck.data.verifiedAt : verifiedAt,
     /*
-     * The name off whichever answer is newest, and UNDEFINED WHERE THERE IS NONE — not null, which
-     * is a thing the server says and this deployment would be inventing. See
-     * {@link BrokeredAccount.probe}: a row that reported "nothing to check with" on every page load
-     * would tell somebody their app publishes no probe on the strength of never having asked, and
-     * would take away the button they reach for having just fixed their key.
+     * The name off whichever answer is newest, and THE READ'S OWN ANSWER UNTIL THERE IS ONE — the
+     * same rule `connected` and `verified` follow above, and for the same reason: an answer beats
+     * the record, and a just-finished re-check must not be overruled by a read taken before it.
+     *
+     * WHAT IS PASSED IN IS NOT A GUESS THIS DEPLOYMENT IS MAKING. The connections read derives the
+     * name from the app's recorded actions — which action a check WOULD be spent on — so its null
+     * is the server saying there is nothing to spend one on, exactly as an answer's null is. That
+     * is why it is passed straight through rather than flattened to undefined: undefined is the
+     * absence of any answer at all, and it is what remains for a row whose read carried no such
+     * field. See {@link BrokeredAccount.probe}.
      */
-    probe: answered ? answered.probe : undefined,
+    probe: answered ? answered.probe : probe,
     recheck: () => {
       report(null);
       recheck.mutate(serverId);

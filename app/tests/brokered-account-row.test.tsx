@@ -143,6 +143,16 @@ type Deployment = {
   /** When that happened. Null wherever `verified` is false — a check that failed records no time. */
   verifiedAt?: string | null;
   /**
+   * Which action this deployment WOULD check the key with, as the connections read now derives it.
+   *
+   * Left off by default, because that is what a row out of the held-connection half of that
+   * endpoint looks like and what every test written before the field existed meant: the key was
+   * taken and nothing here knows what, if anything, tried it. A name or a null is the read saying
+   * which of the three states the row is really in, and it survives a reload where an answer to a
+   * mutation cannot.
+   */
+  probe?: string | null;
+  /**
    * What a re-check answers when somebody presses for one, as the route's whole body.
    *
    * `probe` travels with the verdict because the verdict alone is not an answer: the only
@@ -178,6 +188,7 @@ function installDeployment(deployment: Deployment): Server {
     verified: false,
     verifiedAt: null as string | null,
     rejects: undefined as string | undefined,
+    probe: undefined as string | null | undefined,
     recheckAnswer: { verified: true, verifiedAt: RECHECKED_AT, probe: PROBE },
     ...deployment,
   };
@@ -201,6 +212,13 @@ function installDeployment(deployment: Deployment): Server {
                 connectedAt: "2026-09-10T00:00:00.000Z",
                 verified: state.verified,
                 verifiedAt: state.verifiedAt,
+                /*
+                 * Derived by the server out of the app's recorded actions, so it is on every
+                 * brokered row a page load reads and not only on the answer to a write. Undefined
+                 * here is the field being absent from the JSON, which is what a deployment whose
+                 * app publishes nothing this stub was told about sends.
+                 */
+                probe: state.probe,
               },
             ]
           : [],
@@ -1025,4 +1043,67 @@ test("a key re-checked and then disconnected stops claiming it was checked", asy
     view.queryByText(/accepted without being checked against Gmail/),
   ).toBeTruthy();
   expect(view.queryByText(/last checked/)).toBeNull();
+});
+
+test("a rejected key still says so on a page that has only read, and still offers Re-check", async () => {
+  /*
+   * THE RELOAD, WHICH IS THE STATE THIS WHOLE FIELD WAS MISSING FROM. Nothing has been pressed
+   * here: no key has just been handed over and no re-check has been made, so the hook holds no
+   * mutation answer at all and everything the row knows came out of the connections read. That read
+   * now derives `probe` from the app's recorded actions, which is what lets the three states behind
+   * one `verified: false` survive a refresh.
+   *
+   * Before it did, this exact page said "accepted without being checked" — to the one person whose
+   * key HAS been checked and refused, and whose account is standing at Composio because this
+   * deployment could not take it back. The button they would reach for was withheld at the same
+   * time, on the only render where they would look for it.
+   */
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: true,
+    fields: [PERPLEXITY_KEY],
+    recorded: true,
+    verified: false,
+    verifiedAt: null,
+    probe: PROBE,
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  expect(
+    await view.findByText(/was checked against Gmail and rejected/),
+  ).toBeTruthy();
+  expect(view.getByText(/still stands at Composio/)).toBeTruthy();
+  // And never the sentence that is false here.
+  expect(
+    view.queryByText(/accepted without being checked against Gmail/),
+  ).toBeNull();
+  // The way back: a key corrected at the vendor is worth a second check, not a second connection.
+  expect(await view.findByRole("button", { name: "Re-check" })).toBeTruthy();
+
+  cleanup();
+
+  /*
+   * AND THE SAME ON THE ADMINISTRATOR'S PAGE, which draws the same row from its own call. The two
+   * screens wire the hook up separately, so a field carried into one of them and not the other is a
+   * defect neither screen's other tests can see.
+   */
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: true,
+    fields: [PERPLEXITY_KEY],
+    recorded: true,
+    verified: false,
+    verifiedAt: null,
+    probe: PROBE,
+  });
+
+  const admin = renderAdminScreen(queryClient());
+
+  expect(
+    await admin.findByText(/was checked against Gmail and rejected/),
+  ).toBeTruthy();
+  expect(await admin.findByRole("button", { name: "Re-check" })).toBeTruthy();
 });
