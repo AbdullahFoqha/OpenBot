@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { createApp } from "../src/app";
 import { loadConfig } from "../src/config";
 import { ServerRowAmbiguousError } from "../src/plugins/access";
-import { type BrokerApp, BrokerRefusalError } from "../src/plugins/broker";
+import {
+  type BrokerApp,
+  type BrokerConnection,
+  BrokerRefusalError,
+} from "../src/plugins/broker";
 import {
   CatalogueEntryUnknownError,
   CustomServerRefusedError,
@@ -629,7 +633,12 @@ function directoryApp(
    */
   enable: (() => Promise<never>) | null = null,
 ) {
-  const added: Array<{ slug: string; title: string; by: string }> = [];
+  const added: Array<{
+    slug: string;
+    title: string;
+    by: string;
+    connection: BrokerConnection;
+  }> = [];
   const store = {
     // Every read the plugins surface makes on its way to the route under test. The directory asks
     // for urls and is handed urls: the rows below carry an id as well, and the route never sees it.
@@ -640,6 +649,7 @@ function directoryApp(
       slug: string;
       title: string;
       by: string;
+      connection: BrokerConnection;
     }) => {
       if (enable) return enable();
       added.push(input);
@@ -771,6 +781,40 @@ describe("the Composio directory", () => {
     expect(added).toEqual([]);
   });
 
+  test("an app this deployment cannot connect is refused before the store", async () => {
+    /*
+     * THE ASYMMETRY THIS CLOSES. The GET hides every `unsupported` app, so an administrator
+     * cannot press Add on one through the picker; the POST validates against the unfiltered
+     * catalogue, so a request naming one by hand walks straight past that. What it would reach is
+     * `addBrokeredApp`, whose `schemeFor` records `null` for an unsupported app — and `null` on
+     * that column is read everywhere else as "not a brokered row at all". So the row this would
+     * write is one that lies about its own kind.
+     *
+     * The derivation's own `reason` is the answer, because it is the sentence that names what is
+     * missing for THIS app, and 503 because it is a refusal this deployment authored — the same
+     * status `brokerRefusal` gives one raised a layer down, and not a 400, which would read as a
+     * malformed request about an app Composio really does publish.
+     */
+    const { added, app } = directoryApp();
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "docusign" }),
+      },
+    );
+
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      "OAuth application registered by whoever runs this deployment",
+    );
+    // AND THE STORE WAS NEVER ASKED, which is the whole point of the guard: the misleading row is
+    // not written and then answered around, it is never reachable.
+    expect(added).toEqual([]);
+  });
+
   test("an app the directory does list is added", async () => {
     const { added, app } = directoryApp();
 
@@ -786,7 +830,16 @@ describe("the Composio directory", () => {
     expect(response.status).toBe(201);
     // The title comes off the directory entry, never off the request: the caller chose an app, not
     // a name for it.
-    expect(added).toEqual([{ slug: "slack", title: "Slack", by: ADMIN.email }]);
+    // And so does the connection: how an app connects is read off the catalogue row that was
+    // chosen, not derived a second time on the way to the store.
+    expect(added).toEqual([
+      {
+        slug: "slack",
+        title: "Slack",
+        by: ADMIN.email,
+        connection: { kind: "consent" },
+      },
+    ]);
   });
 
   test("somebody who is not an administrator sees none of it", async () => {
@@ -878,14 +931,17 @@ describe("the Composio directory", () => {
      * party being down and the generic sentence would send an administrator to check a key that is
      * fine.
      *
-     * DOCUSIGN IS THE APP PRESSED HERE because it is the fixture's `unsupported` row, and a refusal
-     * of exactly this kind is the one it would really raise. The POST can still reach it: the route
-     * searches the unfiltered `directory`, not the `connectable` subset the GET answers with, so
-     * the last thing between an administrator and a dead button is this sentence.
+     * A CONNECTABLE APP IS PRESSED HERE, and it has to be. The fixture's `unsupported` row would
+     * be the natural choice — the refusal below is the one DocuSign would really raise — but the
+     * route now refuses an unsupported app itself, before the store is called at all, so pressing
+     * that row would answer 503 with the catalogue's own sentence and never reach the failing
+     * store this case exists to exercise. Linear is connectable, and a refusal can still come back
+     * out of enabling it: Composio holding no managed credentials is a fact about the vendor's
+     * side, not about what this deployment can drive.
      */
     const { app } = directoryApp(undefined, "admin", [], async () => {
       throw new BrokerRefusalError(
-        "DocuSign was not enabled: it needs its own OAuth client, and Composio holds no managed credentials for it.",
+        "Linear was not enabled: Composio holds no managed credentials for this toolkit, so there is no auth config for this deployment to create.",
       );
     });
 
@@ -901,13 +957,13 @@ describe("the Composio directory", () => {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ slug: "docusign" }),
+          body: JSON.stringify({ slug: "linear" }),
         },
       );
 
       expect(response.status).toBe(503);
       expect(((await response.json()) as { error: string }).error).toContain(
-        "its own OAuth client",
+        "no managed credentials for this toolkit",
       );
     } finally {
       console.error = realError;

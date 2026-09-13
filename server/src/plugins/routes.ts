@@ -608,11 +608,45 @@ export function createPluginRoutes(
       );
     }
 
+    /*
+     * AN APP THIS DEPLOYMENT CANNOT CONNECT IS NOT AN APP TO ADD, and the GET half above is not
+     * enough on its own: it hides every `unsupported` app from the picker, so nobody presses Add on
+     * one, but this route validates against the unfiltered `directory` — so a request that names
+     * one by hand arrives here past that filter.
+     *
+     * WHAT IT WOULD REACH IS A STORE METHOD THAT RECORDS A MISLEADING ROW. `schemeFor` writes
+     * `null` on `auth_scheme` for an unsupported connection, and a null there is read everywhere
+     * else as "not a brokered row at all" — so the row enabling would write is one whose recorded
+     * kind contradicts what it is.
+     *
+     * A SECOND GUARD RATHER THAN A REPLACEMENT: the adapter keeps its own refusal, and the two
+     * catch different things. This one stops a CALLER OF THIS ROUTE reaching a store method that
+     * would write that row — which is a fact about `addBrokeredApp`, and holds for whatever broker
+     * is behind it, including one that would happily create the config. The adapter's stops ANY
+     * caller at all — this route, a script, a future path — from reaching the vendor for an app
+     * this deployment has nowhere to hold an OAuth client for. Neither subsumes the other, and the
+     * store itself still has no guard, which is precisely why the cheap one here is worth having.
+     *
+     * The derivation's own `reason` is the sentence, because it names what is missing for this app
+     * rather than for unsupported apps in general. 503 because this is a refusal this deployment
+     * authored — the same status `brokerRefusal` gives an authored refusal raised a layer down, and
+     * for the same reading: the brokered surface is unavailable for this app until somebody here
+     * changes something, rather than unavailable because a third party is down. Not the 400 above,
+     * which says the app does not exist; this one does exist, and this deployment cannot drive it.
+     */
+    if (app.connection.kind === "unsupported") {
+      return context.json({ error: app.connection.reason }, 503);
+    }
+
     try {
       const server = await store.addBrokeredApp({
         slug: app.slug,
         title: app.name,
         by: actorEmail(context),
+        // Off the directory entry the administrator chose, never derived a second time here: a
+        // second derivation is a second answer, which is the one thing `BrokerConnection` exists to
+        // prevent. It decides what config the store creates at the vendor, and what the row records.
+        connection: app.connection,
       });
       return context.json({ server }, 201);
     } catch (error) {
