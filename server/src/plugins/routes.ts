@@ -629,7 +629,19 @@ export function createPluginRoutes(
       if (isDeploymentFault(error)) {
         return context.json({ error: deploymentFaultSentence(error) }, 409);
       }
-      throw error;
+      /*
+       * THE SAME MAPPING THE DIRECTORY READ ABOVE MAKES, FOR THE SAME REASON, and its absence here
+       * is what left an administrator with nothing. Composio's own sentence — "Default auth config
+       * not found for toolkit linear_mcp. Composio does not have managed credentials for this
+       * toolkit." — travelled as an unhandled throw, so the route answered a bodyless 500 and the
+       * browser fell back to its own "That app could not be added". Everything that explains the
+       * failure existed; nothing carried it the last step.
+       */
+      const refusal = brokerRefusal(
+        error,
+        `${app.name} could not be enabled, and Composio said nothing about why. Try again, and check this deployment's Composio key if it persists.`,
+      );
+      return context.json({ error: refusal.error }, refusal.status);
     }
   });
 

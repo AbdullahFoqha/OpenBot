@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createApp } from "../src/app";
 import { loadConfig } from "../src/config";
 import { ServerRowAmbiguousError } from "../src/plugins/access";
-import type { BrokerApp } from "../src/plugins/broker";
+import { type BrokerApp, BrokerRefusalError } from "../src/plugins/broker";
 import {
   CatalogueEntryUnknownError,
   CustomServerRefusedError,
@@ -621,6 +621,13 @@ function directoryApp(
   role: "admin" | "user" = "admin",
   /** What this deployment has already added, which is where `enabled` comes from. */
   servers: Array<{ id: string; url: string }> = [],
+  /**
+   * How enabling fails, for the cases that are about the failing half. Null is the store that
+   * works: it records the call and answers a row. Enabling is where the second half of this
+   * surface's failures are decided, and none of them could be tested while the only store here
+   * succeeded.
+   */
+  enable: (() => Promise<never>) | null = null,
 ) {
   const added: Array<{ slug: string; title: string; by: string }> = [];
   const store = {
@@ -634,6 +641,7 @@ function directoryApp(
       title: string;
       by: string;
     }) => {
+      if (enable) return enable();
       added.push(input);
       return { id: `composio-${input.slug}`, url: `composio://${input.slug}` };
     },
@@ -855,6 +863,40 @@ describe("the Composio directory", () => {
     const refusal = (await response.json()).error as string;
     expect(refusal).toContain("COMPOSIO_API_KEY");
     expect(refusal).not.toContain("fetch failed");
+  });
+
+  test("a refusal while enabling reaches the administrator who pressed the button", async () => {
+    /*
+     * THE DEAD BUTTON. An administrator pressed Add and Composio answered "Default auth config not
+     * found for toolkit linear_mcp. Composio does not have managed credentials for this toolkit." —
+     * everything needed to explain the failure, and a step somebody here can take. The route mapped
+     * that sentence for the directory read and for nothing else, so a refusal out of enabling left
+     * as an unhandled throw: a bodyless 500, and the browser's own "That app could not be added."
+     * over the top of a reason that existed.
+     *
+     * 503 with the refusal's own words, because a refusal this deployment authored is not a third
+     * party being down and the generic sentence would send an administrator to check a key that is
+     * fine.
+     */
+    const { app } = directoryApp(undefined, "admin", [], async () => {
+      throw new BrokerRefusalError(
+        "Linear was not enabled: it needs its own OAuth client, and Composio holds no managed credentials for it.",
+      );
+    });
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "linear" }),
+      },
+    );
+
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      "its own OAuth client",
+    );
   });
 });
 
