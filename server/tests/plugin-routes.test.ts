@@ -711,6 +711,14 @@ describe("the Composio directory", () => {
     );
     expect(slugs).not.toContain("docusign");
     expect(slugs).toEqual(["slack", "gmail", "linear"]);
+
+    // And the search branch reads the same filtered list, not the raw directory. Searching is what
+    // an administrator does to a 1540-app picker, so a term that names the unconnectable app is
+    // the request most likely to hand one back.
+    const searched = await app.request(
+      "http://openbot.test/api/plugins/composio/apps?q=docu",
+    );
+    expect((await searched.json()).apps).toEqual([]);
   });
 
   test("an app is enabled by the url of the row, not by the row's id", async () => {
