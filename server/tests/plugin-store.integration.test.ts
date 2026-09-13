@@ -3890,11 +3890,21 @@ async function freshStore(options: { broker?: ComposioBroker } = {}) {
  * `url` is an option because the id and the url are two fields and nothing holds them equal: a row
  * called `gmail` at `composio://slack` is the shape that used to pass the connection gate on one
  * spelling and run against the other. The connected person is still connected to `gmail`.
+ *
+ * `authScheme` is the vendor's own scheme literal, as it was recorded when somebody enabled the app,
+ * and the call gate reads it to decide whether a connection row is required at all. Absent by
+ * default, which is what every other test here wants: a row that is not `NO_AUTH` is a row the gate
+ * still asks a connection for.
  */
 async function seedComposioGmail(
   database: Database,
   store: PluginStore,
-  options: { connect?: boolean; version?: string | null; url?: string } = {},
+  options: {
+    connect?: boolean;
+    version?: string | null;
+    url?: string;
+    authScheme?: string;
+  } = {},
 ) {
   await database.insert(mcpServers).values({
     id: "gmail",
@@ -3902,6 +3912,7 @@ async function seedComposioGmail(
     vendor: "Composio",
     url: options.url ?? "composio://gmail",
     provenance: "composio",
+    authScheme: options.authScheme ?? null,
   });
   await database.insert(mcpTools).values({
     serverId: "gmail",
@@ -4328,6 +4339,80 @@ test("a Composio call whose row id and url name different apps is refused", asyn
   // the row id, this call completed: it ran a Slack action against a Gmail connection, sent the
   // version recorded for the Gmail action, and was audited as having reached the asker's own
   // account — a person granted one app and dialled into another with nothing noticing.
+  expect(reached).toEqual([]);
+});
+
+/*
+ * WHETHER A BROKERED CALL NEEDS A CONNECTION ROW AT ALL IS THE APP'S OWN QUESTION, AND THESE TWO
+ * TESTS ARE ONE PAIR.
+ *
+ * The fixtures differ in exactly one field — the scheme recorded on the row when somebody enabled
+ * the app — and otherwise dial the same app, at the same person, with no connection row anywhere.
+ * So the opposite outcomes below cannot be caused by anything but the recorded scheme.
+ *
+ * SUITE-SCOPED APP, for the reason the test above is suite-scoped: `("unclaimed_<suite>",
+ * "user_asker")` is a pair no deployment can be holding, so "nobody has connected this" is a
+ * property of the run rather than a hope about the database. Spelled as a real app, a stray
+ * connection row somebody else wrote would make the first test pass for the wrong reason and the
+ * second one fail for it.
+ */
+test("a no-auth app runs without anybody having connected it", async () => {
+  const { store, database } = await freshStore();
+  const reached: string[] = [];
+  useComposioClient({
+    listActions: async () => [],
+    execute: async ({ slug }) => {
+      reached.push(slug);
+      return vendorAnswered();
+    },
+  });
+  await seedComposioGmail(database, store, {
+    url: `composio://unclaimed_${suite}`,
+    authScheme: "NO_AUTH",
+    connect: false,
+  });
+
+  const result = await store.callTool({
+    ref: "gmail/GMAIL_FETCH_EMAILS",
+    args: {},
+    botId: "bot_helper",
+    actorId: "user_asker",
+  });
+
+  expect(result.isError).toBe(false);
+  // Dialled, not merely un-refused. A no-auth app has no account to open, so the deployment's own
+  // key is the entire credential the call goes out with, and reaching the vendor is what says the
+  // gate returned rather than threw.
+  expect(reached).toEqual(["GMAIL_FETCH_EMAILS"]);
+});
+
+test("an app whose accounts are somebody's still refuses without a row, and names the person's own step", async () => {
+  const { store, database } = await freshStore();
+  const reached: string[] = [];
+  useComposioClient({
+    listActions: async () => [],
+    execute: async ({ slug }) => {
+      reached.push(slug);
+      return vendorAnswered();
+    },
+  });
+  await seedComposioGmail(database, store, {
+    url: `composio://unclaimed_${suite}`,
+    authScheme: "OAUTH2",
+    connect: false,
+  });
+
+  await expect(
+    store.callTool({
+      ref: "gmail/GMAIL_FETCH_EMAILS",
+      args: {},
+      botId: "bot_helper",
+      actorId: "user_asker",
+    }),
+  ).rejects.toThrow(/connect it in settings/i);
+
+  // Never dialled. The refusal is local so the person is told their own next step instead of shown
+  // the broker's error about an account it cannot find, and no call is spent finding that out.
   expect(reached).toEqual([]);
 });
 

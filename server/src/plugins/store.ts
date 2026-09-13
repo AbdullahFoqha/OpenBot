@@ -1148,7 +1148,16 @@ export function createPluginStore(options: PluginStoreOptions) {
    * here at all.
    */
   async function connectionTokenFor(
-    row: { id: string; title: string; credentialId: string | null },
+    row: {
+      id: string;
+      title: string;
+      credentialId: string | null;
+      /**
+       * The scheme recorded when the app was enabled, which decides whether a brokered call needs a
+       * connection row at all. The vendor's own literal, never a {@link BrokerConnection} kind.
+       */
+      authScheme: string | null;
+    },
     entry: CatalogueEntry | null,
     actorId: string,
     access: ServerAccess,
@@ -1202,6 +1211,25 @@ export function createPluginStore(options: PluginStoreOptions) {
           `${row.id} resolves to a brokered credential with no Composio app in its url.`,
         );
       }
+
+      /*
+       * AN APP THAT NEEDS NO AUTHENTICATION HAS NO ROW TO FIND, AND CANNOT EVER HAVE ONE.
+       *
+       * `composio_connections` is the whole of the permission for a brokered call, and every row in
+       * it means one thing: this person granted this deployment access to their account at this
+       * app. A `NO_AUTH` app has no account and no consent — Composio refuses even to hold an
+       * authorization config for one — so nobody presses Connect and nothing could write the row.
+       *
+       * THE ALTERNATIVE WAS WRITING ONE ANYWAY, and it is worse than it looks. Offboarding reads
+       * this table to find what to revoke, the audit trail reads it to say what somebody had, and
+       * disconnect reads it to know what to end. Rows where no person consented and no account
+       * exists are indistinguishable, a year on, from rows where somebody did.
+       *
+       * The scheme is the one RECORDED when the app was enabled rather than a fresh read of the
+       * catalogue: a vendor that re-labels an app must not turn a gate off underneath a deployment
+       * that is already running.
+       */
+      if (row.authScheme === "NO_AUTH") return {};
 
       /*
        * Keyed on the app the call will run in, which is the one the url names.
