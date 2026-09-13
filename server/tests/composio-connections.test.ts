@@ -2029,3 +2029,272 @@ test("a key that works is recorded verified, with the action it was checked with
   // And the key itself is in none of it, the promise every write on this path keeps.
   expect(JSON.stringify(checked)).not.toContain(typedKey);
 });
+
+/**
+ * The account a re-check runs against, which is one that ALREADY EXISTS.
+ *
+ * Inserted by hand rather than made through `connectBrokeredWithFields`, and that is the whole
+ * point of the fixture: a re-check is not a connect. It is pressed days later, by somebody who has
+ * just fixed a key at the vendor, against a row and an account that were already here — so a test
+ * that reached this state by connecting would be asserting about a row this run had just written
+ * with a probe of its own, and could not tell a method that re-checks from one that reconnects.
+ *
+ * `verifiedAt` IS A DATE FROM THE PAST WHERE ONE IS ASKED FOR, so "the timestamp was left alone" is
+ * an assertion about a value rather than about whether a column is null.
+ */
+async function holdProbedApp(verifiedAt: Date | null = null) {
+  await database.insert(composioConnections).values({
+    toolkit: probedToolkit,
+    userId: askerId,
+    verified: verifiedAt !== null,
+    verifiedAt,
+  });
+  // The vendor's side of that row: an account it is holding before this run's act, which is what
+  // makes "nothing was withdrawn" an assertion about what Composio still has afterwards.
+  vendorHolds.push(madeAccountId);
+}
+
+/**
+ * A RE-CHECK THAT ANSWERS RECORDS THE CONNECTION VERIFIED, WITH THE ACTION IT WAS CHECKED WITH.
+ *
+ * CRITERION. Against a connection that already exists, the probe runs in the asking person's
+ * account, the row is written verified with a fresh date, the answer carries that date and the name
+ * of the action, and the trail records the same check.
+ *
+ * REASON. This is the button somebody presses having just rotated a key that had stopped working.
+ * Nothing else in the product will ever re-check it: Composio accepts a key once and never tests it
+ * again, and every other path that writes `verified` is a connect or a consent — so without this
+ * the row's sentence is frozen at whatever was true the day the key was typed, and a person who has
+ * fixed their key has no way to make this deployment agree.
+ *
+ * AND IT IS A BUTTON AND NEVER A PAGE-LOAD EFFECT, which is why nothing here calls it twice. The
+ * call is spent against the VENDOR'S rate limit on the person's own account, so verifying on every
+ * render would burn somebody's quota at Linear to redraw one word on a settings page.
+ */
+test("a re-check that answers records the connection verified, with the action it was checked with", async () => {
+  const sent: {
+    slug: string;
+    userId: string;
+    version: string;
+    args: unknown;
+  }[] = [];
+  useAnsweringClient({
+    execute: async (call, args) => {
+      reached.push(call.slug);
+      sent.push({
+        slug: call.slug,
+        userId: call.userId,
+        version: call.version,
+        args,
+      });
+      return answered;
+    },
+  });
+  await addProbedApp();
+  await holdProbedApp();
+  // Taken before the call, so the comparison below is against a moment that cannot postdate the
+  // write. Both this and the column are written in this process, so no clock but one is involved.
+  const before = new Date();
+
+  const answer = await store.recheckBrokeredConnection({
+    toolkit: probedToolkit,
+    userId: askerId,
+  });
+
+  expect(answer.verified).toBe(true);
+  expect(answer.probe).toBe(probeAction);
+  expect(new Date(answer.verifiedAt ?? "").getTime()).toBeGreaterThanOrEqual(
+    before.getTime(),
+  );
+
+  // The same call the connect path makes, in the same shape: the person's own account, the version
+  // the listing recorded, and no arguments at all.
+  expect(sent).toEqual([
+    { slug: probeAction, userId: askerId, version: probeVersion, args: {} },
+  ]);
+
+  const [row] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(row.verified).toBe(true);
+  expect(row.verifiedAt?.toISOString()).toBe(answer.verifiedAt);
+
+  // NOTHING WAS CONNECTED AND NOTHING WAS WITHDRAWN. The only ask in this run is the one the app's
+  // own enablement made; a re-check that reached `connectWithFields` would be making a second
+  // account for somebody who has one, and one that reached either revoke would be ending the
+  // account it was asked to check.
+  expect(asksMade()).toEqual([`ensureAuthConfig:${probedToolkit}/fields`]);
+  expect(vendorHolds).toEqual([madeAccountId]);
+
+  const checked = recordedOfType("mcp.connection_verified");
+  expect(checked).toHaveLength(1);
+  expect(checked[0].targetId).toBe(probedToolkit);
+  expect(checked[0].payload).toMatchObject({
+    actor: askerId,
+    action: probeAction,
+    verified: true,
+  });
+});
+
+/**
+ * A PROBE THAT RAN AND FAILED IS A FAILURE, AND NOT AN ANSWER SAYING "NOT VERIFIED".
+ *
+ * CRITERION. When the vendor rejects the key, the call raises with Composio's own sentence in it,
+ * the row is left standing and written unverified, the account at the vendor is untouched, and the
+ * trail carries the action that was tried.
+ *
+ * REASON. `verified: false` is the same flag an app that publishes nothing safe to call produces,
+ * so a re-check that RETURNED it would hand the row two states it cannot tell apart — and the one
+ * it would get wrong is the person who has just fixed their key and pressed the button. The row
+ * would drop the Re-check button in exactly the state somebody needs it, while telling them nothing
+ * was ever checked. A raise carries the vendor's sentence, which is the whole of what they can act
+ * on.
+ *
+ * AND THE ACCOUNT STAYS, which is the line between this and a connect. `connectBrokeredWithFields`
+ * withdraws the account it just made, because it made it and the key is bad — the undo is of its own
+ * act. Here the account predates the press by days and the person did not ask to disconnect
+ * anything; their key is wrong, and taking their account away to tell them so would destroy the
+ * thing they are trying to repair.
+ */
+test("a re-check whose probe fails raises rather than answering unverified", async () => {
+  useAnsweringClient({
+    execute: async ({ slug }) => {
+      reached.push(slug);
+      // The vendor reporting a failure in a 200, which is how Composio says a credential is wrong.
+      return {
+        data: {},
+        error: "Invalid API key provided.",
+        successful: false,
+      };
+    },
+  });
+  await addProbedApp();
+  await holdProbedApp();
+
+  await expect(
+    store.recheckBrokeredConnection({
+      toolkit: probedToolkit,
+      userId: askerId,
+    }),
+  ).rejects.toThrow(/Invalid API key provided\./);
+
+  // The key was spent on the action the chooser picked, and on nothing else.
+  expect(reached).toEqual([probeAction]);
+  // The account is still the vendor's to see, and nothing here asked it to be otherwise.
+  expect(vendorHolds).toEqual([madeAccountId]);
+  expect(asksMade()).toEqual([`ensureAuthConfig:${probedToolkit}/fields`]);
+
+  // The row SURVIVES the failure — it is their key that is wrong, not their account — and it stops
+  // claiming a verification, with no date left standing on a claim nobody is making.
+  const [row] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(row).toMatchObject({ toolkit: probedToolkit, verified: false });
+  expect(row.verifiedAt).toBeNull();
+
+  // AND THE TRAIL SAYS WHICH ACTION WAS TRIED, which is what separates this row from an app that
+  // had nothing to try: both say `verified: false`, and only the name says the vendor was asked.
+  const checked = recordedOfType("mcp.connection_verified");
+  expect(checked).toHaveLength(1);
+  expect(checked[0].payload).toMatchObject({
+    actor: askerId,
+    action: probeAction,
+    verified: false,
+  });
+});
+
+/**
+ * AN APP WITH NOTHING TO PROBE COMES BACK SAYING SO, AND THE ROW IS LEFT EXACTLY AS IT WAS.
+ *
+ * CRITERION. Where the app publishes no action a probe may use, no call is made, the answer carries
+ * `probe: null`, the row's `verified` and `verified_at` are the values they already held, and
+ * nothing reaches the trail.
+ *
+ * REASON. Null from the chooser is an ordinary answer — most key-based apps publish some
+ * argument-less read and PostHog publishes none — and `probe: null` is what tells the row that
+ * nothing was tried, which `verified: false` alone cannot.
+ *
+ * THE UNTOUCHED ROW IS THE HALF THAT WOULD BE EASY TO GET WRONG. Writing `false` here because the
+ * check produced no evidence would take the date off a connection that was verified at a consent
+ * screen — a press of a button erasing a fact nothing else in this deployment records, and telling
+ * the person their working connection is now unchecked. A check that could try nothing has learned
+ * nothing, and the honest write is no write at all.
+ */
+test("an app with nothing to probe leaves the verification exactly as it was", async () => {
+  useAnsweringClient();
+  await addProbedApp({ withProbe: false });
+  // Verified a fortnight ago, at a consent screen or by a probe this app has since stopped
+  // publishing. Either way it is a fact, and this press must not be what takes it off the row.
+  const earned = new Date("2026-08-30T09:00:00.000Z");
+  await holdProbedApp(earned);
+
+  expect(
+    await store.recheckBrokeredConnection({
+      toolkit: probedToolkit,
+      userId: askerId,
+    }),
+  ).toEqual({
+    verified: true,
+    verifiedAt: earned.toISOString(),
+    probe: null,
+  });
+
+  // Nothing was called, which is what "nothing to try" means at the vendor.
+  expect(reached).toEqual([]);
+  const [row] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(row.verified).toBe(true);
+  expect(row.verifiedAt?.toISOString()).toBe(earned.toISOString());
+  // And nothing is on the trail: `mcp.connection_verified` records an account exercised with a real
+  // call, and no call was made. A row filed for a press that changed nothing would make the one
+  // event that means "a key was tried" also mean "somebody looked at a page".
+  expect(recordedOfType("mcp.connection_verified")).toEqual([]);
+});
+
+/**
+ * A RE-CHECK WITH NO CONNECTION TO CHECK REFUSES, AND MAKES NEITHER A ROW NOR A CALL.
+ *
+ * CRITERION. Where this person holds no account for the app, the call raises, no row is written,
+ * and nothing is spent at the vendor.
+ *
+ * REASON. The single writer this path records through is an UPSERT, so a re-check that probed
+ * first and wrote the answer would INSERT a connection for somebody who has none — a row that is
+ * the whole of the gate every later brokered call passes through, created by a button that claims
+ * to check one. And the probe itself would be spent on an account the vendor does not have, coming
+ * back as "no connected account found": a sentence about this deployment's own state, shown to
+ * somebody as though their key had been rejected.
+ */
+test("a re-check with no connection refuses rather than making one", async () => {
+  useAnsweringClient();
+  await addProbedApp();
+
+  await expect(
+    store.recheckBrokeredConnection({
+      toolkit: probedToolkit,
+      userId: askerId,
+    }),
+  ).rejects.toThrow();
+
+  expect(await connectedToolkitsFor(askerId)).toEqual([]);
+  expect(reached).toEqual([]);
+  expect(recordedOfType("mcp.connection_verified")).toEqual([]);
+});

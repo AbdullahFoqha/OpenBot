@@ -1169,12 +1169,12 @@ export function createPluginRoutes(
   });
 
   /**
-   * Which app one of the two routes below is about, or the refusal that ends it.
+   * Which app one of the three routes below is about, or the refusal that ends it.
    *
-   * Both of them act on a brokered connection and on nothing else, so both ask the same two
-   * questions in the same order and answer them in the same words. It is one function because the
-   * sentence somebody reads when they aim either route at an ordinary OAuth row should not be able
-   * to drift into two sentences.
+   * Each of them acts on a brokered connection and on nothing else, so each asks the same two
+   * questions in the same order and answers them in the same words. It is one function because the
+   * sentence somebody reads when they aim any of those routes at an ordinary OAuth row should not
+   * be able to drift into three sentences.
    *
    * THE APP COMES OFF THE ROW'S URL AND NEVER OFF ITS ID, for the reason the directory route and
    * the connect branch above both give: the url is where the transport reads which app a call is
@@ -1286,6 +1286,89 @@ export function createPluginRoutes(
         const refusal = brokerRefusal(
           error,
           "Composio would not say whether this account is connected, and gave no reason, so what is shown here is the last answer it gave rather than a fresh one. Try again, and ask an administrator to check this deployment's Composio key if it persists.",
+        );
+        return context.json({ error: refusal.error }, refusal.status);
+      }
+    },
+  );
+
+  /**
+   * Try this person's key against the app, because they pressed the button that asks.
+   *
+   * A BUTTON, AND NEVER A PAGE-LOAD EFFECT, which is the one thing a caller of this route has to
+   * know. Composio never re-checks a key — it accepts one when it is typed and says nothing about it
+   * again — so this is the only thing in the product that can correct a row whose key was rotated,
+   * revoked or left to expire. That is also the argument somebody will make for calling it from an
+   * effect on mount, and it is wrong: the call goes out to the app on the person's OWN account and
+   * against their own rate limit at the vendor, so verifying on every render would spend somebody's
+   * quota at Linear to redraw one word on a settings page. The confirm route above is the one that
+   * runs on mount; it asks Composio about its own records and costs the person nothing.
+   *
+   * AND IT IS NOT A CONNECT. The store's argument is made there in full: the account already exists,
+   * so nothing here creates one, nothing withdraws one when the key turns out to be bad — their
+   * account stays, it is their key that is wrong — and nothing changes but the verification and its
+   * date.
+   *
+   * A PROBE THAT RAN AND FAILED COMES BACK AS A FAILURE, never as a 200 saying `verified: false`.
+   * That flag is also what an app publishing nothing safe to call produces, and the row drawing this
+   * answer cannot tell the two apart — so an answer would quietly drop the Re-check button in
+   * exactly the state somebody needs it, having just fixed their key, while telling them nothing had
+   * ever been checked. The store raises with Composio's own sentence in it, and this passes that
+   * through as a refusal the browser surfaces. The only `verified: false` that arrives as an answer
+   * is the one carrying `probe: null`, which says there was nothing to check with.
+   *
+   * THE PERSON IS THE SESSION'S, as on the two routes around it and for the sharper reason this one
+   * adds: a user id a caller could name would let one POST spend a stranger's rate limit at the
+   * vendor and rewrite the verification on their row. Nothing here reads a user id out of the body
+   * or the query.
+   *
+   * BEHIND `requireUser` AND NOT ADMIN-GATED, for confirm's reason: this is somebody checking their
+   * own account, not an administrator checking anybody's.
+   */
+  routes.post(
+    "/servers/:id/connection/recheck",
+    requireUser,
+    async (context) => {
+      const resolved = await brokeredAppFor(context.req.param("id"));
+      if (resolved.refusal) {
+        return context.json(
+          { error: resolved.refusal.error },
+          resolved.refusal.status,
+        );
+      }
+
+      try {
+        // The store's answer, whole. `verified` is the flag, `verifiedAt` is the date the row's
+        // sentence is drawn from, and `probe` is what says a call was really made — three facts,
+        // and a route that forwarded the boolean alone would leave the row to guess the other two.
+        return context.json(
+          await store.recheckBrokeredConnection({
+            toolkit: resolved.toolkit,
+            userId: context.var.actor.id,
+          }),
+        );
+      } catch (error) {
+        /*
+         * A REFUSAL THE STORE AUTHORED IS PASSED THROUGH AS ITSELF, BEFORE THE BROKER MAPPING, for
+         * the reason the connect route's field branch gives: a key the vendor rejected is the
+         * ordinary failure on this path, and the store's sentence for it already carries Composio's
+         * own words and the step to take. `brokerRefusal` cannot see that — a
+         * {@link PluginRefusedError} is neither an authored broker refusal nor a vendor object — so
+         * it would answer somebody whose key is wrong with "Composio said nothing about why" and
+         * send them to an administrator about this deployment's key. 400 because it is theirs to
+         * fix and the message says what to fix.
+         */
+        if (error instanceof PluginRefusedError) {
+          return context.json({ error: error.message }, 400);
+        }
+        /*
+         * And a failure this deployment cannot explain says what is on the screen instead of
+         * guessing. Nothing was written on the way out of the store here, so the row still carries
+         * the last answer anybody earned rather than a verdict invented by a call that failed.
+         */
+        const refusal = brokerRefusal(
+          error,
+          "Composio would not say whether this connection still works, and gave no reason, so what is shown here is the last answer it gave rather than a fresh one. Press Re-check again, and ask an administrator to check this deployment's Composio key if it persists.",
         );
         return context.json({ error: refusal.error }, refusal.status);
       }

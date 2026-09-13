@@ -1306,6 +1306,8 @@ function brokeredApp(
   }> = [];
   const queried: Array<{ toolkit: string; userId: string }> = [];
   const confirmed: Array<{ toolkit: string; userId: string }> = [];
+  /** Every re-check that reached the store, so who it was made about is an assertion. */
+  const rechecked: Array<{ toolkit: string; userId: string }> = [];
   const disconnected: Array<{
     toolkit: string;
     userId: string;
@@ -1398,6 +1400,26 @@ function brokeredApp(
       if (deployment.storeThrows) throw deployment.storeThrows;
       return { connected: connection !== null };
     },
+    recheckBrokeredConnection: async (input: {
+      toolkit: string;
+      userId: string;
+    }) => {
+      rechecked.push(input);
+      // Thrown from where the store raises it in the product: a probe that ran and was refused is a
+      // {@link PluginRefusedError}, and a broker that would not answer at all is the vendor's own
+      // object one layer down. Both leave this method the same way — by throwing.
+      if (deployment.storeThrows) throw deployment.storeThrows;
+      /*
+       * All three fields, because all three are what the row reads. `verifiedAt` is the date the
+       * sentence is drawn from and `probe` is what says a call was really made, which `verified`
+       * alone cannot.
+       */
+      return {
+        verified: true,
+        verifiedAt: "2026-09-13T10:00:00.000Z",
+        probe: "LINEAR_GET_ME",
+      };
+    },
     connectBrokeredWithFields: async (input: {
       toolkit: string;
       userId: string;
@@ -1475,6 +1497,7 @@ function brokeredApp(
     authorized,
     queried,
     confirmed,
+    rechecked,
     disconnected,
     asked,
     submitted,
@@ -1523,6 +1546,23 @@ function brokeredApp(
     confirm: (options: Caller = {}) =>
       app.request(
         `http://openbot.test/api/plugins/servers/${options.serverId ?? "composio-linear"}/connection/confirm${options.query ?? ""}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(options.body ?? {}),
+        },
+      ),
+    /*
+     * The button beside them, and the one that is never pressed by a page.
+     *
+     * Given the same open inputs as the two below — the row, a body and a query — because it is the
+     * same identity question: a re-check spends a call on somebody's own account at the vendor, so a
+     * caller who could name a person would be spending a stranger's rate limit and rewriting the
+     * verification on their row.
+     */
+    recheck: (options: Caller = {}) =>
+      app.request(
+        `http://openbot.test/api/plugins/servers/${options.serverId ?? "composio-linear"}/connection/recheck${options.query ?? ""}`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -2118,5 +2158,116 @@ describe("confirming and ending a brokered connection", () => {
     expect(disconnectRefusal).toContain("Disconnect again");
     expect(confirmRefusal).not.toContain("socket hang up");
     expect(disconnectRefusal).not.toContain("socket hang up");
+  });
+});
+
+/**
+ * Re-checking a brokered connection, which is a button and never a page load.
+ *
+ * CRITERION. The route acts on the connection of the person whose session made the request whatever
+ * a body or a query says; it refuses a row that is not brokered and a deployment with no broker in
+ * the same words the other two do; and a probe that RAN AND FAILED reaches the browser as a failure
+ * carrying the vendor's sentence rather than as a 200 saying the connection is not verified.
+ *
+ * REASON. The store decides what a re-check writes and what it refuses; what is left here is the
+ * routing, and two things about it would do damage. A user id taken from a caller would spend a
+ * stranger's rate limit at the vendor and rewrite the verification on their row from one POST. And
+ * an answer of `{ verified: false }` for a probe that ran and was refused would be
+ * indistinguishable, to the row drawing it, from an app that publishes nothing to check against —
+ * so the Re-check button would quietly disappear for the one person who most needs it, the one who
+ * has just fixed their key.
+ *
+ * IT IS NOT CALLED ON MOUNT, unlike confirm, and nothing here calls it twice. Composio never
+ * re-checks a key by itself, so this is the only thing that can; but the call is spent against the
+ * person's own quota at the vendor, and verifying on every render would burn it to redraw one word.
+ */
+describe("re-checking a brokered connection", () => {
+  test("the re-check is made about the session's own person, whatever the caller says", async () => {
+    const { rechecked, recheck } = brokeredApp({
+      connectedAt: "2026-02-02T00:00:00.000Z",
+    });
+
+    const response = await recheck({
+      body: { userId: SOMEBODY_ELSE.id },
+      query: `?userId=${SOMEBODY_ELSE.id}`,
+    });
+
+    expect(response.status).toBe(200);
+    // The store's answer, passed through: what was checked, when, and with which action.
+    expect(await response.json()).toEqual({
+      verified: true,
+      verifiedAt: "2026-09-13T10:00:00.000Z",
+      probe: "LINEAR_GET_ME",
+    });
+    expect(rechecked).toEqual([{ toolkit: "linear", userId: ADMIN.id }]);
+  });
+
+  test("a probe that ran and failed is a failure, not an answer saying not verified", async () => {
+    /*
+     * THE MUST-NOT CASE OF THIS ROUTE. The store raises for a key the vendor rejected, and the
+     * sentence it raises with carries Composio's own words — so the route has to pass it through as
+     * a refusal. Catching it and answering `{ verified: false }` instead would lose the sentence and
+     * hand the row a flag it cannot read: the same `false` an app with nothing to probe produces.
+     */
+    const { recheck } = brokeredApp(
+      { connectedAt: "2026-02-02T00:00:00.000Z" },
+      AUTHORIZATION_URL,
+      {
+        storeThrows: new PluginRefusedError(
+          "Linear would not answer with the key it is holding: Invalid API key provided. Your connection is recorded here as unchecked until a key that works is entered.",
+          null,
+        ),
+      },
+    );
+
+    const response = await recheck();
+    const body = await response.text();
+
+    expect(response.status).toBe(400);
+    expect(JSON.parse(body).error).toContain("Invalid API key provided.");
+    // And it is a refusal rather than an answer: nothing in it for a row to read as a verification.
+    expect(JSON.parse(body).verified).toBeUndefined();
+  });
+
+  test("an app that is not brokered is refused for what is actually wrong", async () => {
+    // `notion` is a row this deployment really has; what is wrong is that its connection does not
+    // live at Composio, so there is nothing here to re-check. Same sentence as the other two.
+    const { rechecked, recheck } = brokeredApp();
+
+    const response = await recheck({ serverId: "notion" });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe(
+      "That app is not reached through a broker.",
+    );
+    expect(rechecked).toEqual([]);
+  });
+
+  test("a deployment with no broker is told which setting to set", async () => {
+    const { rechecked, recheck } = brokeredApp(null, null);
+
+    const response = await recheck();
+
+    expect(response.status).toBe(503);
+    expect((await response.json()).error).toContain("COMPOSIO_API_KEY");
+    expect(rechecked).toEqual([]);
+  });
+
+  test("a broker that throws reaches the browser as Composio's own sentence", async () => {
+    // The other half of the failure mapping: a vendor object is not a refusal this deployment
+    // authored, so it comes back as the vendor's sentence at 502 — and nothing else that travelled
+    // with it, which is a request id nobody outside Composio can act on.
+    const { recheck } = brokeredApp(
+      { connectedAt: "2026-02-02T00:00:00.000Z" },
+      AUTHORIZATION_URL,
+      { storeThrows: WRONG_KEY },
+    );
+
+    const response = await recheck();
+    const body = await response.text();
+
+    expect(response.status).toBe(502);
+    expect(JSON.parse(body).error).toBe("Invalid API key provided.");
+    expect(body).not.toContain("req_a_trace_id_nobody_should_read");
   });
 });
