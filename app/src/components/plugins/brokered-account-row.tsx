@@ -109,6 +109,14 @@ export type BrokeredAccount = {
   connecting: boolean;
   disconnecting: boolean;
   /**
+   * Whether a disconnect from this screen landed, as opposed to an account that was never made.
+   *
+   * Both read as not connected and they are not the same sentence. For an app whose secret somebody
+   * typed, what disconnecting did NOT do is the part worth saying — the key is still live at the
+   * vendor — and there is nobody to say it to until they have actually pressed the button.
+   */
+  disconnected: boolean;
+  /**
    * What the app wants typed in, once it has been asked. Null until then, and for every app nobody
    * types anything into.
    */
@@ -213,6 +221,36 @@ export function useBrokeredAccount(input: {
     confirmAccount(serverId);
   }, [brokered, configured, serverId, confirmAccount]);
 
+  /*
+   * Find out whether the key still works, when somebody presses for it and at no other time.
+   *
+   * Deliberately not a second effect beside the confirm above. Composio never re-checks a key once
+   * it has taken it, so the only way to learn whether one works is to spend a real read-only call at
+   * the vendor with it — and a verify-on-render would spend the person's own rate limit there, on
+   * every mount of every screen that draws this row, to redraw a word that was already written down.
+   * So the row says when it last checked, and the person decides when to check again.
+   */
+  const recheck = useMutation({
+    ...recheckBrokeredConnectionMutationOptions(queryClient),
+    onError: (thrown: Error) => report(thrown.message),
+  });
+  /*
+   * The check's answer is thrown away whenever an action changes the account it was about.
+   *
+   * THE SAME DEFECT `forgetConfirmation` ABOVE EXISTS FOR, in the same shape and for the same
+   * reason: a mutation's `data` is not query state, so invalidating the queries refetches the
+   * recorded row and leaves this verdict exactly where it was. Disconnecting would leave the row
+   * saying a key was "last checked" an hour ago about an account that no longer exists, and
+   * connecting a fresh key would inherit the old key's verdict — a row reading "last checked"
+   * about a value nothing has ever tried.
+   *
+   * RESET RATHER THAN A GUARD AT THE DRAWING. Hiding it behind `connected` in the render would fix
+   * the disconnect and not the reconnect, and would leave the hook handing `verified: true` to any
+   * other reader — the honest thing is for the answer to stop existing when the thing it answered
+   * about does.
+   */
+  const forgetRecheck = recheck.reset;
+
   const connect = useMutation({
     ...connectAccountMutationOptions(returnTo),
     onError: (thrown: Error) => report(thrown.message),
@@ -223,6 +261,7 @@ export function useBrokeredAccount(input: {
      */
     onSuccess: (authorizationUrl) => {
       forgetConfirmation();
+      forgetRecheck();
       window.location.href = authorizationUrl;
     },
   });
@@ -238,6 +277,7 @@ export function useBrokeredAccount(input: {
     onError: (thrown: Error) => report(thrown.message),
     onSuccess: (...args) => {
       forgetConfirmation();
+      forgetRecheck();
       return disconnectOptions.onSuccess?.(...args);
     },
   });
@@ -269,22 +309,9 @@ export function useBrokeredAccount(input: {
     onError: (thrown: Error) => report(thrown.message),
     onSuccess: (...args) => {
       forgetConfirmation();
+      forgetRecheck();
       return submitOptions.onSuccess?.(...args);
     },
-  });
-
-  /*
-   * Find out whether the key still works, when somebody presses for it and at no other time.
-   *
-   * Deliberately not a second effect beside the confirm above. Composio never re-checks a key once
-   * it has taken it, so the only way to learn whether one works is to spend a real read-only call at
-   * the vendor with it — and a verify-on-render would spend the person's own rate limit there, on
-   * every mount of every screen that draws this row, to redraw a word that was already written down.
-   * So the row says when it last checked, and the person decides when to check again.
-   */
-  const recheck = useMutation({
-    ...recheckBrokeredConnectionMutationOptions(queryClient),
-    onError: (thrown: Error) => report(thrown.message),
   });
 
   return {
@@ -322,6 +349,12 @@ export function useBrokeredAccount(input: {
       disconnect.mutate(serverId);
     },
     disconnecting: disconnect.isPending,
+    /*
+     * A disconnect this person made, rather than an account that was never there. Held by the
+     * mutation because that is where the fact is: the recorded row says only that there is nothing,
+     * which is equally true of an app nobody ever connected.
+     */
+    disconnected: disconnect.isSuccess,
     kind: kindOf(authScheme),
     fields: fieldsRequest.data ?? null,
     requestFields: () => {
@@ -338,6 +371,77 @@ export function useBrokeredAccount(input: {
 }
 
 /**
+ * The day a check was made, in the reader's own locale.
+ *
+ * A day rather than "2 hours ago": the point of the sentence is that the check is a past tense that
+ * keeps receding, and a relative phrase recomputed on every render reads as a fact about now.
+ */
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString();
+}
+
+/**
+ * The line beneath the word, which is where the three kinds actually differ.
+ *
+ * THEY DO NOT DIFFER IN THE WORD. A consent screen and a key somebody typed both end in a live
+ * account, and "Connected" is true of both; a second word for the second kind would invite a
+ * distinction there is no fact behind. What differs is what that connection rests on, and how much
+ * this deployment can honestly claim to know about it — which is a sentence, not a label.
+ *
+ * COMPOSIO NEVER RE-CHECKS A SUBMITTED KEY. It answers ACTIVE forever, so a key revoked at the
+ * vendor last week still reads as connected here. The verification makes exactly one moment true,
+ * so the row names that moment instead of asserting a present tense it does not hold.
+ */
+function accountSentence(input: {
+  account: BrokeredAccount;
+  /** The app's own name, as the screen drawing this row knows it. */
+  title: string;
+  connectedDescription: string;
+  disconnectedDescription: string;
+}): string {
+  const { account, connectedDescription, disconnectedDescription, title } =
+    input;
+
+  if (!account.configured) {
+    return "Set COMPOSIO_API_KEY on this deployment. Without it there is no broker to reach, so this account can be neither connected nor ended from here. The app stays enabled and every grant on its tools still stands.";
+  }
+
+  if (account.kind === "no-auth") {
+    /*
+     * Neither screen's own sentence fits: both are about an account, and there is none to have.
+     * Capitalised because this is the one position the name opens a sentence in.
+     */
+    return `${title.charAt(0).toUpperCase()}${title.slice(1)} needs no account. A Bot granted these tools can use it as it is.`;
+  }
+
+  if (account.kind === "fields") {
+    if (account.connected) {
+      return account.verified && account.verifiedAt
+        ? `Connected with a key you provided, last checked ${formatDate(account.verifiedAt)}.`
+        : `Connected with a key you provided. ${title} publishes nothing this deployment can check it against, so it was accepted without being tried.`;
+    }
+    /*
+     * WHAT DISCONNECTING DID NOT DO. The account ends at Composio and the key does not end
+     * anywhere: it is still valid at the vendor and still works for anyone holding it. Saying
+     * "disconnected" and stopping would leave somebody believing they had ended access they still
+     * have live, so the row names the step this deployment cannot take for them.
+     */
+    return account.disconnected
+      ? `Removed from Composio. Your key still works at ${title} — rotate it there if you meant to end its access.`
+      : disconnectedDescription;
+  }
+
+  /*
+   * A consent app keeps the screen's own sentence, prefixed by what the connection rests on. What
+   * differs between an administrator checking their setup and a person checking who reads their
+   * mail is an argument, not a branch — see this file's opening comment.
+   */
+  return account.connected
+    ? `Connected through ${title}'s consent screen. ${connectedDescription}`
+    : disconnectedDescription;
+}
+
+/**
  * The row itself, for a `PageRows` card on either screen.
  *
  * The `Item` and, for an app whose secret a person types, the dialog that takes it. Where the row
@@ -348,12 +452,21 @@ export function BrokeredAccountRow({
   account,
   connectedDescription,
   disconnectedDescription,
+  title,
 }: {
   account: BrokeredAccount;
   /** What being connected means on this screen, said beside the button rather than after it. */
   connectedDescription: string;
   /** What connecting would do, in the voice of whoever is reading. */
   disconnectedDescription: string;
+  /**
+   * The app's own name, for the sentences that name it.
+   *
+   * Optional, and falling back to a bare noun rather than to the word `undefined`: a screen that
+   * has not got a title yet — one drawing a row for an app the catalogue has not answered for —
+   * still reads as a sentence, and the only thing it loses is the vendor's name in it.
+   */
+  title?: string;
 }) {
   /*
    * Whether the form is on screen, which is the whole of what this row holds.
@@ -387,66 +500,96 @@ export function BrokeredAccountRow({
           <ItemDescription
             className={account.configured ? undefined : "line-clamp-none"}
           >
-            {account.configured
-              ? account.connected
-                ? connectedDescription
-                : disconnectedDescription
-              : "Set COMPOSIO_API_KEY on this deployment. Without it there is no broker to reach, so this account can be neither connected nor ended from here. The app stays enabled and every grant on its tools still stands."}
+            {accountSentence({
+              account,
+              connectedDescription,
+              disconnectedDescription,
+              title: title ?? "the app",
+            })}
           </ItemDescription>
         </ItemContent>
-        <ItemActions>
-          {!account.configured ? (
-            /*
-             * A value and nothing to press, which is the layout's read-only row: the deployment has
-             * no key, so Connect could only fail at the broker and Disconnect could only fail at it
-             * twice. A button that cannot work is worse than no button — it invites the second press
-             * that files a record of an act that did not happen.
-             */
-            <span className="text-muted-foreground text-xs">Key missing</span>
-          ) : account.connected ? (
-            <>
-              {/* Decorative: the word beside it already says which. */}
-              <span
-                aria-hidden="true"
-                className="size-1.5 rounded-full bg-emerald-500"
-              />
-              <span className="text-muted-foreground text-xs">Connected</span>
+        {/*
+         * AN APP THAT NEEDS NO ACCOUNT HAS NOTHING HERE AT ALL — no Connect, and not a disabled one
+         * either. There is no account to make and none to end, so a button would offer an act with
+         * no effect and a greyed one would announce a step somebody is missing when they are not.
+         * The sentence above already says the app works as it is.
+         *
+         * Still drawn where the key is missing, because then nothing works, this app included.
+         */}
+        {account.configured && account.kind === "no-auth" ? null : (
+          <ItemActions>
+            {!account.configured ? (
+              /*
+               * A value and nothing to press, which is the layout's read-only row: the deployment
+               * has no key, so Connect could only fail at the broker and Disconnect could only fail
+               * at it twice. A button that cannot work is worse than no button — it invites the
+               * second press that files a record of an act that did not happen.
+               */
+              <span className="text-muted-foreground text-xs">Key missing</span>
+            ) : account.connected ? (
+              <>
+                {/* Decorative: the word beside it already says which. */}
+                <span
+                  aria-hidden="true"
+                  className="size-1.5 rounded-full bg-emerald-500"
+                />
+                {/* The same word for both kinds. The line beneath says what it rests on. */}
+                <span className="text-muted-foreground text-xs">Connected</span>
+                {/*
+                 * OFFERED ONLY WHERE A CHECK IS POSSIBLE, which is exactly where one has already been
+                 * made: `verified` is written by a probe, and a probe exists only where the app
+                 * published a read that takes no arguments to spend on it. An app that published none
+                 * connected unverified and would be asked the same unanswerable question again, so
+                 * the button is not there and the sentence above says why.
+                 */}
+                {account.verified ? (
+                  <Button
+                    disabled={account.rechecking}
+                    onClick={account.recheck}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {account.rechecking ? "Checking…" : "Re-check"}
+                  </Button>
+                ) : null}
+                <Button
+                  disabled={account.disconnecting}
+                  onClick={account.disconnect}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Disconnect
+                </Button>
+              </>
+            ) : (
+              /* The arrow says this leaves OpenBot for the vendor's consent page. It does. */
               <Button
-                disabled={account.disconnecting}
-                onClick={account.disconnect}
+                disabled={account.connecting}
+                onClick={() => {
+                  /*
+                   * A key app goes nowhere: it opens the form below and asks the app what belongs in
+                   * it. The question is asked on every open rather than once, because what an app
+                   * publishes is the vendor's and may differ from what it published last time.
+                   */
+                  if (account.kind === "fields") {
+                    setAsking(true);
+                    account.requestFields();
+                    return;
+                  }
+                  account.connect();
+                }}
                 size="sm"
                 type="button"
                 variant="outline"
               >
-                Disconnect
+                Connect
+                <IconArrowUpRight />
               </Button>
-            </>
-          ) : (
-            /* The arrow says this leaves OpenBot for the vendor's consent page. It does. */
-            <Button
-              disabled={account.connecting}
-              onClick={() => {
-                /*
-                 * A key app goes nowhere: it opens the form below and asks the app what belongs in
-                 * it. The question is asked on every open rather than once, because what an app
-                 * publishes is the vendor's and may differ from what it published last time.
-                 */
-                if (account.kind === "fields") {
-                  setAsking(true);
-                  account.requestFields();
-                  return;
-                }
-                account.connect();
-              }}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              Connect
-              <IconArrowUpRight />
-            </Button>
-          )}
-        </ItemActions>
+            )}
+          </ItemActions>
+        )}
       </Item>
 
       <Dialog onOpenChange={setAsking} open={asking}>

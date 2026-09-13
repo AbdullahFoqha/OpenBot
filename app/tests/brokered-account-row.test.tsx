@@ -16,8 +16,12 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import {
+  type BrokeredAccount,
+  BrokeredAccountRow,
+} from "@/components/plugins/brokered-account-row";
 import type { BrokerField } from "@/lib/plugins/mutations";
 import type { PluginServer, PluginsPage } from "@/lib/plugins/queries";
 import { Route as AdminAppRoute } from "@/routes/_authed/admin/plugins/$key";
@@ -60,6 +64,17 @@ afterEach(cleanup);
 afterAll(() => GlobalRegistrator.unregister());
 
 const APP_KEY = "gmail";
+
+/** When the key was last known to work, as this deployment wrote it down. */
+const CHECKED_AT = "2026-09-10T09:00:00.000Z";
+
+/** When a re-check pressed during a test finds out again. A different day, so the two read apart. */
+const RECHECKED_AT = "2026-09-13T09:00:00.000Z";
+
+/** The same day, spelled the way the row spells it — the reader's own locale, not this file's. */
+function asDay(iso: string): string {
+  return new Date(iso).toLocaleDateString();
+}
 
 /** A minimal but complete brokered `PluginServer` — the row shape only Composio produces. */
 function brokeredServer(authScheme: string): PluginServer {
@@ -114,6 +129,12 @@ type Deployment = {
   authScheme?: string;
   /** What the app publishes as the things a person types in, for the `API_KEY` schemes. */
   fields?: BrokerField[];
+  /** Whether a real call was ever made with this key and worked, as this deployment recorded it. */
+  verified?: boolean;
+  /** When that happened. Null wherever `verified` is false — a check that failed records no time. */
+  verifiedAt?: string | null;
+  /** What a re-check answers when somebody presses for one. */
+  recheckAnswer?: { verified: boolean; verifiedAt: string | null };
 };
 
 type Server = {
@@ -130,7 +151,14 @@ type Server = {
  * really take effect somewhere for a later read to be able to disagree with it.
  */
 function installDeployment(deployment: Deployment): Server {
-  const state = { authScheme: "OAUTH2", fields: [], ...deployment };
+  const state = {
+    authScheme: "OAUTH2",
+    fields: [] as BrokerField[],
+    verified: false,
+    verifiedAt: null as string | null,
+    recheckAnswer: { verified: true, verifiedAt: RECHECKED_AT },
+    ...deployment,
+  };
   const server: Server = { deletes: 0 };
 
   global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -149,6 +177,8 @@ function installDeployment(deployment: Deployment): Server {
                 serverId: APP_KEY,
                 scope: "",
                 connectedAt: "2026-09-10T00:00:00.000Z",
+                verified: state.verified,
+                verifiedAt: state.verifiedAt,
               },
             ]
           : [],
@@ -174,12 +204,33 @@ function installDeployment(deployment: Deployment): Server {
      * the method they share.
      */
     if (path.endsWith("/connect") && method === "POST") {
+      /*
+       * The second press carries the values on it, and is the one that writes. Told apart by the
+       * body rather than by a second path, because the route itself is one route: the first press
+       * asks the app what it wants and the second hands it over.
+       */
+      if (typeof init?.body === "string" && init.body.includes("values")) {
+        state.recorded = true;
+        state.confirms = true;
+        // A fresh key, checked against nothing: this app published no probe to spend it on.
+        state.verified = false;
+        state.verifiedAt = null;
+        return json({ connected: true, verified: false });
+      }
       return json({ fields: state.fields });
+    }
+    if (path.endsWith("/connection/recheck") && method === "POST") {
+      state.verified = state.recheckAnswer.verified;
+      state.verifiedAt = state.recheckAnswer.verifiedAt;
+      return json(state.recheckAnswer);
     }
     if (path.endsWith("/connection") && method === "DELETE") {
       server.deletes += 1;
       state.recorded = false;
       state.confirms = false;
+      // The row is gone, and so is everything that was ever checked about it.
+      state.verified = false;
+      state.verifiedAt = null;
       return json({ ok: true });
     }
     if (path.startsWith("/api/agents")) return json({ agents: [] });
@@ -477,4 +528,191 @@ test("a key app asks for what the app asked for, with its own help text", async 
   // The app said which value is the secret. Nothing here guessed it from the name.
   expect(input.getAttribute("type")).toBe("password");
   expect(view.queryByText(/starting with 'pplx-'/)).toBeTruthy();
+});
+
+/**
+ * A `BrokeredAccount` standing on its own, for the cases that are about what the row SAYS.
+ *
+ * The hook is exercised through the two screens above, which is where its own defects live. These
+ * cases differ only in the three facts the row branches on — `kind`, `connected`, `verified` — and
+ * a deployment built for each would be testing the stub rather than the sentence.
+ */
+function accountState(overrides: Partial<BrokeredAccount>): BrokeredAccount {
+  return {
+    configured: true,
+    connect: () => {},
+    connected: false,
+    connecting: false,
+    disconnect: () => {},
+    disconnected: false,
+    disconnecting: false,
+    fields: null,
+    kind: "consent",
+    recheck: () => {},
+    rechecking: false,
+    requestFields: () => {},
+    requestingFields: false,
+    submitFields: () => {},
+    submittingFields: false,
+    verified: false,
+    verifiedAt: null,
+    ...overrides,
+  };
+}
+
+/** The row with both screens' arguments filled in, so only the account differs between cases. */
+function renderRow(account: BrokeredAccount) {
+  return render(
+    <BrokeredAccountRow
+      account={account}
+      connectedDescription="A Bot granted its tools reads your Gmail as you."
+      disconnectedDescription="No Bot can read this as you."
+      title="Gmail"
+    />,
+  );
+}
+
+test("both kinds say Connected, and the line beneath says how", () => {
+  const consent = renderRow(accountState({ connected: true, kind: "consent" }));
+
+  expect(consent.getByText("Connected")).toBeTruthy();
+  expect(consent.getByText(/through Gmail's consent screen/)).toBeTruthy();
+
+  cleanup();
+
+  const key = renderRow(
+    accountState({
+      connected: true,
+      kind: "fields",
+      verified: true,
+      verifiedAt: CHECKED_AT,
+    }),
+  );
+
+  // The same word, deliberately: what differs between a consent screen and a key somebody typed is
+  // not whether the account is live, and a second word for it would invite a distinction there is
+  // no fact behind.
+  expect(key.getByText("Connected")).toBeTruthy();
+  expect(
+    key.getByText(
+      `Connected with a key you provided, last checked ${asDay(CHECKED_AT)}.`,
+    ),
+  ).toBeTruthy();
+});
+
+test("an app needing no account offers nothing to press", () => {
+  const view = renderRow(accountState({ kind: "no-auth" }));
+
+  // Not a disabled Connect, and not a Connect that would make an account nobody needs: there is no
+  // account here to make, so there is no control.
+  expect(view.queryByRole("button")).toBeNull();
+  expect(view.getByText(/Gmail needs no account/)).toBeTruthy();
+});
+
+test("Re-check appears only where a check is possible, and asks when pressed", async () => {
+  let checks = 0;
+  const checkable = renderRow(
+    accountState({
+      connected: true,
+      kind: "fields",
+      recheck: () => {
+        checks += 1;
+      },
+      verified: true,
+      verifiedAt: CHECKED_AT,
+    }),
+  );
+
+  await userEvent.click(checkable.getByRole("button", { name: "Re-check" }));
+  expect(checks).toBe(1);
+
+  cleanup();
+
+  /*
+   * An app that published nothing to check a key against. It was never verified and re-checking it
+   * would ask the same unanswerable question again, so the button is not offered — and the sentence
+   * says why rather than leaving the missing word looking like a failure.
+   */
+  const unverifiable = renderRow(
+    accountState({ connected: true, kind: "fields" }),
+  );
+
+  expect(unverifiable.queryByRole("button", { name: "Re-check" })).toBeNull();
+  expect(
+    unverifiable.getByText(
+      /publishes nothing this deployment can check it against/,
+    ),
+  ).toBeTruthy();
+});
+
+test("disconnecting a key names the step this deployment cannot take", () => {
+  const view = renderRow(
+    accountState({ connected: false, disconnected: true, kind: "fields" }),
+  );
+
+  // The account ends at Composio and the key does not end anywhere. Saying "disconnected" and
+  // stopping would leave somebody believing they had ended access they still have live.
+  expect(view.getByText(/Removed from Composio/)).toBeTruthy();
+  expect(
+    view.getByText(/Your key still works at Gmail — rotate it there/),
+  ).toBeTruthy();
+});
+
+test("a key re-checked and then disconnected stops claiming it was checked", async () => {
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: true,
+    fields: [PERPLEXITY_KEY],
+    recorded: true,
+    verified: true,
+    verifiedAt: CHECKED_AT,
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  expect(
+    await view.findByText(
+      new RegExp(`last checked ${asDay(CHECKED_AT)}`.replace(/\//g, "\\/")),
+    ),
+  ).toBeTruthy();
+
+  await userEvent.click(view.getByRole("button", { name: "Re-check" }));
+  await waitFor(() =>
+    expect(
+      view.queryByText(
+        new RegExp(`last checked ${asDay(RECHECKED_AT)}`.replace(/\//g, "\\/")),
+      ),
+    ).toBeTruthy(),
+  );
+
+  await userEvent.click(view.getByRole("button", { name: "Disconnect" }));
+
+  await waitFor(() =>
+    expect(view.queryByText(/Removed from Composio/)).toBeTruthy(),
+  );
+  // The account is gone; the answer the re-check gave was about it and must go with it.
+  expect(view.queryByText(/last checked/)).toBeNull();
+  expect(view.queryByRole("button", { name: "Re-check" })).toBeNull();
+
+  /*
+   * AND THE ANSWER MUST NOT COME BACK WITH THE NEXT KEY. A mutation's `data` is not query state:
+   * without it being thrown away, connecting again leaves the re-check's old verdict standing, and
+   * the row reads "last checked" about a key entered seconds ago that nothing has ever tried.
+   */
+  await userEvent.click(view.getByRole("button", { name: "Connect" }));
+  const dialog = await view.findByRole("dialog");
+  await userEvent.type(
+    await view.findByLabelText("API Key"),
+    "pplx-a-fresh-one",
+  );
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "Connect" }),
+  );
+
+  await waitFor(() => expect(view.queryByText("Connected")).toBeTruthy());
+  expect(
+    view.queryByText(/publishes nothing this deployment can check it against/),
+  ).toBeTruthy();
+  expect(view.queryByText(/last checked/)).toBeNull();
 });
