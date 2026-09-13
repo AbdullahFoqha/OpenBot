@@ -1244,7 +1244,11 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     );
 
     const refusal = await failureOf(
-      broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" }),
+      broker.ensureAuthConfig({
+        toolkit: "linear",
+        name: "Linear",
+        connection: { kind: "consent" },
+      }),
     );
 
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
@@ -1302,7 +1306,11 @@ describe("telling this deployment's auth configs from anybody else's", () => {
       }),
     );
 
-    await broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" });
+    await broker.ensureAuthConfig({
+      toolkit: "linear",
+      name: "Linear",
+      connection: { kind: "consent" },
+    });
 
     expect(created).toEqual([]);
   });
@@ -1358,7 +1366,11 @@ describe("telling this deployment's auth configs from anybody else's", () => {
       }),
     );
 
-    await broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" });
+    await broker.ensureAuthConfig({
+      toolkit: "linear",
+      name: "Linear",
+      connection: { kind: "consent" },
+    });
 
     // Adopting the hand-made one would have this deployment mint connections against scopes it
     // cannot see and delete an operator's work when the app is removed.
@@ -1368,6 +1380,161 @@ describe("telling this deployment's auth configs from anybody else's", () => {
         { type: "use_composio_managed_auth", name: "Linear (OpenBot)" },
       ],
     ]);
+  });
+});
+
+/**
+ * WHAT ENABLING AN APP ACTUALLY CREATES, WHICH IS A DIFFERENT ANSWER FOR EACH KIND OF APP.
+ *
+ * Every config this deployment ever made was `use_composio_managed_auth`, which is the right answer
+ * for exactly one of the five kinds. The other four were wrong in four different ways, and only one
+ * of them announced itself: Composio answers 404 for an app that has no managed OAuth client of its
+ * own, so Linear's MCP app was unconnectable. The rest were quiet — a no-auth app whose creation
+ * the vendor refuses outright, a key app whose people were sent to a consent screen with nothing to
+ * ask them, and an app this deployment cannot drive at all, enabled anyway.
+ *
+ * THE ASSERTIONS ARE ON WHAT WENT OUT, AND ON WHAT DID NOT. Two of these four are about a call that
+ * must not be made at all, which no assertion on a return value can see: {@link fakeVendor}'s
+ * refusals name the unasked-for call, and the counters here say which door was not opened.
+ */
+describe("the config each kind of app is enabled with", () => {
+  test("a self-registering app gets a custom config with no credentials in it", async () => {
+    const created: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [] }),
+          create: async (...call: unknown[]) => {
+            created.push(call);
+            return CREATED;
+          },
+        },
+      }),
+    );
+
+    await broker.ensureAuthConfig({
+      toolkit: "linear_mcp",
+      name: "Linear MCP",
+      connection: { kind: "self-registering" },
+    });
+
+    /*
+     * `DCR_OAUTH` AND NO CREDENTIALS, which is the whole of what such an app needs: the vendor
+     * registers a client of its own against the provider at connect time. The managed type is what
+     * this used to send and it is the one answer that cannot work here — Composio has no OAuth
+     * client of its own for these apps, so the managed path answers 404 and nobody connects.
+     */
+    expect(created).toEqual([
+      [
+        "linear_mcp",
+        {
+          type: "use_custom_auth",
+          authScheme: "DCR_OAUTH",
+          name: "Linear MCP (OpenBot)",
+          credentials: {},
+        },
+      ],
+    ]);
+  });
+
+  test("a key app gets a custom config carrying no secret, because the secret is per person", async () => {
+    const created: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [] }),
+          create: async (...call: unknown[]) => {
+            created.push(call);
+            return CREATED;
+          },
+        },
+      }),
+    );
+
+    await broker.ensureAuthConfig({
+      toolkit: "perplexityai",
+      name: "Perplexity",
+      connection: { kind: "fields", authScheme: "API_KEY" },
+    });
+
+    /*
+     * NO KEY ON THE CONFIG, AND THAT IS NOT AN OMISSION TO BE FIXED LATER. The config is
+     * per-deployment and the key is one person's; it belongs to each connection made against this
+     * config, which is where the connect form sends it. A key here would be one person's secret
+     * shared by everybody the app is enabled for.
+     */
+    expect(created).toEqual([
+      [
+        "perplexityai",
+        {
+          type: "use_custom_auth",
+          authScheme: "API_KEY",
+          name: "Perplexity (OpenBot)",
+          credentials: {},
+        },
+      ],
+    ]);
+  });
+
+  test("a no-auth app gets no config at all, because Composio refuses one", async () => {
+    let listed = false;
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => {
+            listed = true;
+            return { items: [] };
+          },
+        },
+      }),
+    );
+
+    await broker.ensureAuthConfig({
+      toolkit: "hackernews",
+      name: "Hacker News",
+      connection: { kind: "no-auth" },
+    });
+
+    /*
+     * NOT EVEN THE LISTING, which is the half that is easy to leave in. Composio's own refusal is
+     * "Cannot create an auth config for toolkit hackernews because it does not require
+     * authentication. You can use its tools directly without creating a connected account." — so
+     * there is nothing to find and nothing to create, and a read made anyway is a round trip whose
+     * answer no branch below could use. `create` is left at {@link fakeVendor}'s refusal, which
+     * names itself if it is ever reached.
+     */
+    expect(listed).toBe(false);
+  });
+
+  test("an unsupported app is refused before anything is created", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({ items: [] }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.ensureAuthConfig({
+        toolkit: "docusign",
+        name: "DocuSign",
+        connection: {
+          kind: "unsupported",
+          reason: "needs its own OAuth client",
+        },
+      }),
+    );
+
+    /*
+     * THE DERIVATION'S OWN SENTENCE, carried rather than restated. It is the one the picker filters
+     * on and the one an administrator has already read beside the app; a second sentence invented
+     * here would be a second account of why the app cannot be driven, and the two would drift.
+     */
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(/needs its own OAuth client/);
+    expect(refusal.message).toMatch(/docusign/);
+    expect(refusal.message).not.toMatch(A_CRASH);
   });
 });
 
@@ -2335,7 +2502,11 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
         authConfigs: { list: async () => ({ items: [] }), create: raise },
       }),
       ask: ({ broker }) =>
-        broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" }),
+        broker.ensureAuthConfig({
+          toolkit: "linear",
+          name: "Linear",
+          connection: { kind: "consent" },
+        }),
     },
     {
       method: "deleteAuthConfig",
@@ -2526,7 +2697,11 @@ describe("each vendor condition reaches the reader as its own remedy", () => {
       }),
       () => 1_000_000,
     );
-    return broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" });
+    return broker.ensureAuthConfig({
+      toolkit: "linear",
+      name: "Linear",
+      connection: { kind: "consent" },
+    });
   }
 
   /**
@@ -4177,7 +4352,11 @@ describe("what a malformed field of a row actually costs", () => {
     );
 
     const refusal = await failureOf(
-      broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" }),
+      broker.ensureAuthConfig({
+        toolkit: "linear",
+        name: "Linear",
+        connection: { kind: "consent" },
+      }),
     );
 
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
@@ -4208,7 +4387,11 @@ describe("what a malformed field of a row actually costs", () => {
     );
 
     const refusal = await failureOf(
-      broker.ensureAuthConfig({ toolkit: "linear", name: "Linear" }),
+      broker.ensureAuthConfig({
+        toolkit: "linear",
+        name: "Linear",
+        connection: { kind: "consent" },
+      }),
     );
 
     /*

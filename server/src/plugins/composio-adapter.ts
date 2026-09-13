@@ -1737,7 +1737,36 @@ export type ComposioVendor = {
      */
     create(
       toolkit: string,
-      options: { type: "use_composio_managed_auth"; name: string },
+      /**
+       * THE UNION, BECAUSE THE MANAGED TYPE IS RIGHT FOR ONE KIND OF APP AND WAS SENT FOR ALL OF
+       * THEM. A self-registering app has no Composio-owned OAuth client behind it and a key app
+       * has no consent screen to send anybody to, so both are created as custom configs — carrying
+       * the scheme, and never a credential, which is per-connection rather than per-config. The
+       * managed shape has no field to name a scheme with, which is why this is a union of two
+       * shapes rather than one shape with an optional field.
+       */
+      options:
+        | { type: "use_composio_managed_auth"; name: string }
+        | {
+            type: "use_custom_auth";
+            authScheme: FieldScheme | "DCR_OAUTH";
+            name: string;
+            /**
+             * EMPTY, AND PRESENT, WHICH IS NOT THE CONTRADICTION IT LOOKS LIKE.
+             *
+             * Neither config this deployment creates carries a secret — a self-registering app
+             * needs none and a key app's key belongs to each connection made against the config
+             * rather than to the config — but `CreateCustomAuthConfigParamsSchema` spells
+             * `credentials` REQUIRED (`@composio/core` 0.18.1,
+             * `src/types/authConfigs.types.ts:52-65`) and `AuthConfigs.create` `safeParse`s its
+             * options before it builds a body (`src/models/AuthConfigs.ts:132-137`). So an absent
+             * field is not "no credentials sent"; it is a `ValidationError` raised inside the
+             * vendor's package with no request made at all. The empty record is what carries
+             * nothing THROUGH that check, and the type says so rather than leaving the next reader
+             * to discover it from a failed enable.
+             */
+            credentials: Record<string, never>;
+          },
     ): Promise<{ id?: unknown } | null>;
     /**
      * Delete one auth config, and ask for the upstream credentials on it to be revoked too.
@@ -2578,7 +2607,27 @@ export function buildComposioClient(
       return copyOf(entry.apps);
     },
 
-    async ensureAuthConfig({ toolkit, name }): Promise<void> {
+    async ensureAuthConfig({ toolkit, name, connection }): Promise<void> {
+      /*
+       * NOTHING AT ALL FOR AN APP THAT NEEDS NO AUTHENTICATION, AND THAT IS THE VENDOR'S RULE
+       * RATHER THAN A SHORTCUT. Composio refuses an auth config for such a toolkit — "Cannot
+       * create an auth config for toolkit hackernews because it does not require authentication.
+       * You can use its tools directly without creating a connected account." — so the listing
+       * below is not even worth making: there is nothing to find and nothing to create.
+       */
+      if (connection.kind === "no-auth") return;
+
+      /*
+       * AND A REFUSAL BEFORE ANY WRITE for the one kind this deployment cannot drive. The sentence
+       * is the derivation's own, which named the scheme and what it wants; a refusal here that
+       * invented a second sentence would drift from the one the picker filters on.
+       */
+      if (connection.kind === "unsupported") {
+        throw new BrokerRefusalError(
+          `${toolkit} was not enabled: ${connection.reason}`,
+        );
+      }
+
       /*
        * IDEMPOTENT BY LOOKING FIRST, because a second config is not a duplicate — it is a split.
        * A person's existing connection is created against one particular auth config, so creating
@@ -2637,16 +2686,47 @@ export function buildComposioClient(
        * Composio. What is true of every condition here is the half that is said now: the app is not
        * enabled, and what is at Composio is not something this call can report.
        */
+      const configName = `${name} ${CONFIG_SUFFIX}`;
+
+      /*
+       * WHICH TYPE OF CONFIG, AND THE MANAGED ONE IS RIGHT FOR EXACTLY ONE OF THE THREE KINDS THAT
+       * REACH HERE. It was sent for all of them, and only one of the failures announced itself:
+       * Composio has no OAuth client of its own for a self-registering app, so the managed path
+       * answers 404 and the app is simply unconnectable — which is what made Linear's MCP app
+       * impossible to attach. A key app's was quiet and worse: the config was accepted, and every
+       * person enabled onto it was then sent to a consent screen that had nothing to ask them for.
+       *
+       * AND NEITHER CUSTOM BRANCH CARRIES A CREDENTIAL, which is the point rather than an omission.
+       * A self-registering app needs none by definition — the vendor registers a client of its own
+       * at connect time. A key app needs none HERE because the key is one person's: it belongs to
+       * each connection made against this config, which is per-deployment, and a key written onto
+       * it would be one person's secret shared by everybody the app is enabled for.
+       */
+      const options =
+        connection.kind === "consent"
+          ? ({ type: "use_composio_managed_auth", name: configName } as const)
+          : ({
+              type: "use_custom_auth",
+              authScheme:
+                connection.kind === "self-registering"
+                  ? ("DCR_OAUTH" as const)
+                  : connection.authScheme,
+              name: configName,
+              /*
+               * THE EMPTY RECORD IS THE VENDOR'S PRICE FOR SENDING NOTHING — see the field's own
+               * comment on {@link ComposioVendor}. Omitting it is a `ValidationError` raised before
+               * any request, which reads as a refusal to enable rather than as the secret-free
+               * config this branch is for.
+               */
+              credentials: {},
+            } as const);
+
       const created = await askVendor(
         {
           outcome: `the app is not enabled, and whether an authorization config for ${toolkit} now stands at Composio is not something this deployment can tell`,
           app: toolkit,
         },
-        () =>
-          vendor.authConfigs.create(toolkit, {
-            type: "use_composio_managed_auth",
-            name: `${name} ${CONFIG_SUFFIX}`,
-          }),
+        () => vendor.authConfigs.create(toolkit, options),
       );
 
       /*
