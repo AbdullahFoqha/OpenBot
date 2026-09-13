@@ -524,14 +524,24 @@ export function createPluginRoutes(
       const refusal = brokerRefusal(error, DIRECTORY_UNAVAILABLE);
       return context.json({ error: refusal.error }, refusal.status);
     }
+    /*
+     * AN APP THAT CANNOT BE CONNECTED IS NOT AN APP TO OFFER. Every kind but this one ends at a
+     * person with a working account; `unsupported` ends at an administrator pressing Add and
+     * meeting Composio's refusal, because the OAuth client it wants is one this deployment has
+     * nowhere to hold. Hidden here rather than at the vendor: the filter is a fact about what this
+     * deployment can drive, not about what Composio publishes.
+     */
+    const connectable = directory.filter(
+      (candidate) => candidate.connection.kind !== "unsupported",
+    );
     const term = (context.req.query("q") ?? "").trim().toLowerCase();
     const matched = term
-      ? directory.filter((app) =>
+      ? connectable.filter((app) =>
           [app.slug, app.name, app.description].some((field) =>
             field.toLowerCase().includes(term),
           ),
         )
-      : directory;
+      : connectable;
 
     const enabled = new Set(
       (await store.serverUrls())

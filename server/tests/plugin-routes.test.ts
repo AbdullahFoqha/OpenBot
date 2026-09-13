@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createApp } from "../src/app";
 import { loadConfig } from "../src/config";
 import { ServerRowAmbiguousError } from "../src/plugins/access";
+import type { BrokerApp } from "../src/plugins/broker";
 import {
   CatalogueEntryUnknownError,
   CustomServerRefusedError,
@@ -565,7 +566,7 @@ describe("granting a Bot itself", () => {
  * The no-broker answer is a 503 naming the setting rather than an empty list: an empty directory
  * and an absent one are different facts, and only one of them has a remedy.
  */
-const DIRECTORY = [
+const DIRECTORY: BrokerApp[] = [
   {
     slug: "slack",
     name: "Slack",
@@ -573,6 +574,7 @@ const DIRECTORY = [
     logo: null,
     categories: ["communication"],
     actionCount: 63,
+    connection: { kind: "consent" },
   },
   {
     slug: "gmail",
@@ -581,6 +583,7 @@ const DIRECTORY = [
     logo: null,
     categories: ["communication"],
     actionCount: 24,
+    connection: { kind: "consent" },
   },
   {
     slug: "linear",
@@ -589,6 +592,26 @@ const DIRECTORY = [
     logo: null,
     categories: ["project-management"],
     actionCount: 18,
+    connection: { kind: "consent" },
+  },
+  {
+    /*
+     * The fourth app is one Composio publishes and this deployment cannot drive: connecting it
+     * wants an OAuth application registered by whoever runs the deployment, and there is nowhere
+     * here to keep one. Fifty-six of the catalogue's apps are this, which is why the fixture
+     * carries one rather than pretending the catalogue is uniform.
+     */
+    slug: "docusign",
+    name: "DocuSign",
+    description: "Send documents for signature.",
+    logo: null,
+    categories: ["documents"],
+    actionCount: 31,
+    connection: {
+      kind: "unsupported",
+      reason:
+        "DocuSign needs an OAuth application registered by whoever runs this deployment, and this deployment holds no place to put its own OAuth client for a brokered app.",
+    },
   },
 ];
 
@@ -665,6 +688,29 @@ describe("the Composio directory", () => {
     expect(
       (await response.json()).apps.map((app: { slug: string }) => app.slug),
     ).toEqual(["slack"]);
+  });
+
+  test("an app this deployment could not connect is never offered", async () => {
+    /*
+     * COMPOSIO PUBLISHES 1540 APPS AND FIFTY-SIX OF THEM CANNOT BE CONNECTED FROM HERE: they want
+     * an OAuth client registered by whoever runs the deployment, and this deployment holds nowhere
+     * to put one. Listed, they are a row an administrator presses Add on and meets the vendor's
+     * refusal at — a dead end offered as a choice. Hidden in the route rather than asked of the
+     * vendor, because which apps are connectable is a fact about what this deployment can drive,
+     * not about what Composio publishes.
+     */
+    const { app } = directoryApp();
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+    );
+
+    expect(response.status).toBe(200);
+    const slugs = (await response.json()).apps.map(
+      (entry: { slug: string }) => entry.slug,
+    );
+    expect(slugs).not.toContain("docusign");
+    expect(slugs).toEqual(["slack", "gmail", "linear"]);
   });
 
   test("an app is enabled by the url of the row, not by the row's id", async () => {
