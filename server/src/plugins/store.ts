@@ -52,7 +52,11 @@ import {
   resolveServerUrl,
   serverCredentialKind,
 } from "./catalogue";
-import { toolkitOf, VERSION_ARG } from "./composio";
+import {
+  callTool as composioCallTool,
+  toolkitOf,
+  VERSION_ARG,
+} from "./composio";
 import { inspectToolArguments } from "./content-governance";
 import { type ListedTool, McpServerError } from "./mcp";
 import { registerDynamicClient } from "./oauth";
@@ -4223,12 +4227,32 @@ export function createPluginStore(options: PluginStoreOptions) {
      * confirmBrokeredConnection}, which asks a question the vendor may answer no to, this performs
      * an act: it either made the connection or it threw. A `boolean` would invite a caller to
      * branch on a `false` this method cannot produce.
+     *
+     * `probe` IS RETURNED BESIDE `verified` BECAUSE THE FLAG ALONE NOW MEANS THREE DIFFERENT THINGS,
+     * AND THE BROWSER READS THIS FIELD TO CHOOSE ITS SENTENCE. While the row was written `false`
+     * unconditionally the flag had one meaning — nobody has checked — and a screen could say so from
+     * the flag alone. With a probe that can fail there are three states, and two of them share the
+     * flag:
+     *
+     *   null probe, `verified: false`   — this app publishes nothing safe to call, so nothing was
+     *                                     tried. "It was accepted without being checked" is true.
+     *   named probe, `verified: true`   — the action ran in this person's account and answered.
+     *   named probe, `verified: false`  — it ran, the vendor said no, and the account could not be
+     *                                     withdrawn. The key is BAD and the row exists anyway.
+     *
+     * That last one is the worst state this feature has, and under the old wording a person in it
+     * would be told their key was never checked — when it was checked, the vendor rejected it, and
+     * this deployment failed to undo the account it made. INFERRING THE STATE CLIENT-SIDE FROM
+     * `verified` IS EXACTLY WHAT THIS FIELD EXISTS TO PREVENT: there is nothing in the flag that
+     * separates "nothing to try" from "tried and failed", so a browser deriving a sentence from it
+     * would tell one of those two people the opposite of what happened. The audit row carries the
+     * same distinction under `action`, for a reader of the trail rather than of the screen.
      */
     async connectBrokeredWithFields(input: {
       toolkit: string;
       userId: string;
       values: Record<string, string>;
-    }): Promise<{ connected: true; verified: boolean }> {
+    }): Promise<{ connected: true; verified: boolean; probe: string | null }> {
       // First, and for `confirmBrokeredConnection`'s reason: a deployment with no key has nobody to
       // connect anybody at, and the refusal must happen before the values are touched at all.
       if (!broker) throw new BrokerUnconfiguredError();
@@ -4251,7 +4275,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         );
       }
 
-      await broker.connectWithFields({
+      const { accountId } = await broker.connectWithFields({
         userId: input.userId,
         toolkit: input.toolkit,
         authScheme,
@@ -4259,17 +4283,132 @@ export function createPluginStore(options: PluginStoreOptions) {
       });
 
       /*
-       * UNVERIFIED FOR NOW, AND "FOR NOW" IS THE WHOLE OF WHAT THIS FALSE MEANS.
+       * THE ONE ACTION THIS DEPLOYMENT WILL SPEND THE KEY ON, chosen from what the app published.
        *
-       * It is a PLACEHOLDER and not a settled answer: the next step calls a probe against the key
-       * that was just attached and writes `Boolean(probe)` here instead. Until that exists,
-       * `false` is the honest value rather than a pessimistic one — Composio accepted the values
-       * and nothing has asked the app on the other side whether the credential works, which is
-       * exactly the state {@link composioConnections.verified} documents as "a key somebody typed
-       * in that nobody has checked". Written through the single writer rather than spelled here,
-       * so this path and the confirm path cannot drift into two row shapes.
+       * Composio accepts a key without ever trying it, so "connected" at the vendor is not evidence
+       * that the credential works — and a row written on that acceptance is a gate every later
+       * brokered call passes for a key that cannot answer. {@link probeActionFor} is what keeps the
+       * call safe: the vendor must have labelled the action a read and it must take no arguments,
+       * and both matter because the first argument-less action on Stripe's own list creates a
+       * billing session. Null is an ordinary answer — see that method — and it is the FIRST of the
+       * three states this method reports.
        */
-      const verified = false;
+      const serverId = `composio-${input.toolkit}`;
+      const candidate = await this.probeActionFor(serverId);
+
+      /*
+       * THE VERSION THE LISTING RECORDED FOR THAT ACTION, WITHOUT WHICH THERE IS NOTHING TO CALL.
+       *
+       * Composio refuses an execution without a specific version and rejects "latest", so the
+       * transport refuses before dialling where none travels with the call — which is a refusal of
+       * OURS wearing the shape of a failed probe. Read here rather than returned by the chooser
+       * because what the chooser answers is which action is SAFE, and that question has nothing to
+       * do with whether this deployment happens to have recorded a version for it.
+       *
+       * AN ACTION WITH NO RECORDED VERSION IS THEREFORE NOTHING TO TRY, and is reported as the null
+       * probe rather than as a failed one. Composio publishes some actions with no version at all,
+       * and the alternative is indefensible: a person with a perfectly good key would have their
+       * account withdrawn and their connection refused because an app's listing was thin, and the
+       * sentence they were shown would say the vendor rejected their key. `false` with a null probe
+       * says the honest thing — nothing was checked — which is the state the app is really in.
+       */
+      const recorded = candidate
+        ? await database
+            .select({ version: mcpTools.version })
+            .from(mcpTools)
+            .where(
+              and(
+                eq(mcpTools.serverId, serverId),
+                eq(mcpTools.name, candidate),
+              ),
+            )
+            .limit(1)
+        : [];
+      const version = recorded[0]?.version ?? null;
+      const probe = version === null ? null : candidate;
+
+      if (probe !== null) {
+        /*
+         * THE TRANSPORT DIRECTLY, AND NOT `callTool` ABOVE. This deployment's own `callTool` checks
+         * a grant, evaluates the policy and writes an `mcp.call_*` row, and there is no Bot here to
+         * check a grant for, no policy context to evaluate and no Bot to attribute a row to. What
+         * holds this narrow is structural rather than disciplinary: no endpoint, no arguments, and
+         * an action chosen from recorded metadata rather than from anything a request said. See
+         * `mcp.connection_verified` in `./audit`, which records the same three properties as the
+         * reason this call may skip the checks the ordinary path cannot.
+         *
+         * THE VERSION IS NOT AN ARGUMENT. It travels under the transport's reserved key, which the
+         * Composio transport strips before anything reaches the vendor and asserts that it did, so
+         * what Composio is handed is the action and an empty argument object.
+         */
+        const answer = await composioCallTool(
+          { url: `composio://${input.toolkit}`, actorId: input.userId },
+          probe,
+          { [VERSION_ARG]: version },
+        );
+
+        if (answer.isError) {
+          /*
+           * NOTHING IS LEFT BEHIND ON A KEY THAT DOES NOT WORK. The account is deleted at Composio
+           * before the refusal is raised, so a mistyped key does not leave a live connection that
+           * every screen here would draw as connected — which is precisely the state the
+           * verification exists to prevent, and it would be worse for having been created by the
+           * check itself.
+           *
+           * THE ACCOUNT THIS CALL MADE, BY ID, AND NEVER THE APP. `revoke` ends every account the
+           * person holds for the app; here the intent is narrower than that — undo the thing just
+           * done — and the two differ exactly when the local row and Composio have drifted apart,
+           * which is the case where a sweep would delete a connection that was working.
+           */
+          const removed = await broker
+            .revokeAccount(accountId)
+            .then(() => true)
+            .catch(() => false);
+
+          if (!removed) {
+            /*
+             * AND WHERE THE UNDO ITSELF FAILS, THE ROW IS WRITTEN ANYWAY. That reverses this
+             * method's own rule, and it reverses it in the one case where the rule is no longer
+             * available: Composio has an account attached and will not take it back. Leaving no row
+             * then does not mean "nothing was left behind" — it means a live account nothing on any
+             * screen names, which the person cannot disconnect, because disconnect works off the
+             * row. This connector's standing order everywhere else is that a failure leaves access
+             * dead rather than live and unreachable; here only the second half is reachable, so the
+             * row is written as UNVERIFIED and the sentence says all three facts.
+             *
+             * WHICH IS WHY THE SENTENCE CARRIES THE VENDOR'S OWN. This is the THIRD state — the row
+             * exists, unverified, and the key is bad — and it is the state the `probe` field above
+             * was added for. A refusal that said only "it could not be checked" would leave the
+             * person believing their key might be fine, standing in front of a row that says
+             * unchecked, with a live account at the vendor.
+             */
+            await this.recordBrokeredConnection({
+              toolkit: input.toolkit,
+              userId: input.userId,
+              verified: false,
+            });
+            throw new PluginRefusedError(
+              `What you entered for ${input.toolkit} did not work — ${answer.text} — and Composio would not take the account back either, so it is recorded here as unchecked rather than left somewhere nothing could name it. Disconnect it on the Plugins page and try again.`,
+              null,
+            );
+          }
+
+          throw new PluginRefusedError(
+            `${input.toolkit} would not answer with what was entered: ${answer.text} Nothing was saved, so entering it again is the whole of the retry.`,
+            null,
+          );
+        }
+      }
+
+      /*
+       * THE SECOND STATE, AND THE ONLY ONE THAT EARNS THE FLAG. A probe that ran and answered is
+       * evidence the key works, exactly as the vendor's yes at the end of a consent screen is
+       * evidence for {@link confirmBrokeredConnection}; a null probe is the honest unchecked state
+       * {@link composioConnections.verified} documents. Written through the single writer below
+       * rather than spelled here, so this path and the confirm path cannot drift into two row
+       * shapes — `verified_at` follows from the flag there and is not passed in.
+       */
+      const verified = probe !== null;
 
       // Read before the write, for `confirmBrokeredConnection`'s reason: the record below is an
       // upsert, so it leaves nothing behind that tells a first key from a replacement, and whether
@@ -4310,7 +4449,39 @@ export function createPluginStore(options: PluginStoreOptions) {
         },
       });
 
-      return { connected: true, verified };
+      /*
+       * THE CHECK ITSELF, ON THE TRAIL, WHETHER OR NOT ONE HAPPENED.
+       *
+       * Filed on every connection rather than only where a probe ran, because "this app published
+       * nothing safe to call, so the key was never tried" is the fact a reader most needs and the
+       * one nothing else records. `action` is the null the response field is: it separates an
+       * unchecked connection from a checked one, which `verified: false` alone cannot.
+       *
+       * AND IT IS FILED ONLY ON THE PATH THAT REACHES HERE, because both refusals above throw.
+       * Where the account was withdrawn that is right: no connection exists, and a verification row
+       * about one would have the trail recording a state this deployment deliberately does not
+       * hold. Where the withdrawal ITSELF failed a row does stand — unverified, with a live account
+       * behind it — and nothing on this trail names it. That is the one gap this event leaves: what
+       * tells the person is the refusal, which names all three facts, and the row they are told to
+       * disconnect files `mcp.account_disconnected` when they do.
+       *
+       * Under the SERVER row's id and not the app slug, unlike the `mcp.account_connected` row
+       * above. That row is about a person's access to an app, which is what the connection table is
+       * keyed on; this one is about an ACTION of a server — the id `probeActionFor` was asked and
+       * the id an operator sees on the Plugins page — and `targetType` here is `mcp_server`.
+       */
+      await recordAuditEvent(auditStore, {
+        eventType: "mcp.connection_verified",
+        targetType: "mcp_server",
+        targetId: serverId,
+        payload: {
+          actor: input.userId,
+          action: probe,
+          verified,
+        },
+      });
+
+      return { connected: true, verified, probe };
     },
 
     /**

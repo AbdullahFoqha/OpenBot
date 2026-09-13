@@ -109,8 +109,49 @@ const enabledId = `composio-${enabledToolkit}`;
 const rekeyedToolkit = `rekeyable-${suite}`;
 /** What `addBrokeredApp` spells that app's row, so {@link clean} can take it back. */
 const rekeyedId = `composio-${rekeyedToolkit}`;
+/**
+ * THE APP WHOSE TYPED KEY IS ACTUALLY SPENT ON A CALL, which no other fixture here is.
+ *
+ * Its own name rather than {@link enabledToolkit}'s, because that app is the one the secrecy test
+ * connects and it publishes no actions at all — which is the whole reason it stays unverified. An
+ * app that gets probed has to hold an action a probe may use, and seeding one on that app would
+ * change what that test is about. Added to {@link ownedToolkits} so its connection rows are swept,
+ * and its `mcp_servers` row goes out with {@link probedId} in {@link clean}.
+ */
+const probedToolkit = `probed-${suite}`;
+/** What `addBrokeredApp` spells that app's row, which is also the id the probe chooser is asked. */
+const probedId = `composio-${probedToolkit}`;
+/** The one action the chooser can pick for it: a read, asking for nothing, at a recorded version. */
+const probeAction = "PROBED_GET_ME";
+/**
+ * The version the listing recorded for that action, and the reason it is on the fixture at all.
+ *
+ * Composio refuses a call without a specific version and the transport refuses one before dialling,
+ * so an action recorded with no version is an action nothing here can call. A fixture that left it
+ * null would have every probe below fail for this deployment's reason rather than the vendor's —
+ * and the failure tests would pass while asserting nothing about a key.
+ */
+const probeVersion = "20260903_00";
+/** The account Composio answers with when the key that was just typed is attached. */
+const madeAccountId = `ca_${suite}`;
+/**
+ * AN ACCOUNT THE VENDOR HOLDS THAT THIS DEPLOYMENT NEVER MADE, which is the drift a sweep destroys.
+ *
+ * `revoke` ends every account a person holds for an app; `revokeAccount` ends the one it is handed.
+ * The two differ only when Composio holds an account no row here names — an earlier connection this
+ * deployment lost the row for, one made in Composio's own dashboard — and that is somebody's
+ * WORKING connection. This id stands in for it, so "the undo was narrow" is an assertion about what
+ * the vendor still holds afterwards rather than about how a call was spelled.
+ */
+const strandedAccountId = `ca_working_${suite}`;
 /** Every app this run owns, which is the scope of every read and every delete below. */
-const ownedToolkits = [toolkit, secondToolkit, enabledToolkit, rekeyedToolkit];
+const ownedToolkits = [
+  toolkit,
+  secondToolkit,
+  enabledToolkit,
+  rekeyedToolkit,
+  probedToolkit,
+];
 /**
  * An app this file does NOT own, standing in for another run's fixture — or another file's.
  *
@@ -332,6 +373,28 @@ let vendorFinds: (request: { userId: string; toolkit: string }) => boolean =
 let vendorRefuses: (request: { userId: string; toolkit: string }) => boolean =
   () => false;
 
+/**
+ * EVERY ACCOUNT THE VENDOR STILL HOLDS, which is what an undo has to be judged against.
+ *
+ * A list rather than a counter, because the question the narrow undo answers is WHICH account went:
+ * a sweep and a by-id withdrawal both leave "one fewer ask made" behind them, and they differ only
+ * in what Composio is still holding afterwards. {@link connectWithFields} adds the account it made,
+ * {@link ComposioBroker.revokeAccount} takes back the one it is handed, and {@link
+ * ComposioBroker.revoke} empties it for the app — so a test can seed {@link strandedAccountId} and
+ * assert it survived.
+ */
+let vendorHolds: string[] = [];
+
+/**
+ * Whether the vendor REFUSES TO TAKE ONE ACCOUNT BACK, which is the worst state this feature has.
+ *
+ * Separate from {@link vendorRefuses} rather than folded into it for the reason that knob is
+ * separate from {@link vendorFinds}: that one is about the sweep a retirement makes, this is about
+ * the by-id withdrawal a failed verification makes, and one flag spelling both would let a test
+ * about an undo pass on a stub that only ever refused a retirement.
+ */
+let vendorKeepsAccount = false;
+
 const broker: ComposioBroker = {
   listApps: unasked("list the catalogue"),
   ensureAuthConfig: async (config) => {
@@ -371,6 +434,10 @@ const broker: ComposioBroker = {
         `the vendor would not withdraw ${request.toolkit}/${request.userId}`,
       );
     }
+    // A SWEEP, which is the whole difference from `revokeAccount` and the reason it is modelled
+    // here at all: this ends every account the person holds for the app, including one this
+    // deployment never made. See {@link strandedAccountId}.
+    vendorHolds = [];
     return vendorFinds(request);
   },
   deleteAuthConfig: async (forToolkit) => {
@@ -393,11 +460,26 @@ const broker: ComposioBroker = {
       held: await connectionsHeld(),
     });
     valuesSent.push(request.values);
-    return { accountId: `ca_${suite}` };
+    // Held from here, so that what the vendor is left with afterwards is a fact about the act
+    // rather than about the fixture: the account exists because this call made it.
+    vendorHolds.push(madeAccountId);
+    return { accountId: madeAccountId };
   },
-  // The verification that undoes its own account is micro-task 10.1's; nothing here makes one to
-  // take back, so this has no caller yet and says so.
-  revokeAccount: unasked("take one account back"),
+  revokeAccount: async (accountId) => {
+    asks.push({
+      // Named by the ACCOUNT ID and by nothing else, because that is the whole of what this method
+      // is handed and the whole of what makes it narrow. An ask spelled by app and person would be
+      // indistinguishable from `revoke`'s, which is the call this one exists not to be.
+      ask: `revokeAccount:${accountId}`,
+      held: await connectionsHeld(),
+    });
+    // Recorded before it refuses, for `revoke`'s reason: an undo that failed is still an undo that
+    // was attempted, and the tests about that state assert both halves.
+    if (vendorKeepsAccount) {
+      throw new Error(`the vendor would not take ${accountId} back`);
+    }
+    vendorHolds = vendorHolds.filter((held) => held !== accountId);
+  },
 };
 
 const store = createPluginStore({
@@ -444,6 +526,7 @@ async function clean() {
         enabledId,
         rekeyedId,
         probeAppId,
+        probedId,
       ]),
     );
   await database
@@ -455,6 +538,7 @@ async function clean() {
         enabledId,
         rekeyedId,
         probeAppId,
+        probedId,
       ]),
     );
   await database
@@ -524,6 +608,36 @@ async function seedApp(options: { connect?: boolean } = {}) {
 }
 
 /**
+ * The probed app as an administrator's press of Add leaves it, plus the action a probe may use.
+ *
+ * ENABLED FOR REAL RATHER THAN INSERTED BY HAND, because what the connect path reads off the row is
+ * the `auth_scheme` — and a fixture that wrote it itself would be asserting this file's idea of what
+ * Add records instead of `addBrokeredApp`'s. The action is inserted directly afterwards, the way the
+ * two chooser tests above insert theirs: nothing here is about how a listing turns Composio's tags
+ * into an effect, and a stub that had to spell those tags would make every test below depend on it.
+ *
+ * `withProbe: false` LEAVES THE APP WITH NO ACTIONS AT ALL, which is an ordinary app and not a
+ * broken one: most key-based apps in the live catalogue publish some argument-less read and PostHog
+ * publishes none.
+ */
+async function addProbedApp(options: { withProbe?: boolean } = {}) {
+  await store.addBrokeredApp({
+    slug: probedToolkit,
+    title: "Probed App",
+    by: admin,
+    connection: { kind: "fields", authScheme: "API_KEY" },
+  });
+  if (options.withProbe === false) return;
+  await database.insert(mcpTools).values({
+    serverId: probedId,
+    name: probeAction,
+    description: "Says who the key belongs to.",
+    effect: "read",
+    version: probeVersion,
+  });
+}
+
+/**
  * Which of THIS RUN'S apps this deployment still believes somebody has connected.
  *
  * Narrowed to named apps and ordered for the reason {@link connectionsHeld} gives, which is the
@@ -575,6 +689,12 @@ beforeEach(async () => {
   // And answering at all is the ordinary case too. A vendor that will not answer is the subject of
   // its own two tests and of nothing else.
   vendorRefuses = () => false;
+  // The vendor holding nothing is where every test starts, so an account in the list below is one
+  // the test under way either made or seeded on purpose.
+  vendorHolds = [];
+  // And taking an account back when asked is the ordinary case, for {@link vendorRefuses}' reason:
+  // the refusal is the subject of exactly one test.
+  vendorKeepsAccount = false;
 });
 
 afterEach(() => useComposioClient(null));
@@ -1425,9 +1545,11 @@ test("an app whose only read takes an argument has no probe", async () => {
  * nothing at all, so {@link valuesSent} is checked in the same breath: the values went to the one
  * place they are for.
  *
- * `verified: false` IS THE STATE THIS TASK LEAVES AND NOT THE SETTLED ANSWER. The probe that earns
- * the flag is its own step; until it exists a key connection is honestly unchecked, which is the
- * pair `composio_connections.verified` documents for exactly this row.
+ * `verified: false` HERE IS "NOTHING TO TRY", WHICH `probe: null` IS WHAT SAYS. This app publishes
+ * no actions at all, so the chooser has nothing safe to spend the key on and the connection is
+ * honestly unchecked — the pair `composio_connections.verified` documents for exactly this row. The
+ * same `false` beside a NAMED probe would mean the opposite thing about the key, which is why the
+ * two travel together; see {@link connectBrokeredWithFields} and the test at the foot of this file.
  */
 test("the values reach Composio and nothing else", async () => {
   useAnsweringClient();
@@ -1444,7 +1566,7 @@ test("the values reach Composio and nothing else", async () => {
       userId: askerId,
       values: { generic_api_key: typedKey },
     }),
-  ).toEqual({ connected: true, verified: false });
+  ).toEqual({ connected: true, verified: false, probe: null });
 
   // The vendor was asked, and asked with what the person typed. Without this the absences below
   // would be satisfied by a method that connected nobody.
@@ -1556,4 +1678,319 @@ test("a second key for the same app is recorded as a reconnection", async () => 
       (event) => (event.payload as { reconnected: boolean }).reconnected,
     ),
   ).toEqual([false, true]);
+});
+
+/**
+ * A KEY THAT DOES NOT WORK LEAVES NOTHING BEHIND, NOT EVEN THE ACCOUNT THE CHECK ITSELF MADE.
+ *
+ * CRITERION. When the probe comes back an error, the call refuses with the vendor's own sentence,
+ * the account Composio just made is withdrawn by id, and this deployment holds no connection row.
+ *
+ * REASON. Composio accepts a key without ever trying it, so "connected" at the vendor says nothing
+ * about whether the credential works — and a row written on that acceptance is a gate every later
+ * brokered call passes for a key that cannot answer. The first anybody would hear of it is the
+ * vendor's own error in the middle of a Bot doing something. So the verification is the whole point
+ * of this path, and a failure that left the account standing would be worse than no check at all:
+ * the live-but-useless connection would have been created BY the check.
+ *
+ * AND THE PROBE HAD TO REALLY RUN, which is what {@link reached} asserts beside it. Every absence
+ * below is also true of a method that refused before it dialled — for want of a version, say — so
+ * without it this test would pass against a deployment that never spent the key at all.
+ */
+test("a key that does not work leaves nothing behind", async () => {
+  useAnsweringClient({
+    execute: async ({ slug }) => {
+      reached.push(slug);
+      // The vendor reporting a failure in a 200, which is how Composio says a credential is wrong.
+      return {
+        data: {},
+        error: "Invalid API key provided.",
+        successful: false,
+      };
+    },
+  });
+  await addProbedApp();
+
+  await expect(
+    store.connectBrokeredWithFields({
+      toolkit: probedToolkit,
+      userId: askerId,
+      values: { generic_api_key: typedKey },
+    }),
+  ).rejects.toThrow(/Invalid API key provided\./);
+
+  // The key was spent on the action the chooser picked, and on nothing else.
+  expect(reached).toEqual([probeAction]);
+  // Nothing was saved, which is the sentence the refusal ends on.
+  expect(await connectedToolkitsFor(askerId)).toEqual([]);
+  // And the account the check created is gone from the vendor, by the id it was made under.
+  expect(vendorHolds).toEqual([]);
+  expect(asksMade()).toEqual([
+    `ensureAuthConfig:${probedToolkit}/fields`,
+    `connectWithFields:${probedToolkit}/${askerId}`,
+    `revokeAccount:${madeAccountId}`,
+  ]);
+});
+
+/**
+ * AN UNDO THAT FAILS LEAVES THE ACCOUNT REACHABLE RATHER THAN INVISIBLE.
+ *
+ * CRITERION. When the probe fails AND Composio will not take the account back, the row is written
+ * unverified, the refusal says all three things — the key did not work, the account could not be
+ * withdrawn, it is recorded here unchecked — and the account is still the vendor's to see.
+ *
+ * REASON. This is the worst state the feature admits, and the rule that governs every other failure
+ * here is not available in it. "Leave nothing behind" assumes the account can be ended; when it
+ * cannot, leaving no row does not mean nothing was left behind — it means a LIVE account that
+ * nothing in this deployment names, that no screen draws and that the person cannot disconnect,
+ * because disconnect works off the row. A row saying "unchecked" is worse than a clean failure and
+ * far better than an invisible account. What makes the row honest is that the refusal carries what
+ * happened: the person is not told their key is fine, and they are given the one step that helps.
+ */
+test("an undo that fails leaves the account reachable rather than invisible", async () => {
+  useAnsweringClient({
+    execute: async ({ slug }) => {
+      reached.push(slug);
+      return {
+        data: {},
+        error: "Invalid API key provided.",
+        successful: false,
+      };
+    },
+  });
+  vendorKeepsAccount = true;
+  await addProbedApp();
+
+  await expect(
+    store.connectBrokeredWithFields({
+      toolkit: probedToolkit,
+      userId: askerId,
+      values: { generic_api_key: typedKey },
+    }),
+  ).rejects.toThrow(/would not take the account back/);
+
+  // The undo was attempted and refused, rather than skipped: the row below is the consequence of a
+  // vendor that would not act, and an implementation that never asked would leave the same row.
+  expect(asksMade()).toEqual([
+    `ensureAuthConfig:${probedToolkit}/fields`,
+    `connectWithFields:${probedToolkit}/${askerId}`,
+    `revokeAccount:${madeAccountId}`,
+  ]);
+  expect(vendorHolds).toEqual([madeAccountId]);
+
+  const [row] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(row).toMatchObject({
+    toolkit: probedToolkit,
+    userId: askerId,
+    verified: false,
+  });
+  // No date on a claim nobody made, which is the pair `recordBrokeredConnection` writes together.
+  expect(row.verifiedAt).toBeNull();
+});
+
+/**
+ * A FAILED KEY TAKES DOWN THE ACCOUNT IT MADE AND NOTHING BESIDE IT.
+ *
+ * CRITERION. With the vendor holding a second account this deployment has no row for, the undo
+ * names the id it was just handed, and the other account is still there afterwards.
+ *
+ * REASON. The drift case, and it is ordinary rather than exotic: an account made in Composio's own
+ * dashboard, or one whose row this deployment lost, is a WORKING connection the vendor holds and
+ * nothing here names. `revoke` sweeps every account a person holds for an app, so an undo written
+ * that way ends somebody's working connection because somebody mistyped a key — a second person's
+ * access destroyed by the first one's typo, by a call made to clean up after a check. The id is the
+ * whole of what makes the narrow call narrow, and it is the only thing a test can hold it to.
+ */
+test("a failed key takes down the account it made and nothing beside it", async () => {
+  useAnsweringClient({
+    execute: async ({ slug }) => {
+      reached.push(slug);
+      return {
+        data: {},
+        error: "Invalid API key provided.",
+        successful: false,
+      };
+    },
+  });
+  await addProbedApp();
+  // Seeded before the connect, so it is an account that predates this act rather than one of its
+  // making — which is the whole of what a sweep cannot tell apart.
+  vendorHolds.push(strandedAccountId);
+
+  await expect(
+    store.connectBrokeredWithFields({
+      toolkit: probedToolkit,
+      userId: askerId,
+      values: { generic_api_key: typedKey },
+    }),
+  ).rejects.toThrow();
+
+  // The working account survived the failure of somebody else's key.
+  expect(vendorHolds).toEqual([strandedAccountId]);
+  // And the sweep was never asked for, which is the other half of the same statement: a `revoke`
+  // here would have emptied the list above.
+  expect(asksMade()).toEqual([
+    `ensureAuthConfig:${probedToolkit}/fields`,
+    `connectWithFields:${probedToolkit}/${askerId}`,
+    `revokeAccount:${madeAccountId}`,
+  ]);
+});
+
+/**
+ * AN APP WITH NO PROBE CONNECTS UNVERIFIED RATHER THAN NOT AT ALL.
+ *
+ * CRITERION. Where the app publishes nothing safe to call, the connection is made, the row says
+ * unverified with no date, `probe` comes back null, and no action ran at the vendor.
+ *
+ * REASON. Null from the chooser is an answer and not a failure — most key-based apps publish some
+ * argument-less read and PostHog publishes none — so a verification that refused what it could not
+ * check would make this deployment's ability to connect an app depend on that app's action list.
+ *
+ * AND `probe: null` IS WHAT KEEPS THAT ROW'S SENTENCE TRUE. `verified: false` now has three
+ * possible meanings, and only one of them is this one: nothing was tried. Where a probe ran and
+ * failed the same flag means the key is bad, and a browser inferring a sentence from the flag alone
+ * would tell one of those two people the opposite of what happened. The audit row carries the same
+ * distinction under `action`.
+ */
+test("an app with no probe connects unverified rather than not at all", async () => {
+  useAnsweringClient();
+  await addProbedApp({ withProbe: false });
+
+  expect(
+    await store.connectBrokeredWithFields({
+      toolkit: probedToolkit,
+      userId: askerId,
+      values: { generic_api_key: typedKey },
+    }),
+  ).toEqual({ connected: true, verified: false, probe: null });
+
+  // Nothing was called, which is what "nothing to try" means at the vendor.
+  expect(reached).toEqual([]);
+  // And nothing was taken back either: there was no failure to undo.
+  expect(vendorHolds).toEqual([madeAccountId]);
+
+  const [row] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(row.verified).toBe(false);
+  expect(row.verifiedAt).toBeNull();
+
+  const checked = recordedOfType("mcp.connection_verified");
+  expect(checked).toHaveLength(1);
+  expect(checked[0].payload).toMatchObject({
+    actor: askerId,
+    // Null rather than a name, for the same reason the response field is: the trail must be able to
+    // say that no action ran, which "verified: false" alone cannot.
+    action: null,
+    verified: false,
+  });
+});
+
+/**
+ * A KEY THAT WORKS IS RECORDED VERIFIED, WITH THE ACTION IT WAS CHECKED WITH.
+ *
+ * CRITERION. When the probe answers, the row is verified with a date, the response names the action
+ * that was called, the trail carries the same name, and what reached the vendor was that action, in
+ * the asking person's account, at the version the listing recorded, WITH NO ARGUMENTS.
+ *
+ * REASON. The three failure tests above all end in a refusal, so every one of them would pass
+ * against a probe that could never succeed — and the transport refuses before dialling unless the
+ * call carries the version its listing recorded, which is exactly the shape a probe sent with a
+ * bare `{}` would have. Without this test "the key was checked and it passed" is a state the suite
+ * never reaches, and a verification that fails for this deployment's own reason would look from
+ * every other test here exactly like a vendor saying the key is bad — while withdrawing the account
+ * of every person who typed a good one.
+ *
+ * THE ARGUMENTS ARE ASSERTED EMPTY, because that is half of what makes this the one vendor call in
+ * the deployment that runs outside `callTool`'s grant, policy and content checks. The version
+ * travels under the transport's reserved key and is stripped before anything reaches Composio, so
+ * what the vendor is handed is an action chosen from recorded metadata and nothing else.
+ */
+test("a key that works is recorded verified, with the action it was checked with", async () => {
+  const sent: {
+    slug: string;
+    userId: string;
+    version: string;
+    args: unknown;
+  }[] = [];
+  useAnsweringClient({
+    execute: async (call, args) => {
+      reached.push(call.slug);
+      sent.push({
+        slug: call.slug,
+        userId: call.userId,
+        version: call.version,
+        args,
+      });
+      return answered;
+    },
+  });
+  await addProbedApp();
+  // Taken before the call, so the comparison below is against a moment that cannot postdate the
+  // write. Both this and the column are written in this process, so no clock but one is involved.
+  const before = new Date();
+
+  expect(
+    await store.connectBrokeredWithFields({
+      toolkit: probedToolkit,
+      userId: askerId,
+      values: { generic_api_key: typedKey },
+    }),
+  ).toEqual({ connected: true, verified: true, probe: probeAction });
+
+  expect(sent).toEqual([
+    {
+      slug: probeAction,
+      // The person's own account, which is the only account a probe could be a check on.
+      userId: askerId,
+      version: probeVersion,
+      args: {},
+    },
+  ]);
+  // The account stands, because there was nothing to undo.
+  expect(vendorHolds).toEqual([madeAccountId]);
+  expect(asksMade()).toEqual([
+    `ensureAuthConfig:${probedToolkit}/fields`,
+    `connectWithFields:${probedToolkit}/${askerId}`,
+  ]);
+
+  const [row] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(row.verified).toBe(true);
+  expect(row.verifiedAt).not.toBeNull();
+  expect(row.verifiedAt?.getTime()).toBeGreaterThanOrEqual(before.getTime());
+
+  const checked = recordedOfType("mcp.connection_verified");
+  expect(checked).toHaveLength(1);
+  expect(checked[0].payload).toMatchObject({
+    actor: askerId,
+    action: probeAction,
+    verified: true,
+  });
+  // The row names the person and no Bot, which is what `mcp.connection_verified` documents: nothing
+  // ran on a Bot's behalf here, and borrowing one to make the row look uniform would be a lie.
+  expect(JSON.stringify(checked[0].payload)).not.toContain(botId);
+  // And the key itself is in none of it, the promise every write on this path keeps.
+  expect(JSON.stringify(checked)).not.toContain(typedKey);
 });
