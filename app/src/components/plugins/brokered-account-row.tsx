@@ -10,8 +10,11 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import {
+  type BrokerField,
+  brokeredConnectionFieldsMutationOptions,
   confirmBrokeredConnectionMutationOptions,
   connectAccountMutationOptions,
+  connectBrokeredWithFieldsMutationOptions,
   disconnectBrokeredMutationOptions,
 } from "@/lib/plugins/mutations";
 
@@ -30,7 +33,36 @@ import {
  * key, what the dot means, what disconnecting ends — is one answer and lives here.
  */
 
-/** The row's state and the two things it can do, from {@link useBrokeredAccount}. */
+/**
+ * What this person actually does to connect: click through a consent screen, type a secret, or
+ * nothing at all.
+ *
+ * A coarser question than the scheme the app's authorization config was created as. The recorded
+ * `authScheme` is a vendor literal — `OAUTH2`, `DCR_OAUTH`, `API_KEY`, `NO_AUTH` and the rest — and
+ * a row that branched on it would be re-asking the same three-way question at every branch, each
+ * copy free to forget a literal the others remembered.
+ */
+export type BrokeredAccountKind = "consent" | "fields" | "no-auth";
+
+/** The schemes whose secret a person types, which is the whole of what `fields` means here. */
+const FIELD_SCHEMES = ["API_KEY", "BASIC", "BEARER_TOKEN", "BASIC_WITH_JWT"];
+
+/**
+ * Which of the three a recorded scheme is.
+ *
+ * Everything that is not `NO_AUTH` and not one of the typed schemes is consent, including a scheme
+ * this file has never heard of: the catalogue is the vendor's and it may name a new one tomorrow,
+ * and sending somebody to a consent screen that turns out not to exist is a refusal they can read,
+ * where an empty form is a box they cannot fill in.
+ */
+function kindOf(authScheme: string | null): BrokeredAccountKind {
+  if (authScheme === "NO_AUTH") return "no-auth";
+  return authScheme !== null && FIELD_SCHEMES.includes(authScheme)
+    ? "fields"
+    : "consent";
+}
+
+/** The row's state and the things it can do, from {@link useBrokeredAccount}. */
 export type BrokeredAccount = {
   /** Whether this person's account is live, as the vendor last answered. */
   connected: boolean;
@@ -42,12 +74,30 @@ export type BrokeredAccount = {
    * below can do anything but fail.
    */
   configured: boolean;
+  /** See {@link BrokeredAccountKind}. Derived here so no branch below re-asks. */
+  kind: BrokeredAccountKind;
   /** Leave for the vendor's consent screen. */
   connect: () => void;
   /** End the account at Composio, not only here. */
   disconnect: () => void;
   connecting: boolean;
   disconnecting: boolean;
+  /**
+   * What the app wants typed in, once it has been asked. Null until then, and for every app nobody
+   * types anything into.
+   */
+  fields: BrokerField[] | null;
+  /** Ask the app what it needs, which is the first press on a `fields` app. */
+  requestFields: () => void;
+  /**
+   * Finish the connection with what the person typed.
+   *
+   * The values are handed straight to the request and held nowhere else: they are somebody's own
+   * key, and this hook keeps no copy a later render could read back.
+   */
+  submitFields: (values: Record<string, string>) => void;
+  requestingFields: boolean;
+  submittingFields: boolean;
 };
 
 export function useBrokeredAccount(input: {
@@ -58,6 +108,14 @@ export function useBrokeredAccount(input: {
   configured: boolean;
   /** What this deployment recorded, which is what stands until the vendor has answered anything. */
   recorded: boolean;
+  /**
+   * How the app's authorization config was CREATED, as the vendor's own scheme literal.
+   *
+   * Read off the recorded server row rather than off a connection row: the connections endpoint
+   * answers two different row shapes, so the absence of a field there says which READ a row came
+   * from and never how an app connects. Null where the app is not brokered at all.
+   */
+  authScheme: string | null;
   /** Which screen the vendor's callback puts somebody down on. */
   returnTo: "settings" | "admin";
   /**
@@ -69,7 +127,15 @@ export function useBrokeredAccount(input: {
   report: (message: string | null) => void;
 }): BrokeredAccount {
   const queryClient = useQueryClient();
-  const { brokered, configured, recorded, report, returnTo, serverId } = input;
+  const {
+    authScheme,
+    brokered,
+    configured,
+    recorded,
+    report,
+    returnTo,
+    serverId,
+  } = input;
 
   /*
    * Ask the vendor whether this person's brokered account is actually live, on arrival.
@@ -141,6 +207,37 @@ export function useBrokeredAccount(input: {
     },
   });
 
+  /*
+   * The first press on an app nobody consents to: what does it want typed in?
+   *
+   * A question about the app rather than about anybody's account, which is why it writes nothing
+   * and refetches nothing. Its answer is the mutation's own `data` and is not held anywhere else,
+   * so leaving the screen forgets the form rather than leaving a half-filled one behind.
+   */
+  const fieldsRequest = useMutation({
+    ...brokeredConnectionFieldsMutationOptions(),
+    onError: (thrown: Error) => report(thrown.message),
+  });
+
+  /*
+   * The second press, with the values on it. Its `onSuccess` is called rather than replaced, for
+   * the reason the disconnect above gives: that is what refetches the recorded row.
+   *
+   * The confirmed answer is dropped here too. A row that connects this way arrived with a "not
+   * connected" answer from the mount, and nothing about typing a key changes the dependencies of
+   * the effect that asked — so without this the account would go on reading as not connected
+   * however well the vendor accepted it.
+   */
+  const submitOptions = connectBrokeredWithFieldsMutationOptions(queryClient);
+  const submission = useMutation({
+    ...submitOptions,
+    onError: (thrown: Error) => report(thrown.message),
+    onSuccess: (...args) => {
+      forgetConfirmation();
+      return submitOptions.onSuccess?.(...args);
+    },
+  });
+
   return {
     /*
      * What the vendor last answered, and only our own record until it has answered anything. The
@@ -160,6 +257,18 @@ export function useBrokeredAccount(input: {
       disconnect.mutate(serverId);
     },
     disconnecting: disconnect.isPending,
+    kind: kindOf(authScheme),
+    fields: fieldsRequest.data ?? null,
+    requestFields: () => {
+      report(null);
+      fieldsRequest.mutate(serverId);
+    },
+    requestingFields: fieldsRequest.isPending,
+    submitFields: (values: Record<string, string>) => {
+      report(null);
+      submission.mutate({ serverId, values });
+    },
+    submittingFields: submission.isPending,
   };
 }
 
