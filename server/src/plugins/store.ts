@@ -3905,8 +3905,14 @@ export function createPluginStore(options: PluginStoreOptions) {
      *
      * THERE IS NO COLUMN AND THERE NEED NOT BE, because {@link probeActionFor} already answers the
      * question from recorded metadata alone — which action this deployment would check this app
-     * with — and asks the vendor nothing. Read together with `verified`, its answer separates the
-     * three:
+     * with — and asks the vendor nothing. IT IS THE SAME PREDICATE THE PROBE ITSELF RUNS ON, whole
+     * and not an approximation of it: the chooser is where every condition on "can this action be
+     * called at all" lives, the version among them, and {@link probeBrokeredConnection} adds none
+     * of its own. That is what makes the field below a derivation rather than a guess, and it is
+     * the property this whole paragraph depends on — while the version condition sat in the probe
+     * and not the chooser, the two predicates disagreed for exactly the apps whose listing is
+     * thinnest, and the sentence the third line below licenses was drawn for somebody whose key had
+     * never been tried. Read together with `verified`, the chooser's answer separates the three:
      *
      *   no probe, not verified   — the app publishes nothing safe to spend a key on. Nothing was
      *                              tried, and nothing can be. A fact about the app, not the key.
@@ -3923,7 +3929,8 @@ export function createPluginStore(options: PluginStoreOptions) {
      *
      * CHOSEN PER ROW RATHER THAN FOLDED INTO THE QUERY ABOVE, and deliberately: the chooser reads
      * every recorded action for one app and applies a rule — vendor-labelled read, not destructive,
-     * no required inputs, identity action preferred — that has no honest spelling in SQL. Folding
+     * no required inputs, a recorded version, identity action preferred — that has no honest
+     * spelling in SQL. Folding
      * it in would mean a second copy of that rule, and a second copy is how a listing comes to name
      * an action the verification would never call. The rows read are the same either way (the
      * chooser selects the same actions whether asked once per app or once for all of them), the
@@ -3969,7 +3976,9 @@ export function createPluginStore(options: PluginStoreOptions) {
           connectedAt: iso(row.connectedAt) ?? "",
           verified: row.verified,
           verifiedAt: iso(row.verifiedAt),
-          probe: await this.probeActionFor(row.serverId),
+          // The name alone, because that is what the three states are told apart by; the version
+          // beside it is for the caller that makes the call, which this read is not.
+          probe: (await this.probeActionFor(row.serverId))?.name ?? null,
         })),
       );
     },
@@ -4009,12 +4018,13 @@ export function createPluginStore(options: PluginStoreOptions) {
     },
 
     /**
-     * The action a key verification should call against this app, or null where it publishes none.
+     * The action a key verification should call against this app, and the version to call it at.
      *
      * THIS CHOOSES THE ONE ACTION THAT WILL BE CALLED WITH SOMEBODY'S JUST-TYPED API KEY, which is
      * what makes it the most dangerous line in the verification: whatever comes back from here runs
      * against a stranger's account, once, purely to find out whether their key works. So the two
-     * conditions below are BOTH non-negotiable, and neither is a stricter spelling of the other.
+     * safety conditions below are BOTH non-negotiable, and neither is a stricter spelling of the
+     * other.
      *
      * READ EFFECT, because a probe must not change anything. The label is the vendor's own and not
      * a guess of ours: `effectOf` answers `read` only where Composio sent `readOnlyHint`, and
@@ -4035,12 +4045,31 @@ export function createPluginStore(options: PluginStoreOptions) {
      * would therefore write to somebody's account to find out whether their key works. The read
      * effect is the whole of what stands between those two names.
      *
+     * AND A RECORDED VERSION, WHICH IS PART OF "CAN THIS BE CALLED AT ALL" AND NOT A DETAIL OF THE
+     * CALLER. Composio refuses an execution without a specific version and rejects `latest`, so the
+     * transport refuses before dialling where none travels with the call — and Composio publishes
+     * some actions with no version at all. An action this deployment recorded without one is
+     * therefore an action nothing here can spend a key on, which is the same kind of fact as a
+     * required input: not unsafe, just not callable. The version is SELECTED AND RETURNED for the
+     * caller that has to send it, so the choice and the call cannot come apart.
+     *
+     * THE CONDITION LIVES IN THE FILTER RATHER THAN AFTER THE CHOICE, and that placement is the
+     * whole reason this answer is trustworthy twice over. While it sat downstream — read by the
+     * probe, unknown to everything else — TWO PREDICATES EXISTED FOR ONE QUESTION, and the weaker
+     * one was the one the connections listing derived its `probe` field from: an app whose chosen
+     * action had no version connected honestly as "nothing was tried", then reloaded as "your key
+     * was checked and rejected". A filter also lets the search CONTINUE: a versionless candidate is
+     * passed over for the next safe read rather than short-circuiting the whole app to "nothing to
+     * try", so an app that can be checked is.
+     *
      * NULL IS AN ANSWER AND NOT A FAILURE. Of fifteen key-based apps sampled, most publish some safe
      * argument-less read and PostHog publishes none at all, so an app that cannot be probed is an
      * ordinary app rather than a broken one. What a caller does about it — and running the probe at
      * all — belongs to the verification path; this function only chooses.
      */
-    async probeActionFor(serverId: string): Promise<string | null> {
+    async probeActionFor(
+      serverId: string,
+    ): Promise<{ name: string; version: string } | null> {
       // Ordered, because the fallback below is "the first candidate" and Postgres promises no order
       // without one: an unordered read would make which action gets called with somebody's key a
       // property of whichever plan the server happened to pick.
@@ -4050,24 +4079,33 @@ export function createPluginStore(options: PluginStoreOptions) {
           inputSchema: mcpTools.inputSchema,
           effect: mcpTools.effect,
           destructive: mcpTools.destructive,
+          version: mcpTools.version,
         })
         .from(mcpTools)
         .where(eq(mcpTools.serverId, serverId))
         .orderBy(asc(mcpTools.name));
 
-      const safe = actions.filter((action) => {
-        if (action.effect !== "read" || action.destructive) return false;
+      // One pass, and it yields the pair rather than the row: an action that survives every
+      // condition below has a version by definition, and building the answer here is what carries
+      // that fact into the type instead of leaving the caller to re-check it.
+      const safe = actions.flatMap((action) => {
+        if (action.effect !== "read" || action.destructive) return [];
+        // Null in the column and blank in the data are the same nothing, and neither is a version
+        // the transport can put on a call.
+        const version = action.version?.trim();
+        if (!version) return [];
         // Absent and empty are the same answer, and anything that is not a list is neither: the
         // column is the vendor's JSON Schema stored unchanged, so `required` may be missing, may be
         // `[]`, and may be some shape no schema should hold. Only a non-empty list of names is a
         // reason to pass this action over.
         const schema = action.inputSchema as Record<string, unknown> | null;
         const required = schema?.required;
-        return !Array.isArray(required) || required.length === 0;
+        if (Array.isArray(required) && required.length > 0) return [];
+        return [{ name: action.name, version }];
       });
 
       const identity = safe.find((action) => IDENTITY_ACTION.test(action.name));
-      return identity?.name ?? safe[0]?.name ?? null;
+      return identity ?? safe[0] ?? null;
     },
 
     /**
@@ -4168,41 +4206,20 @@ export function createPluginStore(options: PluginStoreOptions) {
        * brokered call passes for a key that cannot answer. {@link probeActionFor} is what keeps the
        * call safe: the vendor must have labelled the action a read and it must take no arguments,
        * and both matter because the first argument-less action on Stripe's own list creates a
-       * billing session. Null is an ordinary answer — see that method — and it is the FIRST of the
-       * three states above.
+       * billing session. It answers the VERSION beside the name, because Composio refuses an
+       * execution without a specific one — so an action recorded without a version is one the
+       * chooser passes over rather than one this method discovers it cannot call. Null is an
+       * ordinary answer — see that method — and it is the FIRST of the three states above.
+       *
+       * NOTHING IS ASKED A SECOND TIME HERE, AND THAT IS THE POINT. Every condition on whether an
+       * action can be spent on a key lives in the chooser, so what this method reports and what the
+       * connections listing derives from the same chooser cannot disagree. A version re-read here
+       * would be a second predicate, and the weaker of two predicates is what once had a reloaded
+       * page tell somebody their untried key had been rejected.
        */
       const serverId = `composio-${input.toolkit}`;
       const candidate = await this.probeActionFor(serverId);
-
-      /*
-       * THE VERSION THE LISTING RECORDED FOR THAT ACTION, WITHOUT WHICH THERE IS NOTHING TO CALL.
-       *
-       * Composio refuses an execution without a specific version and rejects "latest", so the
-       * transport refuses before dialling where none travels with the call — which is a refusal of
-       * OURS wearing the shape of a failed probe. Read here rather than returned by the chooser
-       * because what the chooser answers is which action is SAFE, and that question has nothing to
-       * do with whether this deployment happens to have recorded a version for it.
-       *
-       * AN ACTION WITH NO RECORDED VERSION IS THEREFORE NOTHING TO TRY, and is reported as the null
-       * probe rather than as a failed one. Composio publishes some actions with no version at all,
-       * and the alternative is indefensible: a person with a perfectly good key would be told the
-       * vendor rejected it because an app's listing was thin. Null says the honest thing — nothing
-       * was checked — which is the state the app is really in.
-       */
-      const recorded = candidate
-        ? await database
-            .select({ version: mcpTools.version })
-            .from(mcpTools)
-            .where(
-              and(
-                eq(mcpTools.serverId, serverId),
-                eq(mcpTools.name, candidate),
-              ),
-            )
-            .limit(1)
-        : [];
-      const version = recorded[0]?.version ?? null;
-      if (candidate === null || version === null) {
+      if (candidate === null) {
         return { probe: null, failure: null };
       }
 
@@ -4222,11 +4239,14 @@ export function createPluginStore(options: PluginStoreOptions) {
        */
       const answer = await composioCallTool(
         { url: `composio://${input.toolkit}`, actorId: input.userId },
-        candidate,
-        { [VERSION_ARG]: version },
+        candidate.name,
+        { [VERSION_ARG]: candidate.version },
       );
 
-      return { probe: candidate, failure: answer.isError ? answer.text : null };
+      return {
+        probe: candidate.name,
+        failure: answer.isError ? answer.text : null,
+      };
     },
 
     /**
@@ -4433,8 +4453,9 @@ export function createPluginStore(options: PluginStoreOptions) {
       /*
        * THE CHECK, WHICH IS THE SAME ONE A RE-CHECK MAKES AND IS SPELLED ONCE FOR THAT REASON.
        *
-       * {@link probeBrokeredConnection} chooses the action out of what the app published, finds the
-       * version the listing recorded for it, calls it with no arguments and reads what came back.
+       * {@link probeBrokeredConnection} chooses the action out of what the app published — with the
+       * version the listing recorded for it, which is part of what makes it choosable — calls it
+       * with no arguments and reads what came back.
        * What belongs to THIS path and to no other is what happens next: an account this call has
        * just made, which a key the vendor rejects must not be allowed to leave standing. A re-check
        * runs the identical probe against an account that already existed and leaves it alone, and
@@ -4675,6 +4696,20 @@ export function createPluginStore(options: PluginStoreOptions) {
      * would come back as the transport's "Composio is not configured for this deployment", which
      * this method would otherwise report as the vendor rejecting a perfectly good key, and would
      * write the row unverified on the strength of it.
+     *
+     * AND A CONNECTION WITH NO KEY BEHIND IT IS REFUSED HERE RATHER THAN IN THE BROWSER. There is
+     * nothing to re-check on a consent connection: the person authenticated at the vendor's own
+     * screen, this deployment holds no credential of theirs, and the row's `verified_at` is the
+     * date that screen earned — a fact nothing else here records. A probe spent on it would be a
+     * call against their account that this method then reads as evidence about a key that does not
+     * exist, and the likely failure would write `verified: false` with a null timestamp: a button
+     * that claims to CHECK a connection, destroying the only record that one was ever checked. That
+     * is precisely what the nothing-to-probe branch above is written to protect, and an app that
+     * happens to publish a safe action walks straight past it. The screen does not offer the button
+     * for a consent app, but a route takes POSTs and not only button presses, so the refusal
+     * belongs where {@link connectBrokeredWithFields} puts its own: on the SCHEME RECORDED ON THE
+     * APP'S ROW, asked through {@link isFieldScheme} so the schemes this admits cannot drift from
+     * the schemes that have a key to admit.
      */
     async recheckBrokeredConnection(input: {
       toolkit: string;
@@ -4685,6 +4720,23 @@ export function createPluginStore(options: PluginStoreOptions) {
       probe: string | null;
     }> {
       if (!broker) throw new BrokerUnconfiguredError();
+
+      // Keyed on the url, which is where a brokered row records which app it is; `mcp_servers.id`
+      // is a display name and nothing holds the two equal. It is the lookup
+      // `connectBrokeredWithFields` and `disconnectBrokered` both make, for the same stake: a row
+      // called `gmail` at `composio://slack` would decide a Slack re-check on Gmail's scheme.
+      const [app] = await database
+        .select({ authScheme: mcpServers.authScheme })
+        .from(mcpServers)
+        .where(eq(mcpServers.url, `composio://${input.toolkit}`))
+        .limit(1);
+
+      if (!isFieldScheme(app?.authScheme ?? null)) {
+        throw new PluginRefusedError(
+          `${input.toolkit} is not an app this deployment holds a key for, so there is nothing here to re-check. It was connected at ${input.toolkit}'s own sign-in screen, and if it has stopped working, disconnecting it on the Plugins page and connecting it again is what fixes it.`,
+          null,
+        );
+      }
 
       const [held] = await database
         .select({

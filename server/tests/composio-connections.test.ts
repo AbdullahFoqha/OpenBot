@@ -1478,7 +1478,9 @@ test("the probe skips an argument-less write for the read that sorts after it", 
     },
   ]);
 
-  expect(await store.probeActionFor(probeAppId)).toBe(
+  // The name, which is what this test is about; the version beside it is asserted by the test below
+  // that is about the version.
+  expect((await store.probeActionFor(probeAppId))?.name).toBe(
     "STRIPE_RETRIEVE_BALANCE",
   );
 });
@@ -1519,6 +1521,97 @@ test("an app whose only read takes an argument has no probe", async () => {
   });
 
   expect(await store.probeActionFor(probeAppId)).toBeNull();
+});
+
+/**
+ * AND AN ACTION WITH NO RECORDED VERSION IS NOT A CANDIDATE, ON THE READ AS WELL AS ON THE PROBE.
+ *
+ * CRITERION. Where the only safe read this deployment recorded for an app carries no version, the
+ * chooser answers null — and the connections listing, which derives its `probe` from that same
+ * chooser, says null too. Neither spends a call at the vendor.
+ *
+ * REASON. Composio refuses an execution without a specific version, so the transport refuses before
+ * dialling where none travels with the call: an action recorded with no version is an action
+ * nothing here can call, which is the whole of what "can this be used to check a key" asks. While
+ * that condition lived in the PROBE and not in the CHOOSER the two disagreed, and the listing was
+ * the one that lied. Connecting such an app wrote `verified: false` and answered `probe: null` —
+ * the honest pair, "the key was accepted without being checked" — and then a reload derived a NAMED
+ * probe beside the same `false` and drew the worst sentence this feature has: your key was checked
+ * and rejected, and the account it was checked in is still standing at Composio. For a person whose
+ * key has never been tried at all, every clause of that is false.
+ *
+ * BOTH HALVES IN ONE TEST, because the point is that they AGREE. Asserting either alone would leave
+ * the pair free to come apart again in the direction that was wrong the first time.
+ */
+test("an app whose only safe read has no recorded version has no probe", async () => {
+  useAnsweringClient();
+  await addProbedApp({ withProbe: false });
+  await database.insert(mcpTools).values({
+    serverId: probedId,
+    name: probeAction,
+    description: "Says who the key belongs to, at no version anybody recorded.",
+    effect: "read",
+    version: null,
+  });
+
+  expect(await store.probeActionFor(probedId)).toBeNull();
+
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: probedToolkit, userId: askerId, verified: false });
+
+  const listed = await store.brokeredConnectionsFor(askerId);
+  expect(listed).toHaveLength(1);
+  expect(listed[0]?.serverId).toBe(probedId);
+  expect(listed[0]?.probe).toBeNull();
+  // And nothing was spent learning it: both answers come out of recorded metadata.
+  expect(reached).toEqual([]);
+});
+
+/**
+ * AND A VERSIONLESS ACTION IS PASSED OVER RATHER THAN ENDING THE SEARCH.
+ *
+ * CRITERION. Given an app whose identity read carries no version and whose other safe read does,
+ * the chosen probe is the one that carries a version — even though the versionless one is the shape
+ * {@link IDENTITY_ACTION} prefers and sorts first.
+ *
+ * REASON. The version belongs in the same filter as the effect and the required inputs because it
+ * answers the same question — can this action be called at all — and a filter is what lets the next
+ * candidate be considered. The condition used to live downstream of the choice, where a versionless
+ * winner short-circuited the whole app to "there is nothing here to try" even when the app publishes
+ * another read this deployment could have called. Passing over it is strictly better: an app that
+ * can be checked gets checked, and the null answer is kept for an app that really has nothing.
+ */
+test("the chooser passes over a versionless read for the one it could call", async () => {
+  await database.insert(mcpServers).values({
+    id: probeAppId,
+    title: "Thin Listing",
+    vendor: "Composio",
+    url: `composio://${probeAppId}`,
+    provenance: "composio",
+  });
+  await database.insert(mcpTools).values([
+    {
+      serverId: probeAppId,
+      // Sorts first, is the preferred shape, and carries nothing to call it at.
+      name: "THIN_GET_ME",
+      description: "Says who the key belongs to.",
+      effect: "read",
+      version: null,
+    },
+    {
+      serverId: probeAppId,
+      name: "THIN_LIST_PROJECTS",
+      description: "Lists the projects.",
+      effect: "read",
+      version: "20260903_00",
+    },
+  ]);
+
+  expect(await store.probeActionFor(probeAppId)).toEqual({
+    name: "THIN_LIST_PROJECTS",
+    version: "20260903_00",
+  });
 });
 
 /**
@@ -2364,6 +2457,66 @@ test("a re-check with no connection refuses rather than making one", async () =>
   expect(await connectedToolkitsFor(askerId)).toEqual([]);
   expect(reached).toEqual([]);
   expect(recordedOfType("mcp.connection_verified")).toEqual([]);
+});
+
+/**
+ * AND A RE-CHECK AGAINST A CONSENT CONNECTION IS REFUSED IN THE STORE, NOT MERELY IN THE BROWSER.
+ *
+ * CRITERION. Where the app's recorded scheme is a consent scheme, the call raises, no action is
+ * called at the vendor, nothing reaches the trail, and the row keeps the `verified` and
+ * `verified_at` it already held — with an app that HAS a probe, so the refusal is the scheme's doing
+ * and not the nothing-to-try branch's.
+ *
+ * REASON. A consent connection has no key here to re-check: what it has is a date earned at the
+ * vendor's own screen, which is a fact nothing else in this deployment records. Without this gate a
+ * direct POST — the browser's own button is not the only caller a route has — would spend a call on
+ * somebody's account and, on the failure that call is likely to be, write `verified: false` with a
+ * null timestamp: a button that claims to check a connection, destroying the only evidence that one
+ * was ever checked. {@link connectBrokeredWithFields} sets the precedent it is read off — the scheme
+ * on the app's row decides, in the store, rather than the caller being trusted to have looked.
+ */
+test("a re-check against a consent connection refuses rather than spending its date", async () => {
+  useAnsweringClient();
+  // Added on the consent flow, and then given an action a probe could otherwise have used: without
+  // that action this test would pass on the nothing-to-probe branch and assert nothing about the
+  // scheme.
+  await store.addBrokeredApp({
+    slug: probedToolkit,
+    title: "Probed App",
+    by: admin,
+    connection: { kind: "consent" },
+  });
+  await database.insert(mcpTools).values({
+    serverId: probedId,
+    name: probeAction,
+    description: "Says who the account belongs to.",
+    effect: "read",
+    version: probeVersion,
+  });
+  // The date the consent screen earned, which is the thing this refusal protects.
+  const earned = new Date("2026-08-30T09:00:00.000Z");
+  await holdProbedApp(earned);
+
+  await expect(
+    store.recheckBrokeredConnection({
+      toolkit: probedToolkit,
+      userId: askerId,
+    }),
+  ).rejects.toThrow();
+
+  expect(reached).toEqual([]);
+  expect(recordedOfType("mcp.connection_verified")).toEqual([]);
+  const [row] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(row.verified).toBe(true);
+  expect(row.verifiedAt?.toISOString()).toBe(earned.toISOString());
 });
 
 /**
