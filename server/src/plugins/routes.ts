@@ -5,10 +5,12 @@ import type { AppVariables } from "../auth/guards";
 import { requireAdmin } from "../auth/guards";
 import {
   type BrokerApp,
+  type BrokerField,
   BrokerUnconfiguredError,
   brokerReturnUrl,
   brokerSentence,
   type ComposioBroker,
+  isFieldScheme,
 } from "./broker";
 import { CATALOGUE, catalogueEntry } from "./catalogue";
 import { toolkitOf, vendorSentence } from "./composio";
@@ -863,6 +865,162 @@ export function createPluginRoutes(
           },
           409,
         );
+      }
+
+      /*
+       * AN APP WHOSE SECRET THE PERSON HOLDS IS ANSWERED HERE AND NEVER SENT AT A CONSENT SCREEN.
+       *
+       * Most of Composio's catalogue connects this way rather than through a consent screen: the
+       * person already holds an API key, so there is nothing to consent to, no url to mint and no
+       * return leg to build — the press that opens a vendor page for a consent app has to answer
+       * with a form instead, and the press after it carries what was typed into it. One route
+       * serves both halves because the browser asks the same question both times: connect me to
+       * this app.
+       *
+       * THE FORK IS THE SCHEME RECORDED ON THE ROW AT ENABLE TIME, which is what this deployment's
+       * authorization config was actually created as — never a fresh catalogue read and never
+       * anything the request said. {@link isFieldScheme} is asked rather than the string compared,
+       * for the reason that function exists: one list, read by the guard and by the type, so the
+       * schemes admitted here cannot come apart from the ones the broker's signature takes.
+       *
+       * AFTER THE ONE-ACCOUNT GUARD RATHER THAN BESIDE IT, and the order is a decision. Somebody
+       * who already has an account attached has no business in front of a form: drawing one invites
+       * them to type a key that would be refused once they had entered it, and even the first press
+       * would spend a call at Composio on behalf of a request that is going to be refused anyway.
+       * The refusal above names the step to take, and it is the same step for both kinds of app.
+       *
+       * THE PERSON IS STILL THE SESSION'S, as everywhere else in this branch. Nothing below reads
+       * a user id out of the body — and nothing below logs the body either, which matters more
+       * here than anywhere else in this file: it is the one request this deployment handles that
+       * carries somebody's own credential.
+       */
+      const authScheme = row.authScheme;
+      if (isFieldScheme(authScheme)) {
+        /*
+         * A SUBMISSION IS AN OBJECT OF VALUES, AND ANYTHING ELSE IS THE FIRST PRESS. The browser
+         * sends no body at all when it is asking what the app wants, so an absent, empty or
+         * unparseable one is that question rather than a malformed answer to it, and the worst a
+         * caller gets for sending something stranger is the form back.
+         */
+        const body = (await context.req.json().catch(() => null)) as {
+          values?: unknown;
+        } | null;
+        const submitted =
+          typeof body?.values === "object" &&
+          body.values !== null &&
+          !Array.isArray(body.values)
+            ? (body.values as Record<string, unknown>)
+            : null;
+
+        /*
+         * ASKED OF THE VENDOR ON BOTH PRESSES, because it is the answer to both questions. On the
+         * first it is the form itself; on the second it is the list the submission is checked
+         * against, and reading it from anywhere else — a cached copy, the fields the form was drawn
+         * from — would be checking a body against what the app used to ask for.
+         */
+        let published: BrokerField[];
+        try {
+          published = await composio.broker.connectionFields({
+            toolkit,
+            authScheme,
+          });
+        } catch (error) {
+          const refusal = brokerRefusal(
+            error,
+            `Composio would not say what ${row.title} asks for, and said nothing about why. Try again, and ask an administrator to check this deployment's Composio key if it persists.`,
+          );
+          return context.json({ error: refusal.error }, refusal.status);
+        }
+
+        if (submitted === null) return context.json({ fields: published });
+
+        /*
+         * WHAT THE APP PUBLISHED, AND A NAME IT DID NOT IS REFUSED RATHER THAN QUIETLY DROPPED.
+         *
+         * ONE GUARD, THREE HOLES. What is submitted is spread into the field object the adapter
+         * hands Composio, beside the literal `status: "ACTIVE"` that call sets — so an unfiltered
+         * body lets a caller write over it. Anything else invented travels to the vendor
+         * unexamined. And a field this deployment recorded that the app has stopped publishing
+         * shows up here, at the request, rather than as a connection made without the value nobody
+         * was asked for and a first tool call that discovers it.
+         *
+         * REFUSED, BECAUSE A PERSON CANNOT TYPE A NAME THE FORM DID NOT DRAW. The form is drawn
+         * from this same list a moment earlier, so every name in an ordinary submission is one of
+         * these; a name that is not leaves exactly two readings, and dropping it silently is the
+         * wrong answer to both. If the app's published fields have moved, the person is holding a
+         * stale form and the honest thing is to send them back for the current one — connecting
+         * them with the part that still matches makes a credential-less account that every screen
+         * here draws as connected. And if it is a caller reaching past the form on purpose,
+         * "connected" is the one answer they must not get for a request this deployment edited
+         * behind their back. Pressing Connect again costs a person one press and redraws the form
+         * from what the app asks for now.
+         *
+         * THE VALUES ARE BUILT FROM THE NAMES THAT PASSED rather than the request object forwarded
+         * once the check is done, so what reaches the store is the published subset by
+         * construction and not on the strength of the loop above having run.
+         *
+         * A VALUE THAT IS NOT TEXT IS THE SAME REFUSAL. The store's signature promises strings, and
+         * a number or an object under a published name is a lie told to that signature that reaches
+         * Composio as whatever JSON makes of it.
+         */
+        const names = new Set(published.map((field) => field.name));
+        const values: Record<string, string> = {};
+        for (const [name, value] of Object.entries(submitted)) {
+          if (!names.has(name) || typeof value !== "string") {
+            /*
+             * THE SENTENCE CARRIES NOTHING THAT WAS SUBMITTED — not the value, which is somebody's
+             * own credential and belongs in no message, and not the name either, which on this
+             * request is the caller's own text rather than the vendor's. It names the app and the
+             * press that fixes it, which is the whole of what the person needs.
+             */
+            return context.json(
+              {
+                error: `That is not the form ${row.title} publishes, so nothing was sent to Composio. Press Connect again to draw it from what the app asks for now, and fill in the boxes it shows; each one holds text.`,
+              },
+              400,
+            );
+          }
+          values[name] = value;
+        }
+
+        try {
+          /*
+           * THE STORE'S ANSWER, WHOLE. `connected`, `verified` and `probe` are three facts and not
+           * one dressed up: a null probe with `verified: false` is an app that publishes nothing
+           * safe to check a key against, and a named probe with the same flag is a key the vendor
+           * rejected on an account this deployment could not take back. A route that forwarded the
+           * boolean alone would leave the row to infer which of those two it was, and it would tell
+           * the second person that nothing had ever been tried.
+           */
+          return context.json(
+            await store.connectBrokeredWithFields({
+              toolkit,
+              userId: context.var.actor.id,
+              values,
+            }),
+          );
+        } catch (error) {
+          /*
+           * A REFUSAL THE STORE AUTHORED IS PASSED THROUGH AS ITSELF, BEFORE THE BROKER MAPPING.
+           *
+           * A mistyped key is the ordinary failure on this path — a token from the wrong workspace,
+           * a key pasted with a newline — and the store's sentence for it already carries the
+           * vendor's own words and the step to take. `brokerRefusal` cannot see that: a
+           * {@link PluginRefusedError} is neither an authored broker refusal nor a vendor object,
+           * so it would come back as "Composio said nothing about why", sending somebody whose key
+           * was rejected to ask an administrator about this deployment's Composio key. 400 for the
+           * reason the skills route gives its own refusal one: it is something the person who made
+           * the request can fix, and the message says what to fix.
+           */
+          if (error instanceof PluginRefusedError) {
+            return context.json({ error: error.message }, 400);
+          }
+          const refusal = brokerRefusal(
+            error,
+            `${row.title} could not be connected with what you entered, and Composio said nothing about why. Try again, and ask an administrator to check this deployment's Composio key if it persists.`,
+          );
+          return context.json({ error: refusal.error }, refusal.status);
+        }
       }
 
       /*

@@ -384,6 +384,13 @@ export function brokeredConnectionFieldsMutationOptions() {
  * Answers with the body rather than a bare success, because Composio does not check a submitted key.
  * `connected` is only that the vendor accepted the row; `verified` is whether a real call was made
  * with it, and a screen says different things about the two.
+ *
+ * AND `probe` IS WHAT SEPARATES THE TWO THINGS `verified: false` MEANS. A null probe is an app that
+ * publishes nothing safe to spend a key on, so nothing was tried and "accepted without being
+ * checked" is the truth. A NAMED probe beside that same false is the other state entirely: the
+ * action ran in this person's account, the vendor rejected the key, and the account could not be
+ * withdrawn — so the row exists and the key is bad. A screen reading the boolean alone cannot tell
+ * those apart, and would tell the second person that nothing had ever been checked.
  */
 export function connectBrokeredWithFieldsMutationOptions(
   queryClient: QueryClient,
@@ -392,7 +399,11 @@ export function connectBrokeredWithFieldsMutationOptions(
     mutationFn: async (variables: {
       serverId: string;
       values: Record<string, string>;
-    }): Promise<{ connected: boolean; verified: boolean }> => {
+    }): Promise<{
+      connected: boolean;
+      verified: boolean;
+      probe: string | null;
+    }> => {
       const response = await client(
         `/api/plugins/servers/${encodeURIComponent(variables.serverId)}/connect`,
         {
@@ -404,6 +415,7 @@ export function connectBrokeredWithFieldsMutationOptions(
       return (await response.json()) as {
         connected: boolean;
         verified: boolean;
+        probe: string | null;
       };
     },
     onSuccess: () => invalidatePlugins(queryClient),

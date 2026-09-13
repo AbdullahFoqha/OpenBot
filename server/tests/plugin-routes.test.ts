@@ -5,12 +5,14 @@ import { ServerRowAmbiguousError } from "../src/plugins/access";
 import {
   type BrokerApp,
   type BrokerConnection,
+  type BrokerField,
   BrokerRefusalError,
 } from "../src/plugins/broker";
 import {
   CatalogueEntryUnknownError,
   CustomServerRefusedError,
   PluginInvariantError,
+  PluginRefusedError,
 } from "../src/plugins/store";
 import { testEnvironment } from "./support/environment";
 
@@ -1239,6 +1241,32 @@ const WRONG_KEY = Object.assign(new Error("Request failed"), {
 });
 
 /**
+ * What the key app publishes, which is both the form a person is drawn and the list a submission
+ * is checked against.
+ *
+ * TWO FIELDS AND ONE OF THEM OPTIONAL, because the filter has to be shown to be about NAMES rather
+ * than about completeness: a submission naming only the required one is a person leaving the
+ * optional box alone, and it must connect.
+ */
+const PUBLISHED: BrokerField[] = [
+  {
+    name: "api_key",
+    label: "API key",
+    help: "Your Firecrawl API key, a token starting with fc-",
+    required: true,
+    secret: true,
+  },
+  {
+    name: "base_url",
+    label: "Base URL",
+    help: "Leave this alone unless you run Firecrawl yourself.",
+    required: false,
+    secret: false,
+    default: "https://api.firecrawl.dev",
+  },
+];
+
+/**
  * One brokered app, added, and the person connecting their own account to it.
  *
  * WHICH APP THIS IS COMES OFF THE ROW'S URL. `serverAddress` answers one row whose url is
@@ -1266,6 +1294,8 @@ function brokeredApp(
   deployment: {
     authorizeThrows?: unknown;
     storeThrows?: unknown;
+    /** A broker that will not say what an app asks for, which is the fields call failing. */
+    fieldsThrow?: unknown;
     environment?: Record<string, string | undefined>;
   } = {},
 ) {
@@ -1282,6 +1312,20 @@ function brokeredApp(
     by: string;
     reason: string;
   }> = [];
+  /** Every time the route went and asked Composio what an app wants typed in. */
+  const asked: Array<{ toolkit: string; authScheme: string }> = [];
+  /**
+   * Every submission that reached the store, which is what the filter is asserted through.
+   *
+   * The values are recorded because the assertion is about WHICH NAMES travel and not about what a
+   * person typed: a key the app never published must not be in here, and the published ones must
+   * arrive unchanged.
+   */
+  const submitted: Array<{
+    toolkit: string;
+    userId: string;
+    values: Record<string, string>;
+  }> = [];
 
   const rows = [
     {
@@ -1290,6 +1334,27 @@ function brokeredApp(
       // reads it off the row, and the id beside it is what that refusal used to quote instead.
       title: "Linear",
       url: "composio://linear",
+      /*
+       * The scheme this app's config was created as, which is what decides which of the two
+       * brokered flows the route opens. `OAUTH2` is a consent app: there is no form to draw, and
+       * every assertion above about a minted link depends on this row being read as one.
+       */
+      authScheme: "OAUTH2",
+    },
+    /*
+     * An app whose secret the person holds and types in, which is the other half of the brokered
+     * surface and the one with a form rather than a consent screen.
+     *
+     * A SECOND ROW RATHER THAN A SECOND SCHEME ON THE FIRST, because the two flows have to be
+     * shown not to reach each other: the consent tests below press Connect on Linear and must
+     * still get a link, and the form tests press it on this row and must never mint one. One row
+     * switching scheme between tests would prove one flow at a time and nothing about the fork.
+     */
+    {
+      id: "composio-firecrawl",
+      title: "Firecrawl",
+      url: "composio://firecrawl",
+      authScheme: "API_KEY",
     },
     /*
      * An ordinary OAuth row, so that "this app is not brokered" is a real row and not a missing
@@ -1298,7 +1363,13 @@ function brokeredApp(
      * deployment really has whose connection simply does not live at Composio is where a
      * confusing answer would come from.
      */
-    { id: "notion", title: "Notion", url: "https://notion.test/mcp" },
+    {
+      id: "notion",
+      title: "Notion",
+      url: "https://notion.test/mcp",
+      // Null is not an older brokered row; it is a row that is not brokered at all.
+      authScheme: null,
+    },
   ];
 
   const store = {
@@ -1326,6 +1397,24 @@ function brokeredApp(
       // product: `confirmBrokeredConnection` calls `isConnected` and catches nothing.
       if (deployment.storeThrows) throw deployment.storeThrows;
       return { connected: connection !== null };
+    },
+    connectBrokeredWithFields: async (input: {
+      toolkit: string;
+      userId: string;
+      values: Record<string, string>;
+    }) => {
+      submitted.push(input);
+      if (deployment.storeThrows) throw deployment.storeThrows;
+      /*
+       * All three fields, because all three are what the browser reads. `probe` named beside
+       * `verified: true` is the one state that says a call was really made with the key; the row
+       * cannot tell that apart from "there was nothing safe to try" without it.
+       */
+      return {
+        connected: true as const,
+        verified: true,
+        probe: "FIRECRAWL_SCRAPE",
+      };
     },
     disconnectBrokered: async (input: {
       toolkit: string;
@@ -1369,6 +1458,14 @@ function brokeredApp(
               if (deployment.authorizeThrows) throw deployment.authorizeThrows;
               return { redirectUrl };
             },
+            connectionFields: async (request: {
+              toolkit: string;
+              authScheme: string;
+            }) => {
+              asked.push(request);
+              if (deployment.fieldsThrow) throw deployment.fieldsThrow;
+              return PUBLISHED;
+            },
           },
         } as never)
       : undefined,
@@ -1379,6 +1476,24 @@ function brokeredApp(
     queried,
     confirmed,
     disconnected,
+    asked,
+    submitted,
+    /**
+     * The same route aimed at the app whose secret a person types.
+     *
+     * Its own helper rather than a fifth argument to `connect` below, because the two are different
+     * requests: that one is a consent app and carries a query and headers the tests about return
+     * addresses need, and this one carries a body and nothing else.
+     */
+    connectFields: (body?: unknown) =>
+      app.request(
+        "http://openbot.test/api/plugins/servers/composio-firecrawl/connect",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        },
+      ),
     connect: (
       body: unknown,
       query = "",
@@ -1640,6 +1755,206 @@ describe("connecting a brokered app", () => {
     const refusal = (await response.json()).error as string;
     expect(refusal).toContain("Linear");
     expect(refusal).not.toContain("socket hang up");
+  });
+});
+
+/**
+ * The other half of the same route: an app whose secret the person holds and types in.
+ *
+ * CRITERION. A key app answers the form on the first press and the connection on the second, the
+ * person it connects is the session's whatever the body says, every three of `connectBrokeredWithFields`'s
+ * fields reach the browser, and a name the app did not publish never reaches the store at all.
+ *
+ * REASON. Most Composio apps are not consent apps, so this branch is the ordinary path rather than
+ * the exotic one, and it is the only place in this deployment where a request body is forwarded to
+ * a vendor. What is submitted is spread into Composio's own field object, so an unfiltered body is
+ * two separate holes at once: a `status` key would sit beside the literal this deployment sets, and
+ * anything else a caller invents would travel unexamined. The filter is asserted by what is
+ * recorded in `submitted` rather than by the answer, because the answer is the same either way.
+ */
+describe("connecting an app whose secret a person types", () => {
+  test("the first press answers what the app publishes, and connects nobody", async () => {
+    /*
+     * NO BODY AT ALL, which is what the browser really sends on this press: it is a question about
+     * the app rather than about anybody's account. A route that required a body to answer the form
+     * would answer this request by trying to connect an empty one.
+     */
+    const { asked, submitted, authorized, connectFields } = brokeredApp();
+
+    const response = await connectFields();
+
+    expect(response.status).toBe(200);
+    // The vendor's own list, passed through rather than restated: `help` is written for the person
+    // filling the box in, and nothing here is in a position to improve on it.
+    expect(await response.json()).toEqual({ fields: PUBLISHED });
+    /*
+     * ASKED WITH THE SCHEME RECORDED ON THE ROW, never one derived again here. A form drawn for
+     * `BASIC` in front of a config created for `API_KEY` asks for boxes the person's app does not
+     * have.
+     */
+    expect(asked).toEqual([{ toolkit: "firecrawl", authScheme: "API_KEY" }]);
+    // And nothing was connected and no consent link minted: this press writes nothing.
+    expect(submitted).toEqual([]);
+    expect(authorized).toEqual([]);
+  });
+
+  test("what the person typed connects them, and all three states come back", async () => {
+    /*
+     * THE PERSON IS THE SESSION'S HERE TOO, which is why the body carries somebody else's id: the
+     * values are a credential being attached to whichever account the user id names, so a route
+     * reading one off the body would hang this person's key off another person's row.
+     */
+    const { submitted, authorized, connectFields } = brokeredApp();
+
+    const response = await connectFields({
+      values: { api_key: "fc-live-a-secret" },
+      userId: SOMEBODY_ELSE.id,
+    });
+
+    expect(response.status).toBe(200);
+    /*
+     * ALL THREE FIELDS, AND `probe` IS THE ONE THE ROW CANNOT DO WITHOUT. `verified` alone means
+     * three different things — nothing safe to try, tried and passed, tried and rejected — and two
+     * of them share the flag. A browser given only the boolean would tell somebody whose key the
+     * vendor rejected that nothing was ever checked.
+     */
+    expect(await response.json()).toEqual({
+      connected: true,
+      verified: true,
+      probe: "FIRECRAWL_SCRAPE",
+    });
+    expect(submitted).toEqual([
+      {
+        toolkit: "firecrawl",
+        userId: ADMIN.id,
+        values: { api_key: "fc-live-a-secret" },
+      },
+    ]);
+    // And no consent link was minted for an app that has no consent screen.
+    expect(authorized).toEqual([]);
+  });
+
+  test("a name the app never published is refused, and nothing is sent", async () => {
+    /*
+     * `status` IS THE SHARPEST CASE AND THAT IS WHY IT IS THE ONE SUBMITTED. The values are spread
+     * into the object the adapter builds for Composio, beside the literal `status: "ACTIVE"` that
+     * call sets, so an unfiltered body lets a caller write over it. Every other invented name is
+     * the same hole with a less interesting key in it.
+     *
+     * A person cannot type a name the form did not draw, so this request is either a caller doing
+     * something deliberate or an app whose published fields have moved — and neither is answered by
+     * connecting them anyway with part of what they sent.
+     */
+    const { submitted, connectFields } = brokeredApp();
+
+    const response = await connectFields({
+      values: { api_key: "fc-live-a-secret", status: "ACTIVE" },
+    });
+
+    expect(response.status).toBe(400);
+    const refusal = (await response.json()).error as string;
+    expect(refusal).toContain("Firecrawl");
+    /*
+     * THE SENTENCE CARRIES NOTHING THAT WAS SUBMITTED. The values are somebody's own credential and
+     * belong in no message, and the names are the caller's text rather than the vendor's on exactly
+     * the request where they are wrong.
+     */
+    expect(refusal).not.toContain("fc-live-a-secret");
+    expect(refusal).not.toContain("ACTIVE");
+    // The half that matters: the key never left this deployment.
+    expect(submitted).toEqual([]);
+  });
+
+  test("a value that is not text is refused rather than forwarded as one", async () => {
+    // The names are checked against the published list and the values against being values at all:
+    // a number under a published name typechecks nowhere and reaches the vendor as whatever JSON
+    // makes of it.
+    const { submitted, connectFields } = brokeredApp();
+
+    const response = await connectFields({ values: { api_key: 12 } });
+
+    expect(response.status).toBe(400);
+    expect(submitted).toEqual([]);
+  });
+
+  test("an account already connected is refused before the form is drawn", async () => {
+    /*
+     * THE ONE-ACCOUNT GUARD STILL RUNS FIRST, which is the ordering both branches were put after on
+     * purpose. Drawing the form for somebody who already has an account attached invites them to
+     * type a key that would be refused after they had entered it, and asking Composio what the app
+     * wants is a call made on behalf of a request that is going to be refused anyway.
+     */
+    const { asked, submitted, connectFields } = brokeredApp({
+      connectedAt: "2026-02-02T00:00:00.000Z",
+    });
+
+    const response = await connectFields();
+
+    expect(response.status).toBe(409);
+    const refusal = (await response.json()).error as string;
+    expect(refusal.toLowerCase()).toContain("disconnect");
+    // The app's name rather than the row's id, as on the consent half above.
+    expect(refusal).toContain("Firecrawl");
+    expect(refusal).not.toContain("composio-firecrawl");
+    expect(asked).toEqual([]);
+    expect(submitted).toEqual([]);
+  });
+
+  test("a consent app is untouched by either branch, whatever the body carries", async () => {
+    /*
+     * THE FORK IS ON THE SCHEME RECORDED ON THE ROW AND ON NOTHING IN THE REQUEST. A body carrying
+     * values is not a statement about how an app connects, and a route that read it as one would
+     * send somebody's typed key at a config created for a consent screen — which has nowhere to put
+     * it — instead of minting the link they pressed for.
+     */
+    const { asked, submitted, authorized, connect } = brokeredApp();
+
+    const response = await connect({ values: { api_key: "fc-live-a-secret" } });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      authorizationUrl: AUTHORIZATION_URL,
+    });
+    expect(authorized).toEqual([
+      { userId: ADMIN.id, toolkit: "linear", returnUrl: RETURN_URL },
+    ]);
+    expect(asked).toEqual([]);
+    expect(submitted).toEqual([]);
+  });
+
+  test("a broker that will not say what an app asks for answers with its own sentence", async () => {
+    // The same mapping every other brokered call in this file makes: the vendor's one sentence, a
+    // 502 rather than a 500, and nothing else that travelled with it.
+    const { connectFields } = brokeredApp(null, AUTHORIZATION_URL, {
+      fieldsThrow: WRONG_KEY,
+    });
+
+    const response = await connectFields();
+    const body = await response.text();
+
+    expect(response.status).toBe(502);
+    expect(JSON.parse(body).error).toBe("Invalid API key provided.");
+    expect(body).not.toContain("req_a_trace_id_nobody_should_read");
+  });
+
+  test("a key the vendor rejected comes back in the words the store refused it with", async () => {
+    /*
+     * A MISTYPED KEY IS THE ORDINARY FAILURE HERE AND ITS SENTENCE IS THE WHOLE REMEDY. The store
+     * raises a refusal that already says what happened and what to do about it, and flattening that
+     * into "Composio said nothing about why" would leave the person who pasted a key with a newline
+     * in it reading a sentence about this deployment's API key.
+     */
+    const { connectFields } = brokeredApp(null, AUTHORIZATION_URL, {
+      storeThrows: new PluginRefusedError(
+        "firecrawl would not answer with what was entered: 401 unauthorized. Nothing was saved, so entering it again is the whole of the retry.",
+        null,
+      ),
+    });
+
+    const response = await connectFields({ values: { api_key: "wrong" } });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("401 unauthorized");
   });
 });
 
