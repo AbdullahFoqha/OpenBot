@@ -1368,6 +1368,25 @@ function brokeredApp(
       authScheme: "API_KEY",
     },
     /*
+     * An app that needs no credential at all, which is the third brokered kind and the one the
+     * fork above forgets.
+     *
+     * A SEPARATE ROW FOR THE SAME REASON FIRECRAWL IS ONE: the three flows have to be shown not to
+     * reach each other, and a row switching scheme between tests would prove one at a time.
+     *
+     * `NO_AUTH` is the literal `connectionOf` resolves thirty-four of Composio's toolkits to, and
+     * it is what `addBrokeredApp` records for them. Composio refuses to hold an authorization
+     * config for one, so there is nothing to consent to, nothing to type, and no row in
+     * `composio_connections` that could ever be written — which is exactly what
+     * `connectionTokenFor` already acts on when it lets a call through with no connection at all.
+     */
+    {
+      id: "composio-hackernews",
+      title: "Hacker News",
+      url: "composio://hackernews",
+      authScheme: "NO_AUTH",
+    },
+    /*
      * An ordinary OAuth row, so that "this app is not brokered" is a real row and not a missing
      * one. The two routes below answer the same way for both, and this is the half that would
      * otherwise go untested: an id naming nothing at all is easy to refuse, while a server this
@@ -1520,6 +1539,21 @@ function brokeredApp(
     connectFields: (body?: unknown) =>
       app.request(
         "http://openbot.test/api/plugins/servers/composio-firecrawl/connect",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        },
+      ),
+    /**
+     * The same route aimed at the app that needs no account at all.
+     *
+     * Its own helper beside the other two, because the assertion is that this press reaches
+     * neither of them: no form is asked for and no consent link is minted.
+     */
+    connectNoAuth: (body?: unknown) =>
+      app.request(
+        "http://openbot.test/api/plugins/servers/composio-hackernews/connect",
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -2141,6 +2175,119 @@ describe("connecting an app whose secret a person types", () => {
 
     expect(response.status).toBe(400);
     expect((await response.json()).error).toContain("401 unauthorized");
+  });
+});
+
+/**
+ * The third half of the same route, which is the one it did not have: an app needing no credential.
+ *
+ * CRITERION. Pressing Connect on a `NO_AUTH` app is answered with what is true of it — there is no
+ * account to make — in a sentence naming the app rather than the row, and nothing is asked of
+ * Composio on the way: no form is drawn, no consent link is minted, and no key travels. The answer
+ * is the same on a deployment with no `OPENBOT_APP_URL`, because that setting is where a consent
+ * comes back to and this flow has no consent to come back from.
+ *
+ * REASON. Thirty-four of Composio's toolkits resolve to `no-auth`, and `NO_AUTH` is the literal
+ * recorded on their rows. It is not a field scheme, so the fork above dropped every one of them
+ * into the consent arm, where they met one of two dead ends: a 503 demanding `OPENBOT_APP_URL` for
+ * a return leg that does not exist, or `broker.authorize`, which can only fail because
+ * `ensureAuthConfig` deliberately creates no config for an app Composio refuses to hold one for —
+ * answered with a sentence telling the person to remove the app and add it again, which would
+ * produce the same row and the same failure. `connectionTokenFor` already settles what is true
+ * here: a `NO_AUTH` app has no connection row, cannot have one, and its tools run without one.
+ */
+describe("connecting an app that needs no account", () => {
+  test("the press is answered with what is true of the app, and nothing is asked of Composio", async () => {
+    const { asked, authorized, submitted, queried, connectNoAuth } =
+      brokeredApp();
+
+    const response = await connectNoAuth();
+
+    /*
+     * A REFUSAL RATHER THAN A 200 SAYING CONNECTED, because no row was written and none ever can
+     * be. `composio_connections` is the whole of the permission for a brokered call and every row
+     * in it means a person granted access to an account; a route answering `connected: true` here
+     * would have the settings page draw an account that does not exist, offer a Disconnect that
+     * ends nothing, and put this app in front of offboarding as something to revoke.
+     *
+     * 400 for the reason the OAuth branch below refuses a row that is not connected as an
+     * individual person with one: the act does not apply to this kind of row, and the sentence
+     * says what is true instead.
+     */
+    expect(response.status).toBe(400);
+    const refusal = (await response.json()).error as string;
+    /*
+     * THE APP'S TITLE, AND NOT THE ROW'S ID, as on both other halves of this route. "Hacker News"
+     * is the name of the thing the person is looking at; `composio-hackernews` is how this
+     * deployment keys a table.
+     */
+    expect(refusal).toContain("Hacker News");
+    expect(refusal).not.toContain("composio-hackernews");
+    /*
+     * AND IT NAMES NO REMEDY, BECAUSE NOTHING IS WRONG. The sentence this used to produce told the
+     * person to remove the app and add it again — a step that rebuilds the identical row and fails
+     * identically. What is true is that the app works as it is.
+     */
+    expect(refusal.toLowerCase()).not.toContain("add it again");
+    expect(refusal.toLowerCase()).not.toContain("administrator");
+
+    // Neither of the other two branches was entered: no form drawn, no key sent, no link minted.
+    expect(asked).toEqual([]);
+    expect(submitted).toEqual([]);
+    expect(authorized).toEqual([]);
+    /*
+     * The one-account guard still ran first, which is the ordering both other branches sit after
+     * on purpose: whose press this is has to be settled before what the app is.
+     */
+    expect(queried).toEqual([{ toolkit: "hackernews", userId: ADMIN.id }]);
+  });
+
+  test("a deployment with no app URL answers the same way, because there is no return leg", async () => {
+    /*
+     * A SETTING WITH NO BEARING ON THIS FLOW DOES NOT GET TO REFUSE IT — the same case the key
+     * branch makes one describe above, and the sharper version of it: a key app at least had a
+     * form to draw once the guard moved, while a no-auth app has nothing at all to do and was
+     * being refused for the want of an address nobody was ever going to be sent to.
+     *
+     * Single-user with no sign-in is the one deployment shape that genuinely has no app URL, and
+     * it is the shape most likely to be running the apps that need no account.
+     */
+    const { authorized, connectNoAuth } = brokeredApp(null, AUTHORIZATION_URL, {
+      environment: {
+        OPENBOT_SINGLE_USER: "true",
+        BETTER_AUTH_URL: undefined,
+        BETTER_AUTH_SECRET: undefined,
+        GOOGLE_OAUTH_CLIENT_ID: undefined,
+        GOOGLE_OAUTH_CLIENT_SECRET: undefined,
+        INITIAL_ADMIN_EMAILS: undefined,
+      },
+    });
+
+    const response = await connectNoAuth();
+
+    expect(response.status).toBe(400);
+    const refusal = (await response.json()).error as string;
+    expect(refusal).toContain("Hacker News");
+    expect(refusal).not.toContain("OPENBOT_APP_URL");
+    expect(authorized).toEqual([]);
+  });
+
+  test("a body carrying values is not a statement about how the app connects", async () => {
+    /*
+     * THE FORK IS THE SCHEME RECORDED ON THE ROW AND NOTHING IN THE REQUEST, which the consent
+     * half asserts for itself and which matters once more here: values in a body must not talk a
+     * route into sending somebody's typed secret at an app Composio holds no config for.
+     */
+    const { asked, submitted, connectNoAuth } = brokeredApp();
+
+    const response = await connectNoAuth({
+      values: { api_key: "hn-a-secret" },
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.text()).not.toContain("hn-a-secret");
+    expect(asked).toEqual([]);
+    expect(submitted).toEqual([]);
   });
 });
 

@@ -861,8 +861,9 @@ export function createPluginRoutes(
        * person already holds an API key, so there is nothing to consent to, no url to mint and no
        * return leg to build — the press that opens a vendor page for a consent app has to answer
        * with a form instead, and the press after it carries what was typed into it. One route
-       * serves both halves because the browser asks the same question both times: connect me to
-       * this app.
+       * serves all three arms because the browser asks the same question every time: connect me to
+       * this app. The third is below: an app that needs no credential at all, which is answered
+       * with the fact rather than with either flow.
        *
        * THE FORK IS THE SCHEME RECORDED ON THE ROW AT ENABLE TIME, which is what this deployment's
        * authorization config was actually created as — never a fresh catalogue read and never
@@ -874,7 +875,7 @@ export function createPluginRoutes(
        * who already has an account attached has no business in front of a form: drawing one invites
        * them to type a key that would be refused once they had entered it, and even the first press
        * would spend a call at Composio on behalf of a request that is going to be refused anyway.
-       * The refusal above names the step to take, and it is the same step for both kinds of app.
+       * The refusal above names the step to take, and it is the same step for every kind of app.
        *
        * THE PERSON IS STILL THE SESSION'S, as everywhere else in this branch. Nothing below reads
        * a user id out of the body — and nothing below logs the body either, which matters more
@@ -882,6 +883,49 @@ export function createPluginRoutes(
        * carries somebody's own credential.
        */
       const authScheme = row.authScheme;
+
+      /*
+       * AN APP THAT NEEDS NO CREDENTIAL IS ANSWERED WITH WHAT IS TRUE OF IT, AND ASKS COMPOSIO
+       * NOTHING.
+       *
+       * THE THIRD KIND, AND THE ONE THIS FORK USED TO HAVE NO ARM FOR. `NO_AUTH` is what
+       * `connectionOf` resolves thirty-four of Composio's toolkits to and what `addBrokeredApp`
+       * records on their rows. It is not a field scheme, so without this it fell through into the
+       * consent arm below and met one of two dead ends: a 503 demanding `OPENBOT_APP_URL` for a
+       * return leg this flow does not have, or `broker.authorize` — which can only fail, because
+       * `ensureAuthConfig` deliberately creates NO authorization config for a no-auth app, Composio
+       * having refused to hold one. The sentence that failure produces tells the person to remove
+       * the app and add it again, and adding it again writes the identical row and fails
+       * identically. That is one of the five connection kinds broken end to end, in the arm reached
+       * by elimination rather than by decision.
+       *
+       * REFUSED RATHER THAN ANSWERED `connected`, AND THE DIFFERENCE IS A ROW. `composio_connections`
+       * is the whole of the permission for a brokered call, and every row in it means one thing: this
+       * person granted this deployment access to their account at this app. There is no account here
+       * and there is no consent, so nothing may be written — which is exactly what
+       * the store's own `connectionTokenFor` already acts on, letting a `NO_AUTH` call through with
+       * no connection row at all rather than looking for one. A 200 claiming a connection would put
+       * this app in front of every reader of that table — offboarding, the trail, the Disconnect
+       * button — as an account somebody has to end.
+       *
+       * AND THE SENTENCE NAMES NO REMEDY, BECAUSE NOTHING IS WRONG. It says what the app is and that
+       * its tools already work, which is the whole of what the person can act on. 400 for the reason
+       * the OAuth branch below gives a row that is not connected as an individual person one: the act
+       * does not apply to this kind of row.
+       *
+       * THE APP'S TITLE, NOT THE ROW'S ID, for the reason the one-account refusal above says it:
+       * `composio-hackernews` is how this deployment keys a table and "Hacker News" is the name of
+       * the thing on the screen.
+       */
+      if (authScheme === "NO_AUTH") {
+        return context.json(
+          {
+            error: `${row.title} needs no account, so there is nothing to connect. A Bot granted its tools can use it as it is.`,
+          },
+          400,
+        );
+      }
+
       if (isFieldScheme(authScheme)) {
         /*
          * A SUBMISSION IS AN OBJECT OF VALUES, AND ANYTHING ELSE IS THE FIRST PRESS. The browser
@@ -1100,11 +1144,12 @@ export function createPluginRoutes(
        * genuinely different: the API is one origin and the browser app is another, and it is a
        * page this person is coming back to rather than an endpoint.
        *
-       * BELOW THE FIELD BRANCH AND NOT ABOVE IT, FOR THE REASON THIS BRANCH'S OWN HEADER GIVES ONE
-       * GUARD EARLIER. An app whose secret the person types mints no link and has no return leg, so
-       * this setting has no bearing on that flow at all — and standing before the fork, this guard
-       * meant no key app could be connected on a deployment without `OPENBOT_APP_URL`, refused in
-       * the name of a remedy that would not have helped. It stays after the one-account guard for
+       * BELOW BOTH BRANCHES ABOVE AND NOT IN FRONT OF THEM, FOR THE REASON THIS BRANCH'S OWN HEADER
+       * GIVES ONE GUARD EARLIER. Neither an app whose secret the person types nor one that needs no
+       * credential at all mints a link or has a return leg, so this setting has no bearing on either
+       * flow — and standing before the fork, this guard meant no key app and no no-auth app could be
+       * connected on a deployment without `OPENBOT_APP_URL`, refused in the name of a remedy that
+       * would not have helped. It stays after the one-account guard for
        * the reason that guard's own comment gives: somebody who already has an account attached is
        * told the step to take, rather than handed an operator's configuration complaint about a
        * link that was never going to be minted for them.
