@@ -1,8 +1,10 @@
 import { Composio } from "@composio/core";
 import {
   type BrokerApp,
+  type BrokerConnection,
   BrokerRefusalError,
   type ComposioBroker,
+  type FieldScheme,
 } from "./broker";
 import {
   type ComposioAction,
@@ -155,6 +157,9 @@ type VendorToolkit = {
   slug?: unknown;
   name?: unknown;
   meta?: unknown;
+  no_auth?: unknown;
+  auth_schemes?: unknown;
+  composio_managed_auth_schemes?: unknown;
 };
 
 /**
@@ -630,6 +635,53 @@ async function pageOf<Row>(
   return { items: answered.items as Row[], nextCursor: answered.next_cursor };
 }
 
+/** The field schemes, in the order a person would rather meet them. */
+const FIELD_SCHEMES: readonly FieldScheme[] = [
+  "API_KEY",
+  "BEARER_TOKEN",
+  "BASIC",
+  "BASIC_WITH_JWT",
+];
+
+/** The strings out of an `unknown`, which is all a vendor list promises. */
+function labelsOf(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+/**
+ * Which flow an app gets, and why that order.
+ *
+ * `no_auth` FIRST, AND IT IS NOT A PREFERENCE. Composio refuses an auth config for such a toolkit
+ * outright — "Cannot create an auth config for toolkit hackernews because it does not require
+ * authentication" — so an app flagged this way has no other reading available, whatever else it
+ * publishes beside it.
+ *
+ * Then managed OAuth, because it asks the person for nothing at all. Then self-registering OAuth,
+ * which asks nobody for anything: the client registers itself at consent time. Then a scheme whose
+ * secret the person already holds. What is left wants an OAuth client registered by whoever runs
+ * this deployment, and there is nowhere here to put one, so it is named rather than attempted.
+ */
+export function connectionOf(row: VendorToolkit): BrokerConnection {
+  if (row.no_auth === true) return { kind: "no-auth" };
+
+  const offered = labelsOf(row.auth_schemes);
+  const managed = labelsOf(row.composio_managed_auth_schemes);
+  if (managed.length > 0) return { kind: "consent" };
+  if (offered.includes("DCR_OAUTH")) return { kind: "self-registering" };
+
+  const field = FIELD_SCHEMES.find((scheme) => offered.includes(scheme));
+  if (field) return { kind: "fields", authScheme: field };
+
+  return {
+    kind: "unsupported",
+    reason: offered.length
+      ? `${offered.join(", ")} needs an OAuth application registered by whoever runs this deployment, and this deployment holds no place to put its own OAuth client for a brokered app.`
+      : "Composio published no authentication scheme for this app, so there is no flow this deployment could run, and its own OAuth client is not something this deployment can register.",
+  };
+}
+
 /**
  * One catalogue row checked into the app an administrator picks from, or a refusal saying why not.
  *
@@ -796,7 +848,15 @@ function appOf(row: VendorToolkit, position: number): BrokerApp {
     );
   }
 
-  return { slug, name, description, logo, categories, actionCount };
+  return {
+    slug,
+    name,
+    description,
+    logo,
+    categories,
+    actionCount,
+    connection: connectionOf(row),
+  };
 }
 
 /**

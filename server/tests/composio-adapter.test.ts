@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Composio } from "@composio/core";
 import {
+  type BrokerConnection,
   BrokerRefusalError,
   brokerSentence,
   type ComposioBroker,
@@ -31,6 +32,20 @@ import {
  * vendor call, and an implementation that forwarded a mismatch would pass every test that only
  * looked at what came back.
  */
+
+/**
+ * The connection every fixture in this file resolves to, because none of them publishes a scheme.
+ *
+ * These rows were written to exercise the field mapping and the cache, so they carry a slug, a name
+ * and a meta and nothing about authentication — which is itself a readable answer: an app Composio
+ * says nothing about the auth of is one no flow here could run. It is named once rather than
+ * retyped into five assertions, so a change to the sentence is a change in one place.
+ */
+const NO_SCHEME: BrokerConnection = {
+  kind: "unsupported",
+  reason:
+    "Composio published no authentication scheme for this app, so there is no flow this deployment could run, and its own OAuth client is not something this deployment can register.",
+};
 
 /** A vendor method nothing in a given test should reach, which says so rather than answering. */
 function refuse(what: string) {
@@ -460,6 +475,7 @@ describe("the app catalogue", () => {
         logo: "https://logos.composio.dev/gmail.png",
         categories: ["Productivity", "Email"],
         actionCount: 63,
+        connection: NO_SCHEME,
       },
       {
         slug: "sparse",
@@ -468,6 +484,7 @@ describe("the app catalogue", () => {
         logo: null,
         categories: [],
         actionCount: 0,
+        connection: NO_SCHEME,
       },
     ]);
   });
@@ -502,6 +519,7 @@ describe("holding the catalogue", () => {
     logo: null,
     categories: [],
     actionCount: 63,
+    connection: NO_SCHEME,
   };
 
   test("a second listing inside the window asks the vendor nothing", async () => {
@@ -572,6 +590,7 @@ describe("holding the catalogue", () => {
         logo: null,
         categories: [],
         actionCount: 12,
+        connection: NO_SCHEME,
       },
     ]);
   });
@@ -2127,6 +2146,7 @@ describe("a catalogue that might be a fragment", () => {
         logo: null,
         categories: ["Productivity"],
         actionCount: 63,
+        connection: NO_SCHEME,
       },
     ]);
   });
