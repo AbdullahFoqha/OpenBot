@@ -4270,6 +4270,19 @@ export function createPluginStore(options: PluginStoreOptions) {
        * so this path and the confirm path cannot drift into two row shapes.
        */
       const verified = false;
+
+      // Read before the write, for `confirmBrokeredConnection`'s reason: the record below is an
+      // upsert, so it leaves nothing behind that tells a first key from a replacement, and whether
+      // a row was already here is the whole of what `reconnected` says. The route that reaches
+      // this today refuses a second account for the same app, which makes a constant `false`
+      // accidentally true — but the guard lives in another file and this method is callable
+      // without it, so the trail would be claiming, on that guard's word, something it never
+      // checked.
+      const existing = await this.brokeredConnection({
+        toolkit: input.toolkit,
+        userId: input.userId,
+      });
+
       await this.recordBrokeredConnection({
         toolkit: input.toolkit,
         userId: input.userId,
@@ -4286,7 +4299,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         payload: {
           actor: input.userId,
           server: input.toolkit,
-          reconnected: false,
+          reconnected: existing !== null,
           /*
            * THE NAMES AND NEVER THE VALUES. What a reader of the trail needs is which app somebody
            * connected and what it asked them for; the values are the credential itself, and an

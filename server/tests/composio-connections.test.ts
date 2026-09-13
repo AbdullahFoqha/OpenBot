@@ -98,8 +98,19 @@ const secondToolkit = `${toolkit}-more`;
 const enabledToolkit = `enablable-${suite}`;
 /** What `addBrokeredApp` spells that app's row, which is the id the two tests below read back. */
 const enabledId = `composio-${enabledToolkit}`;
+/**
+ * The app somebody CONNECTS TWICE, which is the only shape that can tell a first key from a second.
+ *
+ * Its own name rather than {@link enabledToolkit}'s, because `audit_events` is append-only and no
+ * cleanup in this file can reach it: the test below that asserts ONE `mcp.account_connected` row
+ * under that app would be reading this test's rows too, and the two would pass or fail on whichever
+ * order the runner happened to pick.
+ */
+const rekeyedToolkit = `rekeyable-${suite}`;
+/** What `addBrokeredApp` spells that app's row, so {@link clean} can take it back. */
+const rekeyedId = `composio-${rekeyedToolkit}`;
 /** Every app this run owns, which is the scope of every read and every delete below. */
-const ownedToolkits = [toolkit, secondToolkit, enabledToolkit];
+const ownedToolkits = [toolkit, secondToolkit, enabledToolkit, rekeyedToolkit];
 /**
  * An app this file does NOT own, standing in for another run's fixture — or another file's.
  *
@@ -135,6 +146,14 @@ const admin = "admin@openbot.local";
  * asserted below is the implementation's doing rather than the redactor's.
  */
 const typedKey = `pplx-secret-value-${suite}`;
+/**
+ * THE SECOND KEY, the one somebody types when the first has been rotated or typed wrong.
+ *
+ * A different spelling from {@link typedKey} rather than the same value sent twice, because what
+ * the reconnect test is about is a grant being REPLACED: two sends of one string would be a shape
+ * an idempotent no-op could also produce.
+ */
+const rotatedKey = `pplx-rotated-value-${suite}`;
 
 const policy: ActionPolicy = { mode: "enforce", deny: [], allow: ["true"] };
 
@@ -419,11 +438,25 @@ async function clean() {
   await database
     .delete(mcpTools)
     .where(
-      inArray(mcpTools.serverId, [toolkit, renamedId, enabledId, probeAppId]),
+      inArray(mcpTools.serverId, [
+        toolkit,
+        renamedId,
+        enabledId,
+        rekeyedId,
+        probeAppId,
+      ]),
     );
   await database
     .delete(mcpServers)
-    .where(inArray(mcpServers.id, [toolkit, renamedId, enabledId, probeAppId]));
+    .where(
+      inArray(mcpServers.id, [
+        toolkit,
+        renamedId,
+        enabledId,
+        rekeyedId,
+        probeAppId,
+      ]),
+    );
   await database
     .delete(composioConnections)
     .where(inArray(composioConnections.toolkit, ownedToolkits));
@@ -1460,4 +1493,67 @@ test("the values reach Composio and nothing else", async () => {
   });
   expect(rows[0].verifiedAt).toBeNull();
   expect(JSON.stringify(rows)).not.toContain(typedKey);
+});
+
+/**
+ * CONNECTING A SECOND TIME: THE TRAIL SAYS A GRANT WAS REPLACED.
+ *
+ * CRITERION. Somebody who types a key for an app they had already connected leaves a second
+ * `mcp.account_connected` row saying `reconnected: true`, while the first one they left says
+ * `false` — and there is still ONE connection row, because the second key replaced the first.
+ *
+ * REASON. `recordBrokeredConnection` is an upsert, so the row it leaves behind is byte-identical
+ * whether it was the first grant or the fourth; `reconnected` is the only thing in the record that
+ * tells those apart, and a reader chasing "whose key is on this account" has nothing else to go on.
+ * A constant `false` there does not merely omit the fact — it asserts the opposite of it, about a
+ * row that really did replace one.
+ *
+ * AND THE ROUTE'S GUARD IS NOT A SUBSTITUTE, which is why this asks the store directly. The one
+ * caller today refuses a second account for the same app, so in production the constant happened to
+ * be true; but the guard lives in another file, nothing in this method points at it, and a method
+ * that is honest only because of a check somewhere else is one refactor away from filing a false
+ * record. What is asserted here is that the store looks.
+ */
+test("a second key for the same app is recorded as a reconnection", async () => {
+  useAnsweringClient();
+  await store.addBrokeredApp({
+    slug: rekeyedToolkit,
+    title: "Rekeyable App",
+    by: admin,
+    connection: { kind: "fields", authScheme: "API_KEY" },
+  });
+
+  await store.connectBrokeredWithFields({
+    toolkit: rekeyedToolkit,
+    userId: askerId,
+    values: { generic_api_key: typedKey },
+  });
+  await store.connectBrokeredWithFields({
+    toolkit: rekeyedToolkit,
+    userId: askerId,
+    values: { generic_api_key: rotatedKey },
+  });
+
+  // Both keys reached the vendor, in order. Without this the trail assertion below would be
+  // satisfied by a second call that refused before it connected anybody.
+  expect(valuesSent).toEqual([
+    { generic_api_key: typedKey },
+    { generic_api_key: rotatedKey },
+  ]);
+
+  // ONE ROW FOR TWO CONNECTS, which is the whole of why the flag cannot be inferred later: the
+  // upsert left nothing behind saying there had been two.
+  expect(await connectedToolkitsFor(askerId)).toEqual([rekeyedToolkit]);
+
+  // Read in the order the acts happened, which the recorder keeps and `created_at` does not
+  // promise to: two inserts a millisecond apart are two rows an ordered read may return either way
+  // round, and the whole assertion is about which of them said what.
+  const connected = recordedOfType("mcp.account_connected").filter(
+    (event) => event.targetId === rekeyedToolkit,
+  );
+  expect(
+    connected.map(
+      (event) => (event.payload as { reconnected: boolean }).reconnected,
+    ),
+  ).toEqual([false, true]);
 });
