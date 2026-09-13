@@ -111,7 +111,7 @@ export type BrokerApp = {
  * What this deployment needs of Composio's broker, and nothing more.
  *
  * A NARROW PROJECTION RATHER THAN THEIR CLIENT, for the reason the transport's `ComposioActions` is
- * one: six methods is a shape a test satisfies with an object literal, so every test about
+ * one: nine methods is a shape a test satisfies with an object literal, so every test about
  * enablement, connection and revocation is a test about this deployment's logic and none of them
  * reaches the network. The vendor's client would drag its constructor, its retries and its schemas
  * into each of those tests, and the first thing every one of them would do is find a way not to
@@ -214,6 +214,93 @@ export type ComposioBroker = {
    * press disconnect a second time.
    */
   revoke(request: { userId: string; toolkit: string }): Promise<boolean>;
+  /**
+   * What this app asks a person to type, as Composio publishes it for the scheme.
+   *
+   * ASKED OF THE VENDOR RATHER THAN WRITTEN DOWN HERE, which is the whole reason it is a call and
+   * not a constant. The fields are per app and they move: a form built from one hard-coded "API
+   * key" box is right for Firecrawl and wrong for the app that also wants a workspace subdomain,
+   * and wrong quietly — the person fills in what they were shown, a connection is created without
+   * the value nobody asked them for, and the first tool call is what discovers it. The `help` on
+   * {@link BrokerField} is the vendor's own sentence written for the person filling the box in, and
+   * it is worth more than anything this deployment could invent about somebody else's console.
+   *
+   * THE SCHEME IS PASSED IN RATHER THAN RESOLVED HERE, for the reason {@link
+   * ComposioBroker.ensureAuthConfig} takes a connection rather than deriving one: the caller
+   * already holds the scheme recorded on the app's row at enable time, and a second derivation is a
+   * second answer — a form drawn for `BASIC` in front of a config created for `API_KEY`, whose
+   * fields the person cannot fill in because they are not the ones their app has.
+   */
+  connectionFields(request: {
+    toolkit: string;
+    authScheme: FieldScheme;
+  }): Promise<BrokerField[]>;
+  /**
+   * Connect this person with the secret they typed, answering the account it made.
+   *
+   * THE ONE CALL WHOSE IMPLEMENTATION MUST RETHROW WITH NO `cause`, WHICH IS AN INVERSION OF THE
+   * STANDING RULE AND SAYS SO ON PURPOSE. The rule `composio-adapter.ts` states and every path here
+   * keeps is that a vendor error is never logged and always carried as `cause`, precisely because
+   * the object holds the request it was made for and whoever is reading a log rather than a page
+   * deserves it. On every other call that request is a link mint or a delete. On this one it is
+   * somebody's API key. So this is the single place the rule reverses: read the vendor's sentence
+   * through the existing door, then drop the object entirely rather than attach it.
+   *
+   * WHAT THAT COSTS IS THE DIAGNOSTIC TRAIL ON THE FLOW PEOPLE MOST OFTEN MISTYPE, AND THE COST IS
+   * ACCEPTED KNOWINGLY. A key pasted with a newline, a token from the wrong workspace, a secret for
+   * the staging tenant — these are the ordinary failures here, and they are the ones this leaves
+   * nothing behind about. What an operator gets instead is Composio's own sentence and the request
+   * id inside it, which is enough to ask the vendor about that attempt and not enough to rebuild it
+   * here. A `cause` that made the next mistyped key easier to explain would put every correctly
+   * typed one in a log for as long as the log is kept.
+   *
+   * THE `accountId` IS ANSWERED SO A CALLER CAN UNDO EXACTLY THIS ACCOUNT. A connection made from
+   * typed fields is verified before it is kept, and a verification has to be able to take back the
+   * thing it just made and nothing else. {@link ComposioBroker.revoke} is the wrong instrument for
+   * that — it ends every account this person holds for the app, which is right for somebody ending
+   * their access and wrong for a step undoing its own work. The two differ exactly when the local
+   * row and Composio have drifted apart: the person already had a connection that works, this
+   * attempt made a second one, the verification failed — and a sweep there takes down the
+   * connection that was working. See {@link ComposioBroker.revokeAccount}.
+   */
+  connectWithFields(request: {
+    userId: string;
+    toolkit: string;
+    authScheme: FieldScheme;
+    /**
+     * What the person typed, keyed by the `name` {@link BrokerField} was published under.
+     *
+     * THE ONLY SECRET THAT CROSSES THIS SEAM, which is what the no-`cause` rule above is about. The
+     * names are sent back on the wire verbatim and are never shown; the values are the person's own
+     * credential and belong in no message, no log and no audit row, for the reason the connect url
+     * does not.
+     */
+    values: Record<string, string>;
+  }): Promise<{ accountId: string }>;
+  /**
+   * End ONE account by id, and ask for the grant behind it to be withdrawn too.
+   *
+   * ONE, WHICH IS THE WHOLE DIFFERENCE FROM {@link ComposioBroker.revoke}. That method sweeps every
+   * account a person holds for an app, because what it serves is a person ending their access to
+   * it. This serves a caller undoing an account it just made, and the id is the whole of what it
+   * names — nothing is listed, nothing is matched, and no account this call was not handed can be
+   * reached by it. The narrower instrument exists because the wider one is destructive in precisely
+   * the case a verification runs into: a working connection standing beside a failed second
+   * attempt.
+   *
+   * WITH `revoke_on_delete`, WHICH IS WHAT MAKES IT A WITHDRAWAL RATHER THAN A RECORD-KEEPING
+   * SOFT-DELETE. Without that flag the account stops being visible to this deployment and the
+   * credential at the far end stands — which is the exact state {@link ComposioBroker.revoke}
+   * records this deployment once claiming as a revocation, and it is worse here than there: the
+   * secret left live is one a person typed minutes ago into a form that then told them the
+   * connection had not been kept.
+   *
+   * NO BOOLEAN, BECAUSE THERE IS NOTHING TO COUNT. `revoke` answers what it found because it
+   * searches for it; this is handed the id of an account created moments earlier by the call that
+   * answered it, so "there was nothing there" is not an outcome a caller chooses between — it is a
+   * failure, and it throws like any other.
+   */
+  revokeAccount(accountId: string): Promise<void>;
 };
 
 /**
