@@ -2457,6 +2457,12 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
       because:
         "Reading what the app asks a person for did not answer. No form was drawn and nothing was attached, so there is nothing about this app to say that the route's own advice — the deployment's key, the vendor's status page — does not already cover.",
     },
+    {
+      method: "revokeAccount",
+      kind: "an outage",
+      because:
+        "The delete did not answer. The vendor's own bare message travels on untouched, naming nothing, because there is nothing else to say: the account may be standing at Composio and this deployment cannot tell whether the request landed. Its caller is undoing its own work rather than a person pressing a button, and what it is owed is the failure itself.",
+    },
     /*
      * THE TWO REASONS BELOW USED TO BE FALSE, AND THIS IS THE CASE THE ALLOW-LIST CANNOT CATCH BY
      * ITSELF. Its assertion asks whether an AUTHORED sentence reached the reader, so an entry whose
@@ -2581,6 +2587,13 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
           authScheme: "API_KEY",
           values: { generic_api_key: "never-sent-anywhere" },
         }),
+    },
+    {
+      method: "revokeAccount",
+      vendor: (raise) => ({ connectedAccounts: { delete: raise } }),
+      // No listing on the way in, which is the whole shape of this method: the id is what it was
+      // handed, so the delete is the first vendor call it makes and the only one it can fail at.
+      ask: ({ broker }) => broker.revokeAccount("ca_new"),
     },
     {
       method: "listActions",
@@ -5479,5 +5492,61 @@ describe("connecting one person with the secret they typed", () => {
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
     expect(refusal.message).toMatch(NO_CONFIG_REMEDY);
     expect(refusal.message).not.toContain(TYPED_SECRET);
+  });
+});
+
+/**
+ * ENDING ONE ACCOUNT BY ID, WHICH IS A DIFFERENT QUESTION FROM ENDING A PERSON'S ACCESS.
+ *
+ * `revoke` above is asked "this person is done with this app" and has to go and find out what that
+ * means: it lists, it matches, and it deletes everything it found. This one is asked "take back the
+ * account you just made", and the id it is handed is the whole of the question — so the listing
+ * that makes the other method correct is, here, both a call nothing needs and a set of accounts
+ * nobody asked about. The two differ exactly where the local row and Composio have drifted apart,
+ * which is the state a failed verification is standing in: a connection that works beside the
+ * attempt that did not. The absence of the listing is therefore asserted rather than assumed.
+ */
+describe("taking back the one account a verification just made", () => {
+  test("the delete names that account and asks for the grant behind it, with nothing listed first", async () => {
+    const deleted: unknown[] = [];
+    /*
+     * THE LISTINGS ANSWER RATHER THAN REFUSE, deliberately, and that is what makes this an
+     * assertion about the method instead of about {@link fakeVendor}. Left at the refusals, a
+     * sweeping implementation would fail here on a thrown fixture and the failure would read like
+     * an unrelated vendor error; answering means a sweep gets everything it needs and is caught by
+     * the one thing that is actually wrong with it — that it went looking at all.
+     */
+    const listed: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => {
+            listed.push("authConfigs.list");
+            return { items: [OURS] };
+          },
+        },
+        connectedAccounts: {
+          list: async () => {
+            listed.push("connectedAccounts.list");
+            return { items: [{ id: "ca_new" }] };
+          },
+          delete: async (id: unknown, params: unknown) => {
+            deleted.push([id, params]);
+            return WITHDRAWN;
+          },
+        },
+      }),
+    );
+
+    await broker.revokeAccount("ca_new");
+
+    /*
+     * THE ID AS IT WAS HANDED OVER, AND THE FLAG BESIDE IT. Without `revoke_on_delete` the account
+     * stops being visible to this deployment and the credential at the far end stands — which is
+     * worse here than anywhere else in this file, because the secret left live is one somebody
+     * typed into a form minutes ago that then told them the connection had not been kept.
+     */
+    expect(deleted).toEqual([["ca_new", { revoke_on_delete: true }]]);
+    expect(listed).toEqual([]);
   });
 });

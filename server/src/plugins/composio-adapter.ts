@@ -3530,6 +3530,45 @@ export function buildComposioClient(
 
       return { accountId };
     },
+
+    /**
+     * ONE account ended by id, and NOT {@link ComposioBroker.revoke}, which is the whole decision.
+     *
+     * `revoke` ends every account a person holds for an app. That is right for what it serves — a
+     * person ending their access, where any account left behind is access that still answers — and
+     * it is wrong for a verification undoing what it just made. The two read identically right up
+     * until the local row and Composio have drifted apart, and that is precisely the state a failed
+     * verification stands in: a connection that was working, a second account just created from a
+     * key that does not work, and a sweep that takes down both. So this method is handed the id and
+     * nothing else — nothing is listed, nothing is matched, and no account it was not given can be
+     * reached from here.
+     *
+     * WITH `revoke_on_delete`, FOR THE REASON {@link ComposioVendor}'s `delete` GIVES AND ONE MORE
+     * OF ITS OWN. Without the flag the account stops being visible to this deployment and the
+     * credential at the far end stands; here that credential is one somebody typed into a form
+     * minutes ago, into a page that is about to tell them the connection was not kept.
+     *
+     * NOTHING IS ANSWERED AND NOTHING IS SWALLOWED. There is no count to report — the id names one
+     * account that existed moments ago — so a failure is a failure, and it leaves through
+     * {@link askVendor} like every other vendor call in this file.
+     */
+    async revokeAccount(accountId): Promise<void> {
+      await askVendor(
+        {
+          outcome:
+            "the one account this call was handed was not withdrawn and may be standing at Composio",
+          /*
+           * NO APP IN THE QUESTION, which is what the id being the whole of it means. The caller
+           * holds the toolkit it connected and can say it; this call was given an account.
+           */
+          app: null,
+        },
+        () =>
+          vendor.connectedAccounts.delete(accountId, {
+            revoke_on_delete: true,
+          }),
+      );
+    },
   };
 
   return { actions, broker };
