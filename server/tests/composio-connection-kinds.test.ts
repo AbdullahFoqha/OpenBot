@@ -295,3 +295,35 @@ test("an app offering every field scheme asks for the one a person already holds
     }),
   ).toEqual({ kind: "fields", authScheme: "API_KEY" });
 });
+
+/**
+ * `no_auth` DECIDES THE WHOLE FLOW, AND `=== true` CANNOT TELL ITS ABSENCE FROM ITS WRONG SHAPE.
+ *
+ * An absent flag reading as "this app needs authenticating" is the benign default and stays. A
+ * PRESENT `"true"` reading the same way is Composio saying the opposite of what is read: the app
+ * needs nothing, Composio REFUSES an authorization config for exactly such a toolkit, and every
+ * enable of it therefore fails against a vendor that already said why. Coercing the string instead
+ * would be guessing — `"false"` is truthy, so the coercion that rescues this row flags every app
+ * beside it as needing no auth at all, which is the dangerous direction.
+ */
+test("a no_auth flag Composio sent as a string is refused rather than read as a no", () => {
+  expect(() =>
+    connectionOf({
+      slug: "hackernews",
+      no_auth: "true",
+      auth_schemes: ["OAUTH2"],
+      composio_managed_auth_schemes: ["OAUTH2"],
+    }),
+  ).toThrow(/sent a string where its flag saying whether hackernews needs/);
+});
+
+/** And an app that publishes no flag at all is still read at the default rather than refused. */
+test("an app publishing no no_auth flag is read as one that needs authenticating", () => {
+  expect(
+    connectionOf({
+      slug: "docusign",
+      auth_schemes: ["OAUTH2"],
+      composio_managed_auth_schemes: ["OAUTH2"],
+    }),
+  ).toEqual({ kind: "consent" });
+});

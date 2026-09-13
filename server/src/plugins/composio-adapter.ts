@@ -404,6 +404,37 @@ function textOf(value: unknown): string | null {
 }
 
 /**
+ * One vendor flag as the boolean it has to be, or null where Composio sent something else.
+ *
+ * THREE INPUTS AND TWO ANSWERS IS WHAT `x === true` HAS, AND THE THIRD IS THE ONE THAT MATTERS.
+ * Every flag below was read that way, which is exactly right about an ABSENT one — Composio
+ * genuinely publishes fields with no `required`, no `is_secret` and no `user_visible`, and each of
+ * those absences is a fact about the field that the default states honestly. It is not right about
+ * a flag that is PRESENT and is not a boolean: `"true" === true` is `false`, so the vendor saying
+ * yes and the vendor saying nothing came out of the read as one answer, and the wrong one.
+ *
+ * SO THE DEFAULT IS THE CALLER'S AND THE WRONG SHAPE IS NOBODY'S. `whenAbsent` is passed rather
+ * than assumed because the three callers do not agree on it — an unstated `required` is a no and an
+ * unstated `user_visible` is a yes — and a null comes back for the shape none of them has a reading
+ * for, which each turns into a sentence naming what arrived. That is {@link textOf}'s contract with
+ * its callers, and this file's rule for every wire value: answer null on what cannot be read, and
+ * let the caller say what was lost by it.
+ *
+ * REFUSING RATHER THAN COERCING, WHICH IS A DECISION AND NOT A DEFAULT. The tempting fix for a
+ * `required` of `"true"` is to read the string, and it is wrong on the row beside it: `"false"` is
+ * a truthy string, so any coercion that rescues the required field marks every optional one
+ * required, and `Boolean("0")` and `Boolean("no")` go the same way. There is no reading of a
+ * wrong-shaped flag that is right on both halves — which is the whole argument this file already
+ * makes about a `Number("63")` and a `String(undefined)`. And a vendor publishing a string where
+ * it documents a boolean is a change in the package rather than a setting anybody here can
+ * correct, so every sentence built off a null here ends in {@link VENDOR_SHAPE_REMEDY}.
+ */
+function flagOf(value: unknown, whenAbsent: boolean): boolean | null {
+  if (value === undefined || value === null) return whenAbsent;
+  return typeof value === "boolean" ? value : null;
+}
+
+/**
  * How many pages of one listing this deployment will read before it stops and says so.
  *
  * THE BOUND IS AGAINST A VENDOR THAT NEVER STOPS, not against a large answer. What it guards is a
@@ -783,24 +814,6 @@ function unreadableForm(was: unknown, where: string): BrokerRefusalError {
 }
 
 /**
- * The `no_auth` flag as the boolean it is declared to be, or a refusal where it is something else.
- *
- * ABSENT IS FALSE AND IS NOT A GUESS: the flag is optional on the vendor's own row, and the scheme
- * list carries the same fact for every toolkit that has it. What cannot be read as false is a value
- * that is THERE and is not a boolean — `"false"` is truthy, `0` is falsy, and either reading is
- * this deployment inventing the app's answer rather than reporting that it could not read one.
- */
-function flagOf(value: unknown, at: string): boolean {
-  if (value === undefined || value === null) return false;
-  if (typeof value !== "boolean") {
-    throw new BrokerRefusalError(
-      `Composio sent ${sent(value)} where ${at} belongs, and that field is a yes or a no: it says whether the app needs authentication at all, which decides whether anybody is ever asked for anything. A value that is neither is one this deployment cannot read either way. ${VENDOR_SHAPE_REMEDY}`,
-    );
-  }
-  return value;
-}
-
-/**
  * Which flow an app gets, and why that order.
  *
  * NO AUTHENTICATION FIRST, AND IT IS NOT A PREFERENCE. Composio refuses an auth config for such a
@@ -843,7 +856,24 @@ export function connectionOf(row: VendorToolkit): BrokerConnection {
     row.composio_managed_auth_schemes,
     `the authentication schemes Composio holds ${at}'s own credentials for`,
   );
-  const flagged = flagOf(row.no_auth, `whether ${at} needs authentication`);
+
+  /*
+   * AND A FLAG THIS FILE CANNOT READ IS NOT THE SAME AS ONE THE APP DOES NOT PUBLISH. Most rows
+   * carry no `no_auth` at all and reading that as "this app needs authenticating" is the right
+   * answer, which is what {@link flagOf}'s default keeps — and the scheme list below carries the
+   * same fact for every toolkit that publishes it. A `no_auth` that is PRESENT and is not a
+   * boolean has no such reading: `"true" === true` is false, so the vendor saying an app needs
+   * nothing arrived at the very check that acts on it as the vendor having said nothing — and the
+   * app is then enabled down a path Composio refuses outright ("Cannot create an auth config for
+   * toolkit hackernews because it does not require authentication"), or a person is sent to a form
+   * for a credential the app has no use for.
+   */
+  const flagged = flagOf(row.no_auth, false);
+  if (flagged === null) {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(row.no_auth)} where its flag saying whether ${at} needs authenticating at all belongs, and that one field decides the whole of the flow: an app flagged this way is one Composio REFUSES an authorization config for, whatever else it publishes beside the flag. A value this deployment cannot read is not the app's silence on the question, so it is not read as one. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
 
   if (flagged || offered.includes(NO_AUTH_SCHEME)) return { kind: "no-auth" };
 
@@ -3701,7 +3731,22 @@ export function buildComposioClient(
       ];
 
       return rows
-        .filter((row) => row?.user_visible !== false)
+        .filter((row) => {
+          /*
+           * A FIELD COMPOSIO HIDES IS ONE COMPOSIO FILLS IN, AND `!== false` HID THE WRONG STATE.
+           * An absent `user_visible` means show it, which is most of the catalogue and stays. A
+           * present `"false"` is Composio saying the opposite and reading as "show it" — a box
+           * drawn for a tenant id or an instance name the person has no way to know, which they
+           * then leave blank and submit as an empty value under a key the app does read.
+           */
+          const visible = flagOf(row?.user_visible, true);
+          if (visible === null) {
+            throw new BrokerRefusalError(
+              `${toolkit} describes ${textOf(row?.displayName) ?? textOf(row?.name) ?? "one of the values it asks for"} with ${sent(row?.user_visible)} where the flag saying whether that field is shown to the person filling the form in belongs. A field Composio hides is one Composio fills in itself, so a flag this deployment cannot read is the difference between a form and a form with a box nobody can answer. ${VENDOR_SHAPE_REMEDY}`,
+            );
+          }
+          return visible;
+        })
         .map((row) => {
           /*
            * A TYPE THIS DEPLOYMENT CANNOT DRAW IS A REFUSAL RATHER THAN A TEXT BOX. Every required
@@ -3731,12 +3776,45 @@ export function buildComposioClient(
            * was corrected for, one field away from a value somebody then submits as typed.
            */
           const suggested = textOf(row.default);
+
+          /*
+           * THE TWO FLAGS THAT DESCRIBE THE BOX ARE READ THE SAME WAY THE TYPE AND THE NAME ARE,
+           * AND FOR THE SAME REASON. `row.required === true` and `row.is_secret === true` answered
+           * "no" to an absent flag, which is right and is most of the catalogue, and answered "no"
+           * to a PRESENT `"true"` as well — the vendor's yes and the vendor's silence collapsed
+           * into one value at the point either is acted on.
+           *
+           * `required` IS THE SHARPER OF THE TWO BECAUSE THE CONNECT ROUTE NOW ENFORCES IT. The
+           * guard that refuses a submission omitting a required field reads this boolean and no
+           * other, so a vendor publishing `"true"` would make that guard wave through the exact
+           * submission it exists to refuse: an account created with the credential missing out of
+           * it, which Composio answers `ACTIVE` for because it does not grade what it is given, and
+           * which the first tool call is the first thing to notice.
+           *
+           * `is_secret` IS THE QUIETER ONE AND NOT THE SMALLER ONE. Read as a no, the box for
+           * somebody's API key is drawn as ordinary text: typed in plain sight, left on the screen,
+           * and offered to whatever fills fields in.
+           */
+          const required = flagOf(row.required, false);
+          if (required === null) {
+            throw new BrokerRefusalError(
+              `${toolkit} describes ${name} with ${sent(row.required)} where the flag saying whether that field has to be filled in belongs. Read as a no — which is what a value this deployment cannot read would otherwise become — a field ${toolkit} requires is drawn as one a person may leave blank, and what they submit is an account Composio accepts with the credential missing out of it. ${VENDOR_SHAPE_REMEDY}`,
+            );
+          }
+
+          const secret = flagOf(row.is_secret, false);
+          if (secret === null) {
+            throw new BrokerRefusalError(
+              `${toolkit} describes ${name} with ${sent(row.is_secret)} where the flag saying whether that field holds a secret belongs. Read as a no, the box is drawn as ordinary text, so whatever goes in it — a key, a token — is typed in plain sight and left on the screen. ${VENDOR_SHAPE_REMEDY}`,
+            );
+          }
+
           return {
             name,
             label: textOf(row.displayName) ?? name,
             help: textOf(row.description) ?? "",
-            required: row.required === true,
-            secret: row.is_secret === true,
+            required,
+            secret,
             ...(suggested === null ? {} : { default: suggested }),
           };
         });

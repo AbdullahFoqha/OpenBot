@@ -5645,6 +5645,228 @@ describe("the fields an app asks a person to fill in", () => {
       expect(refusal.message).not.toMatch(/no longer publishes/);
     });
   }
+
+  /**
+   * A VENDOR BOOLEAN THAT IS NOT A BOOLEAN IS THE ONE STATE `=== true` CANNOT REPORT.
+   *
+   * `row.required === true` has three inputs and two answers. An ABSENT flag reading as "optional"
+   * is the benign default this idiom was chosen for, and it stays. A PRESENT `"true"` reading as
+   * "optional" is a different fact wearing the same answer: Composio said the field has to be
+   * filled in, and the form drew a box a person may leave blank.
+   *
+   * WHICH IS LOAD-BEARING BECAUSE THE CONNECT ROUTE NOW READS THIS BOOLEAN. The guard that refuses
+   * a submission omitting a required field asks this field and no other, so a vendor publishing
+   * `"true"` makes the guard wave through the exact submission it was added to refuse: a
+   * connection Composio answers `ACTIVE` for with the credential missing out of it.
+   *
+   * REFUSED RATHER THAN COERCED, AND THE STRING IS THE ARGUMENT. The drift that publishes `"true"`
+   * publishes `"false"` on the fields beside it, and `"false"` is a truthy string — so a
+   * `Boolean(...)` written to rescue this case turns every optional field into a required one and
+   * stops a person connecting at all. There is no reading of a wrong-shaped flag that is right on
+   * both halves, which is what every other reader in this file already says about a vendor value it
+   * cannot read.
+   */
+  test("a required flag Composio sent as a string is refused rather than read as optional", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [
+                      {
+                        name: "generic_api_key",
+                        displayName: "API Key",
+                        description: "",
+                        type: "string",
+                        required: "true",
+                        is_secret: true,
+                        user_visible: true,
+                      },
+                    ],
+                    optional: [],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectionFields({
+        toolkit: "perplexityai",
+        authScheme: "API_KEY",
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    // The shape and never the value, like every other vendor read here.
+    expect(refusal.message).toMatch(/with a string where/);
+    expect(refusal.message).toMatch(/has to be filled in/);
+    expect(refusal.message).toMatch(/@composio\/core/);
+  });
+
+  /**
+   * AND THE SAME SHAPE ON `is_secret` IS THE OTHER HALF OF ONE BOX'S DESCRIPTION.
+   *
+   * Read as a no — which is what `=== true` makes of `"true"` — the box for somebody's API key is
+   * drawn as ordinary text: typed in plain sight, left on the screen, and offered to whatever the
+   * browser fills fields with. That is not a smaller failure than the required one, it is a quieter
+   * one, and it is the same vendor drift arriving one field along.
+   */
+  test("a secret flag Composio sent as a string is refused rather than drawn unmasked", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [
+                      {
+                        name: "generic_api_key",
+                        displayName: "API Key",
+                        description: "",
+                        type: "string",
+                        required: true,
+                        is_secret: "true",
+                        user_visible: true,
+                      },
+                    ],
+                    optional: [],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectionFields({
+        toolkit: "perplexityai",
+        authScheme: "API_KEY",
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/with a string where/);
+    expect(refusal.message).toMatch(/holds a secret/);
+  });
+
+  /**
+   * AND THE VISIBILITY FLAG IS THE THIRD, WHOSE DEFAULT POINTS THE OTHER WAY AND WHOSE FAULT DOES
+   * NOT.
+   *
+   * `user_visible !== false` is right about an absent flag — a field Composio says nothing about is
+   * one to show — and it reads a present `"false"` as "show it" too, which is Composio saying the
+   * opposite. What that draws is a box for a value Composio fills in itself: a person is asked for
+   * a tenant id they have no way to know, and the field they leave blank is submitted as an empty
+   * one.
+   */
+  test("a visibility flag Composio sent as a string is refused rather than read as visible", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [
+                      {
+                        name: "internal_tenant",
+                        displayName: "Tenant",
+                        description: "",
+                        type: "string",
+                        required: true,
+                        is_secret: false,
+                        user_visible: "false",
+                      },
+                    ],
+                    optional: [],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectionFields({ toolkit: "hidden", authScheme: "API_KEY" }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/with a string where/);
+    expect(refusal.message).toMatch(/shown to the person filling the form in/);
+  });
+
+  /**
+   * THE ABSENCES STAY BENIGN, WHICH IS THE HALF THE FIX MUST NOT TAKE WITH IT.
+   *
+   * Composio genuinely publishes optional fields with no `required` key, ordinary fields with no
+   * `is_secret` and visible ones with no `user_visible` — three states that are facts about the
+   * field rather than faults in the answer. A guard that refused those would refuse most of the
+   * catalogue, which is the opposite mistake and the reason `=== true` was reasonable to begin
+   * with.
+   */
+  test("a field publishing none of the three flags is read at its defaults rather than refused", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [],
+                    optional: [
+                      {
+                        name: "base_url",
+                        displayName: "Base URL",
+                        description: "",
+                        type: "string",
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    expect(
+      await broker.connectionFields({
+        toolkit: "sparse",
+        authScheme: "API_KEY",
+      }),
+    ).toEqual([
+      {
+        name: "base_url",
+        label: "Base URL",
+        help: "",
+        required: false,
+        secret: false,
+      },
+    ]);
+  });
 });
 
 /**
