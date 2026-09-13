@@ -685,6 +685,35 @@ const FIELD_SCHEME_ORDER: Record<FieldScheme, number> = {
 };
 
 /**
+ * The schemes a managed config can actually send somebody to a page for, as the VENDOR names them.
+ *
+ * WHICH IS THE WHOLE OF WHAT `consent` CLAIMS. That kind means one thing below: create a
+ * `use_composio_managed_auth` config and mint a link the person visits. Composio publishes the set
+ * of schemes a link exists for and calls it exactly that — `RedirectableAuthSchemeSchema` is
+ * `z.enum([OAUTH1, OAUTH2])` (`@composio/core` 0.18.1,
+ * `src/types/connectedAccountAuthStates.types.ts:15-18`) — so a managed scheme outside it has no
+ * page to send anybody to, whatever else is true of it.
+ *
+ * `DCR_OAUTH` IS NOT HERE AND IS NOT AN OMISSION. The vendor leaves it out of that enum and this
+ * file drives it through its own kind — `self-registering`, a CUSTOM config whose client registers
+ * itself at connect time — so it is read off {@link VendorToolkit.auth_schemes} below rather than
+ * off the managed list.
+ */
+const REDIRECTING_SCHEMES = ["OAUTH2", "OAUTH1"];
+
+/**
+ * The scheme Composio publishes for an app that asks nobody for anything.
+ *
+ * THE FLAG AND THE SCHEME ARE TWO SPELLINGS OF ONE FACT, and only the second is guaranteed. A
+ * toolkit needing no authentication publishes `NO_AUTH` among its schemes; `no_auth` is an
+ * additional boolean the catalogue MAY carry, and `ToolKitItemSchema` spells it optional. Reading
+ * only the flag made an app that published the scheme without it `unsupported` — whose sentence
+ * claims the app wants an OAuth application registered here, which is the opposite of true — and
+ * `routes.ts` then hid the app from the picker over it.
+ */
+const NO_AUTH_SCHEME = "NO_AUTH";
+
+/**
  * The words out of an `unknown`, which is all a vendor list promises — and a refusal for the rest.
  *
  * ABSENT IS AN ANSWER AND UNREADABLE IS NOT, WHICH IS THE WHOLE OF THE CORRECTION. Composio
@@ -700,6 +729,11 @@ const FIELD_SCHEME_ORDER: Record<FieldScheme, number> = {
  * shorter list that reads exactly like a shorter list the app published, and the decision below is
  * made on which words are in it.
  *
+ * AND THE WORD IS THE TRIMMED ONE, WHICH IS WHY THE MEMBER GOES THROUGH {@link textOf}. A scheme is
+ * the NAME of a flow: it is compared against the literals below and recorded on the app's row when
+ * somebody enables it, so a padded `" OAUTH2 "` is the app's own scheme wearing whatever the wire
+ * wrapped it in, and `"  "` is the one unusable value that reads as present at every glance.
+ *
  * `where` IS THE NOUN PHRASE THE SENTENCE IS BUILT AROUND, so the two call sites differ in the one
  * thing that differs between them: which of an app's two scheme lists could not be read.
  */
@@ -711,12 +745,13 @@ function labelsOf(value: unknown, where: string): string[] {
     );
   }
   return listed.map((entry: unknown, index: number) => {
-    if (typeof entry !== "string") {
+    const scheme = textOf(entry);
+    if (scheme === null) {
       throw new BrokerRefusalError(
         `Composio sent ${sent(entry)} where scheme ${index + 1} of ${where} belongs, and a scheme is the word this deployment matches against the flows it knows how to run. Leaving out the ones that are not words makes a shorter list, which reads exactly like a shorter list the app published. ${VENDOR_SHAPE_REMEDY}`,
       );
     }
-    return entry;
+    return scheme;
   });
 }
 
@@ -748,21 +783,51 @@ function unreadableForm(was: unknown, where: string): BrokerRefusalError {
 }
 
 /**
+ * The `no_auth` flag as the boolean it is declared to be, or a refusal where it is something else.
+ *
+ * ABSENT IS FALSE AND IS NOT A GUESS: the flag is optional on the vendor's own row, and the scheme
+ * list carries the same fact for every toolkit that has it. What cannot be read as false is a value
+ * that is THERE and is not a boolean — `"false"` is truthy, `0` is falsy, and either reading is
+ * this deployment inventing the app's answer rather than reporting that it could not read one.
+ */
+function flagOf(value: unknown, at: string): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== "boolean") {
+    throw new BrokerRefusalError(
+      `Composio sent ${sent(value)} where ${at} belongs, and that field is a yes or a no: it says whether the app needs authentication at all, which decides whether anybody is ever asked for anything. A value that is neither is one this deployment cannot read either way. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+  return value;
+}
+
+/**
  * Which flow an app gets, and why that order.
  *
- * `no_auth` FIRST, AND IT IS NOT A PREFERENCE. Composio refuses an auth config for such a toolkit
- * outright — "Cannot create an auth config for toolkit hackernews because it does not require
- * authentication" — so an app flagged this way has no other reading available, whatever else it
- * publishes beside it.
+ * NO AUTHENTICATION FIRST, AND IT IS NOT A PREFERENCE. Composio refuses an auth config for such a
+ * toolkit outright — "Cannot create an auth config for toolkit hackernews because it does not
+ * require authentication" — so an app that says so has no other reading available, whatever else it
+ * publishes beside it. It says so in either of two places; see {@link NO_AUTH_SCHEME}.
  *
- * Then managed OAuth, because it asks the person for nothing at all. Then self-registering OAuth,
- * which asks nobody for anything: the client registers itself at consent time. Then a scheme whose
- * secret the person already holds. What is left wants an OAuth client registered by whoever runs
- * this deployment, and there is nowhere here to put one, so it is named rather than attempted.
+ * Then managed OAuth, because it asks the person for nothing at all — and MANAGED OAUTH IS READ
+ * RATHER THAN COUNTED, which is the difference between a consent and a dead end. This tested the
+ * LENGTH of the managed list, so a list holding any word at all became `consent`: the app got a
+ * Composio-managed config and a person got sent to a link mint for a scheme with no page behind it.
+ * {@link REDIRECTING_SCHEMES} is the vendor's own answer to which words have one.
+ *
+ * Then self-registering OAuth, which asks nobody for anything: the client registers itself at
+ * consent time. Then a scheme whose secret the person already holds. What is left wants an OAuth
+ * client registered by whoever runs this deployment, and there is nowhere here to put one, so it is
+ * named rather than attempted.
+ *
+ * AND "UNSUPPORTED" IS A VERDICT RATHER THAN A PLACE TO PUT WHAT COULD NOT BE READ. `routes.ts`
+ * hides an unsupported app from the picker, and the enable route answers its `reason` — so a row
+ * whose shape this file could not read used to leave the catalogue silently, under a sentence
+ * telling an administrator the app wants an OAuth application when nothing here had established
+ * that. Every unreadable shape now refuses, which stops the whole catalogue for the reason
+ * {@link appOf} gives at length: one refusal an operator can act on is worth more than several
+ * hundred rows, one of which is a guess.
  */
 export function connectionOf(row: VendorToolkit): BrokerConnection {
-  if (row.no_auth === true) return { kind: "no-auth" };
-
   /*
    * THE APP IS NAMED OFF THE ROW RATHER THAN HANDED IN, because a refusal out of {@link labelsOf}
    * travels up through {@link appOf} and onto an operator's page, where "this app" is a sentence
@@ -778,7 +843,13 @@ export function connectionOf(row: VendorToolkit): BrokerConnection {
     row.composio_managed_auth_schemes,
     `the authentication schemes Composio holds ${at}'s own credentials for`,
   );
-  if (managed.length > 0) return { kind: "consent" };
+  const flagged = flagOf(row.no_auth, `whether ${at} needs authentication`);
+
+  if (flagged || offered.includes(NO_AUTH_SCHEME)) return { kind: "no-auth" };
+
+  if (managed.some((scheme) => REDIRECTING_SCHEMES.includes(scheme))) {
+    return { kind: "consent" };
+  }
   if (offered.includes("DCR_OAUTH")) return { kind: "self-registering" };
 
   const field = offered
@@ -788,10 +859,17 @@ export function connectionOf(row: VendorToolkit): BrokerConnection {
     )[0];
   if (field) return { kind: "fields", authScheme: field };
 
+  /*
+   * THE SENTENCE NAMES WHAT WAS ACTUALLY PUBLISHED, INCLUDING THE MANAGED WORDS NOTHING ELSE READS.
+   * A managed list of schemes that do not redirect is now the commonest way to reach this branch,
+   * and a reason built from `auth_schemes` alone would tell an administrator the app published
+   * nothing — about a row that published something this deployment simply cannot drive.
+   */
+  const published = [...new Set([...offered, ...managed])];
   return {
     kind: "unsupported",
-    reason: offered.length
-      ? `${offered.join(", ")} needs an OAuth application registered by whoever runs this deployment, and this deployment holds no place to put its own OAuth client for a brokered app.`
+    reason: published.length
+      ? `${published.join(", ")} needs an OAuth application registered by whoever runs this deployment, and this deployment holds no place to put its own OAuth client for a brokered app.`
       : "Composio published no authentication scheme for this app, so there is no flow this deployment could run, and its own OAuth client is not something this deployment can register.",
   };
 }
@@ -3529,9 +3607,31 @@ export function buildComposioClient(
           `the connection modes ${toolkit} publishes`,
         );
       }
-      const mode = listed.find(
-        (candidate: { mode?: unknown }) => candidate?.mode === authScheme,
-      );
+
+      /*
+       * AND A MODE THAT IS NOT A DOCUMENT IS THE SAME TWO ANSWERS ONE STEP FURTHER IN. `("API_KEY")
+       * .mode` is `undefined` rather than a throw, so an entry that stopped being an object compared
+       * unequal to the recorded scheme exactly as an app that had dropped it would, and the refusal
+       * below sent an administrator to remove the app and add it again — against a list whose next
+       * reading is the same unreadable shape, so the re-add records the same word and the app comes
+       * back refusing identically.
+       *
+       * AN ENTRY THAT IS ABSENT IS NOT THAT AND IS NOT REFUSED: a hole in the list is a mode the
+       * vendor left out, which is simply not the mode being looked for, and the sentence below is
+       * the true one about it.
+       */
+      const mode = listed
+        .map((candidate: unknown, index: number) => {
+          if (candidate === undefined || candidate === null) return null;
+          if (typeof candidate !== "object" || Array.isArray(candidate)) {
+            throw unreadableForm(
+              candidate,
+              `way ${index + 1} of connecting ${toolkit}`,
+            );
+          }
+          return candidate as { mode?: unknown; fields?: unknown };
+        })
+        .find((candidate) => candidate?.mode === authScheme);
       /*
        * THE REMEDY IS AN ADMINISTRATOR'S BECAUSE THE RECORDED SCHEME IS ONLY THEIRS TO REWRITE.
        * Nothing a person pressing Connect can do changes which mode this app was enabled as, and
@@ -3540,7 +3640,7 @@ export function buildComposioClient(
        * the same disagreement one layer further in. Removing the app and adding it again is the one
        * path that records the scheme afresh, so it is the one named.
        */
-      if (mode === undefined) {
+      if (mode === undefined || mode === null) {
         throw new BrokerRefusalError(
           `Composio no longer publishes a ${authScheme} connection for ${toolkit}, and ${toolkit}'s authorization config here was created as ${authScheme}, so there is nothing to ask this person for — and an empty form is a box they cannot fill in and a connection carrying no credential at all. An administrator removing the app on its Plugins page and adding it again is what records the scheme Composio publishes for it now.`,
         );

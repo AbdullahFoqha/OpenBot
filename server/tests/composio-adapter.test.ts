@@ -5554,6 +5554,97 @@ describe("the fields an app asks a person to fill in", () => {
       },
     ]);
   });
+
+  /**
+   * "COMPOSIO NO LONGER PUBLISHES THIS MODE" IS A VERDICT, AND AN UNREADABLE ANSWER DOES NOT
+   * SUPPORT IT.
+   *
+   * The refusal above is a claim about the APP — the scheme recorded at enable time is one Composio
+   * has since stopped offering — and its remedy is an administrator removing the app and adding it
+   * again, which rewrites the recorded scheme from what the catalogue says today. Reached out of a
+   * detail whose shape this deployment could not read, that claim is unfounded and the remedy is
+   * work that changes nothing: the next answer is the same shape, so the app is removed, re-added,
+   * and refuses identically. Every shape below is PRESENT and is not what it is declared to be, and
+   * each one used to arrive as `modes = []`, `mode === undefined`, or an empty form.
+   */
+  const UNREADABLE_DETAILS: { what: string; detail: unknown }[] = [
+    { what: "no detail document at all", detail: null },
+    { what: "a detail that is not an object", detail: "API_KEY" },
+    {
+      what: "auth_config_details that is not a list",
+      detail: { auth_config_details: "API_KEY" },
+    },
+    {
+      what: "a mode that is not an object",
+      detail: { auth_config_details: ["API_KEY"] },
+    },
+    {
+      what: "fields that are not an object",
+      detail: { auth_config_details: [{ mode: "API_KEY", fields: "none" }] },
+    },
+    {
+      what: "an initiation section that is not an object",
+      detail: {
+        auth_config_details: [
+          { mode: "API_KEY", fields: { connected_account_initiation: 7 } },
+        ],
+      },
+    },
+    {
+      what: "a required list that is not a list",
+      detail: {
+        auth_config_details: [
+          {
+            mode: "API_KEY",
+            fields: {
+              connected_account_initiation: {
+                required: "generic_api_key",
+                optional: [],
+              },
+            },
+          },
+        ],
+      },
+    },
+    {
+      what: "an optional list that is not a list",
+      detail: {
+        auth_config_details: [
+          {
+            mode: "API_KEY",
+            fields: {
+              connected_account_initiation: {
+                required: [],
+                optional: { base_url: "" },
+              },
+            },
+          },
+        ],
+      },
+    },
+  ];
+
+  for (const shape of UNREADABLE_DETAILS) {
+    test(`${shape.what} is refused as a shape rather than as a withdrawn mode`, async () => {
+      const { broker } = buildComposioClient(
+        fakeVendor({
+          toolkits: { retrieve: async () => shape.detail },
+        }),
+      );
+
+      const refusal = await failureOf(
+        broker.connectionFields({ toolkit: "drifted", authScheme: "API_KEY" }),
+      );
+
+      expect(refusal).toBeInstanceOf(BrokerRefusalError);
+      expect(refusal.message).not.toMatch(A_CRASH);
+      expect(refusal.message).toMatch(/drifted/);
+      // The remedy is a package upgrade rather than an administrator re-adding the app, because
+      // removing and adding it again meets the same shape and refuses the same way.
+      expect(refusal.message).toMatch(/@composio\/core/);
+      expect(refusal.message).not.toMatch(/no longer publishes/);
+    });
+  }
 });
 
 /**
