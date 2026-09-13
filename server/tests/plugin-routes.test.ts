@@ -635,6 +635,12 @@ function directoryApp(
    * succeeded.
    */
   enable: (() => Promise<never>) | null = null,
+  /**
+   * How the read of what is already enabled fails, for the case that is about that read. Null is
+   * the store that works. It sits outside the `try` the vendor call is wrapped in, which is what
+   * made it the one store call on this route that nothing answered for.
+   */
+  failServerUrls: (() => Promise<never>) | null = null,
 ) {
   const added: Array<{
     slug: string;
@@ -645,7 +651,8 @@ function directoryApp(
   const store = {
     // Every read the plugins surface makes on its way to the route under test. The directory asks
     // for urls and is handed urls: the rows below carry an id as well, and the route never sees it.
-    serverUrls: async () => servers.map((server) => server.url),
+    serverUrls: async () =>
+      failServerUrls ? failServerUrls() : servers.map((server) => server.url),
     listSkills: async () => [],
     listGrants: async () => [],
     addBrokeredApp: async (input: {
@@ -2562,5 +2569,252 @@ describe("re-checking a brokered connection", () => {
     expect(response.status).toBe(502);
     expect(JSON.parse(body).error).toBe("Invalid API key provided.");
     expect(body).not.toContain("req_a_trace_id_nobody_should_read");
+  });
+});
+
+/**
+ * What an administrator is told when removing a server did not finish.
+ *
+ * CRITERION. `DELETE /servers/:id` answers every refusal its store call can raise, in the words
+ * that refusal carries, and never as the framework's bodyless 500.
+ *
+ * REASON. The route mapped nothing at all, and what it is calling is the loudest method in the
+ * store: `removeServer` revokes every person's brokered account at Composio BEFORE it deletes a
+ * row, deliberately, so that a failure leaves access dead-and-present rather than live-and-
+ * unreachable. Every one of those refusals is authored — a partial revoke naming how many configs
+ * went, an auth-config listing Composio described unreadably — and every one of them reached
+ * Hono's default handler instead, where a body is not a thing that exists. So the administrator
+ * who had just half-withdrawn an app from everybody was told nothing whatever, on the one act in
+ * this file whose half-done state somebody has to go and finish by hand.
+ */
+function removalApp(
+  removeServer: () => Promise<never>,
+  role: "admin" | "user" = "admin",
+) {
+  const store = {
+    removeServer,
+    // Every read the plugins surface makes on its way to the route under test.
+    listServers: async () => [],
+    listSkills: async () => [],
+    listGrants: async () => [],
+  };
+
+  const app = createApp(
+    loadConfig(testEnvironment()),
+    {
+      handler: () => new Response(null, { status: 204 }),
+      api: { getSession: async () => ({ user: ADMIN }) },
+    } as never,
+    { rolesForUser: async () => [role] },
+    // Positions 4-14 are the other stores; `store` is 15, pluginStore.
+    ...(Array.from({ length: 11 }) as never[]),
+    store as never,
+  );
+
+  return () =>
+    app.request("http://openbot.test/api/plugins/servers/composio-slack", {
+      method: "DELETE",
+    });
+}
+
+describe("removing a server that could not be fully withdrawn", () => {
+  test("a partial revoke is the broker's own sentence, not a bodyless 500", async () => {
+    /*
+     * THE HALF-DONE REMOVAL. `deleteAuthConfig` drops this deployment's own configs one at a time
+     * and reports what was left standing, because a config left behind is a live grant the removal
+     * was supposed to end. That count is the whole remedy — one of two went, so pressing Remove
+     * again asks only for what is left — and it is exactly what an unmapped throw threw away.
+     *
+     * 503 with the refusal's own words, because a refusal this deployment authored is not a third
+     * party being down: Composio answered, this deployment read the answer and decided.
+     */
+    const sentence =
+      "Composio removed 1 of this deployment's 2 authorization configs for slack and the app has " +
+      "not been fully withdrawn. Removing it again asks only for what is left.";
+    const response = await removalApp(async () => {
+      throw new BrokerRefusalError(sentence);
+    })();
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: sentence });
+  });
+
+  test("an unreadable auth-config listing reaches the administrator too", async () => {
+    // The other loud refusal on this path, and the one whose remedy is NOT the button that was
+    // just pressed: a row Composio described with no id and no name will be exactly as unreadable
+    // next time, so the sentence names the dashboard instead. A 500 named neither.
+    const sentence =
+      "Composio described 1 of its authorization configs for slack in a way this deployment " +
+      "cannot read, so whether one of them is already its own is not something it can tell.";
+    const response = await removalApp(async () => {
+      throw new BrokerRefusalError(sentence);
+    })();
+
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      "cannot read",
+    );
+  });
+
+  test("a contradiction in this deployment's own rows is a 409 in its own words", async () => {
+    /*
+     * `accessFor` is asked which app this row stands for before anything is revoked, and a row
+     * claiming to be two servers at once raises there. It is on the `isDeploymentFault` shelf, so
+     * it is answered one branch above the broker mapping — and this route is admin-gated, which is
+     * what makes showing that sentence here the right answer.
+     */
+    const sentence =
+      "composio-slack resolves to a brokered credential with no app in its url, so there is " +
+      "nothing to ask what it offers.";
+    const response = await removalApp(async () => {
+      throw new PluginInvariantError(sentence);
+    })();
+
+    expect(response.status).toBe(409);
+    /*
+     * THE BODY WHOLE, which is what pins the ordering. Move the broker mapping above the shelf and
+     * this same throw comes back 502 saying "neither this deployment nor Composio said why" about a
+     * disagreement between two of this deployment's own columns — sending an operator to check a
+     * key that is fine, over a row only they can correct. Nothing else on this route pins that
+     * sequence.
+     */
+    expect(await response.json()).toEqual({ error: sentence });
+  });
+
+  test("a failure nobody explained says what to press, and is logged", async () => {
+    /*
+     * The last class, and the one the default handler used to serve well: a bare `Error` carries
+     * no sentence from either side, and an unhandled throw at least put the stack where an
+     * operator could find it. Catching it fixes the answer and would silence the log, so the log
+     * is kept — the same shape and the same restraint the enable route's is held to.
+     *
+     * The sentence blames neither side, because this call path is half this deployment's own
+     * writes and half the broker's, and which half failed is precisely what nobody said.
+     */
+    const said: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      said.push(args.map(String).join(" "));
+    };
+
+    try {
+      const response = await removalApp(async () => {
+        throw Object.assign(new Error("fetch failed"), {
+          apiKey: "ak_a_key_nobody_should_read",
+        });
+      })();
+
+      expect(response.status).toBe(502);
+      const refusal = ((await response.json()) as { error: string }).error;
+      expect(refusal).toContain("Remove");
+      // Never the thrown object's own text: on this path it is as likely to be a stack frame as a
+      // sentence, and the console line is what carries it to an operator.
+      expect(refusal).not.toContain("fetch failed");
+    } finally {
+      console.error = realError;
+    }
+
+    const line = said.find((said) => said.includes("mcp-server-not-removed"));
+    expect(line).toBeDefined();
+    expect(line).toContain("composio-slack");
+    expect(line).toContain("fetch failed");
+    expect(line).not.toContain("ak_a_key_nobody_should_read");
+  });
+
+  test("somebody who is not an administrator never reaches the store", async () => {
+    let asked = false;
+    const response = await removalApp(async () => {
+      asked = true;
+      throw new Error("unreachable");
+    }, "user")();
+
+    expect(response.status).toBe(403);
+    expect(asked).toBe(false);
+  });
+});
+
+describe("enabling an app whose row was written before the failure", () => {
+  test("a row that cannot be read back is not Composio's fault", async () => {
+    /*
+     * WHERE THIS ARRIVES FROM. `addBrokeredApp` creates the auth config, inserts the row and
+     * writes its `configuration.changed` trail entry, and only THEN refreshes and reads the row
+     * back out of `listServers` — raising {@link CatalogueEntryUnknownError} when it is not
+     * there. Every one of those steps has already committed by that point.
+     *
+     * Unmapped, it fell through to the broker tail, which said "Slack could not be enabled, and
+     * Composio said nothing about why. Try again, and check this deployment's Composio key" — a
+     * 502 that is wrong three times over: the app WAS enabled, Composio was never involved in the
+     * step that failed, and the administrator was sent to check a key that is fine while a row
+     * they now hold went unmentioned.
+     *
+     * This is also the one refusal the three sibling add routes all map and this one did not.
+     */
+    const { app } = directoryApp(undefined, "admin", [], async () => {
+      throw new CatalogueEntryUnknownError("composio-slack");
+    });
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "slack" }),
+      },
+    );
+
+    // 409 rather than the 400 its siblings give this class: there, an unknown key is a caller
+    // naming a server this deployment will not connect to. Here the row was written and this
+    // deployment cannot see it, which is two of its own reads disagreeing.
+    expect(response.status).toBe(409);
+    const refusal = ((await response.json()) as { error: string }).error;
+    // What actually happened, which is the half the administrator has to act on: the app is added.
+    expect(refusal).toContain("was added");
+    // And none of the vendor blame the generic tail carries.
+    expect(refusal).not.toContain("could not be enabled");
+    expect(refusal).not.toContain("Composio said nothing about why");
+    expect(refusal).not.toContain("COMPOSIO_API_KEY");
+  });
+});
+
+describe("the directory read that is not the vendor's", () => {
+  test("a failed query on what is already enabled is a 409, not a 500", async () => {
+    /*
+     * THE CALL OUTSIDE THE `try`. This route wraps `listApps` — the vendor half — and then reads
+     * `serverUrls` to mark which apps are already enabled, outside any mapping at all. A query
+     * this database refused there left an administrator with the framework's bodyless 500 on the
+     * one screen where a Composio key has just been set, which is the reading most likely to send
+     * them back to the key over a fault that has nothing to do with it.
+     *
+     * The same 409 and the same sentence its sibling admin routes give the shelf, which is the
+     * criterion those routes state: every admin route whose store call can reach a fault on the
+     * `isDeploymentFault` shelf answers with the sentence rather than leaving it to the default
+     * handler.
+     */
+    const { app } = directoryApp(undefined, "admin", [], null, async () => {
+      throw Object.assign(
+        new Error(
+          'Failed query: select "url" from "mcp_servers" params: composio',
+        ),
+        {
+          query: 'select "url" from "mcp_servers"',
+          params: ["composio"],
+          cause: new Error("canceling statement due to statement timeout"),
+        },
+      );
+    });
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+    );
+
+    expect(response.status).toBe(409);
+    const refusal = ((await response.json()) as { error: string }).error;
+    expect(refusal).toContain("canceling statement due to statement timeout");
+    // And none of the statement, for the reason the refresh route's own case gives: an
+    // administrator is entitled to the reason, not to the dump.
+    expect(refusal).not.toContain("Failed query");
+    expect(refusal).not.toContain("mcp_servers");
+    // Never the vendor sentence: Composio answered this request perfectly well.
+    expect(refusal).not.toContain("COMPOSIO_API_KEY");
   });
 });

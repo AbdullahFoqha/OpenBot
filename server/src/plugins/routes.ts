@@ -424,11 +424,75 @@ export function createPluginRoutes(
     }
   });
 
+  /**
+   * Take a server away, and answer for a removal that did not finish.
+   *
+   * CRITERION. The same one the add routes above state, on the route that needed it most: every
+   * refusal `removeServer` can raise comes back as a body naming what was left standing, rather
+   * than reaching the framework's default handler.
+   *
+   * REASON. THIS MAPPED NOTHING AT ALL, and what it calls is the loudest method in the store.
+   * `removeServer` withdraws every person's brokered account at Composio and drops this
+   * deployment's auth configs BEFORE it deletes the row, deliberately — the argument is made
+   * there, and it ends "WHICH MAKES THE FAILURE LOUD. Nothing is caught around the revokes". The
+   * refusals it raises are written for exactly this reader: how many of this deployment's configs
+   * went and how many are still standing, or a config row Composio described with no id and no
+   * name. All of it reached Hono's default handler, which answers a bodyless 500, so an
+   * administrator who had just half-withdrawn an app from everybody was told nothing whatever —
+   * on the one act in this file whose half-done state somebody has to go and finish by hand.
+   * `PluginInvariantError` out of `accessFor` arrived the same way, and it is the one that names
+   * which of this deployment's own rows is wrong.
+   *
+   * THE SHELF FIRST, THEN THE BROKER, which is the order the enable route below pins and for its
+   * reason: a contradiction between two of this deployment's columns is not Composio being down,
+   * and answering it through the broker mapping would send an operator to check a key that is
+   * fine. This route is `requireAdmin`, which is what makes showing that sentence here safe.
+   *
+   * AND THE GENERIC SENTENCE BLAMES NEITHER SIDE. Half of what this call path does is local — the
+   * vault revokes, the trail writes, the deletes — and half of it is the broker, so a failure that
+   * neither `brokerSentence` nor `vendorSentence` put words to is one where which half failed is
+   * precisely what nobody said. What a reader needs is the button, and the store's own order is
+   * what makes pressing it safe: nothing here is deleted until the withdrawals have been asked
+   * for, so a second press asks only for what is left.
+   */
   routes.delete("/servers/:id", requireUser, async (context) => {
     const forbidden = requireAdmin(context);
     if (forbidden) return forbidden;
 
-    await store.removeServer(context.req.param("id"), actorEmail(context));
+    const serverId = context.req.param("id");
+    try {
+      await store.removeServer(serverId, actorEmail(context));
+    } catch (error) {
+      if (isDeploymentFault(error)) {
+        return context.json({ error: deploymentFaultSentence(error) }, 409);
+      }
+      /*
+       * WHAT THE MAPPING COST, PUT BACK, exactly as the enable route below does it. An unhandled
+       * throw was a bad answer and a good log: the administrator got nothing, but the stack was
+       * printed where an operator could find it. Catching everything fixes the answer and would
+       * silence that, and the failure that needs the log most is the one left here — neither a
+       * refusal this deployment authored, which `brokerSentence` names, nor a sentence Composio
+       * wrote, which `vendorSentence` reaches for. The row, because it is the app an operator is
+       * about to be asked about, and the error stringified, never spread, logged as an object or
+       * reached into.
+       */
+      if (brokerSentence(error) === null && vendorSentence(error) === null) {
+        console.error(
+          JSON.stringify({
+            type: "mcp-server-not-removed",
+            server: serverId,
+            note: "Removing a server failed for a reason neither this deployment nor Composio put a sentence to. The administrator was answered 502 with the generic sentence, and the server row is still there.",
+            error: String(error),
+          }),
+        );
+      }
+
+      const refusal = brokerRefusal(
+        error,
+        "Removing this app did not finish, and neither this deployment nor Composio said why, so the app is still here rather than gone with grants of its own left live at the vendor. Press Remove again: every account is withdrawn at Composio before anything here is deleted, so repeating it is safe and asks only for what is left. Check this deployment's Composio key if it persists.",
+      );
+      return context.json({ error: refusal.error }, refusal.status);
+    }
     return context.json({ ok: true });
   });
 
@@ -545,8 +609,33 @@ export function createPluginRoutes(
         )
       : connectable;
 
+    /*
+     * THE ONE CALL ON THIS ROUTE THAT IS NOT THE VENDOR'S, AND IT WAS THE ONE NOTHING ANSWERED FOR.
+     *
+     * CRITERION. The same one the add routes state: every admin route whose store call can reach a
+     * fault on the `isDeploymentFault` shelf answers with the sentence rather than leaving it to
+     * the default handler.
+     *
+     * REASON. The `try` above wraps `listApps` because that is where a wrong key shows itself, and
+     * this read sat outside it with no mapping at all — so a query this database refused while
+     * marking which apps are already enabled gave an administrator the framework's bodyless 500,
+     * on the one screen where a Composio key has just been set. That is the reading most likely to
+     * send somebody back to a key that is fine, over a fault Composio had no part in. The same 409
+     * and the same sentence the sibling admin routes give the shelf; a failure that is not on it
+     * still throws, which is what keeps the stack in the log.
+     */
+    let urls: string[];
+    try {
+      urls = await store.serverUrls();
+    } catch (error) {
+      if (isDeploymentFault(error)) {
+        return context.json({ error: deploymentFaultSentence(error) }, 409);
+      }
+      throw error;
+    }
+
     const enabled = new Set(
-      (await store.serverUrls())
+      urls
         .map((url) => toolkitOf(url))
         .filter((toolkit): toolkit is string => toolkit !== null),
     );
@@ -661,9 +750,45 @@ export function createPluginRoutes(
         return context.json({ error: error.message }, 400);
       }
       // And, as on those routes, enabling refreshes before it answers, so every fault
-      // `refreshTools` raises arrives here as well.
+      // `refreshTools` raises arrives here as well. Its sentence blames nobody and names the row,
+      // which is the honest answer whichever side of the insert the fault arrived on.
       if (isDeploymentFault(error)) {
         return context.json({ error: deploymentFaultSentence(error) }, 409);
+      }
+      /*
+       * THE ONE REFUSAL THIS ROUTE CAN ONLY MEET AFTER THE ROW IS COMMITTED, and the only one its
+       * three sibling add routes map and it did not.
+       *
+       * CRITERION. A failure thrown after `addBrokeredApp` has written and audited the row is not
+       * reported as an app that was not enabled, and is not reported as Composio's doing.
+       *
+       * WHERE IT ARRIVES FROM. `addBrokeredApp` creates the auth config, inserts the row and files
+       * its `configuration.changed` entry, and only THEN refreshes and reads the row back out of
+       * `listServers` — raising this when it is not there, as `requireServer` does one call
+       * deeper. Every one of those steps has already committed by then.
+       *
+       * WHAT IT USED TO BE ANSWERED WITH. Nothing caught it, so it fell through to the broker tail
+       * below and an administrator was told "Slack could not be enabled, and Composio said nothing
+       * about why. Try again, and check this deployment's Composio key if it persists." That is
+       * wrong three times over: the app WAS enabled, Composio had no part in the step that failed,
+       * and the one thing the reader now holds — a row on their Plugins page — went unmentioned
+       * while they were sent to check a key that is fine.
+       *
+       * 409 RATHER THAN THE 400 ITS SIBLINGS GIVE THIS CLASS, because it is not the same fact
+       * wearing the same class. On the add routes above, an unknown key is a caller naming a
+       * server this deployment will not connect to, which is a malformed request. Here the row was
+       * written and this deployment cannot see it: two of its own reads disagree, and the request
+       * cannot be answered until one of them changes — the reading the refresh route's own 409
+       * spells out. The message is written here rather than passed through, because
+       * {@link CatalogueEntryUnknownError}'s own sentence is the one for the other case.
+       */
+      if (error instanceof CatalogueEntryUnknownError) {
+        return context.json(
+          {
+            error: `${app.name} was added, and then could not be read back out of this deployment's own servers — so the row and its trail entry stand, and what is on this page may be missing it. Reload the Plugins page: if ${app.name} is there it is enabled and there is nothing to redo, and if it is not, adding it again is safe.`,
+          },
+          409,
+        );
       }
       /*
        * THE SAME MAPPING THE DIRECTORY READ ABOVE MAKES, FOR THE SAME REASON, and its absence here
@@ -689,6 +814,13 @@ export function createPluginRoutes(
        * the console line and the support request can be matched up; and the error stringified,
        * never spread, logged as an object or reached into. No key, no vendor response, no request
        * body.
+       *
+       * AND THE NAME ON IT IS TRUE OF EVERY FAILURE THAT STILL REACHES IT. The two branches above
+       * take the whole of what `addBrokeredApp` can raise once the row is committed — the shelf,
+       * and the read-back that could not find it — so what is left arrives from the steps before
+       * the insert, where nothing was written and the app really was not enabled. The generic
+       * sentence below names Composio for the same reason: the one call in front of the insert is
+       * `ensureAuthConfig`, which is a call to the vendor.
        */
       if (brokerSentence(error) === null && vendorSentence(error) === null) {
         console.error(
@@ -1597,85 +1729,123 @@ export function createPluginRoutes(
     });
     if (!connect?.publicUrl) return context.redirect(failed);
 
-    const code = context.req.query("code");
-    const state = await readConnectState(
-      context.req.query("state") ?? "",
-      connect.encryptionKey,
-    );
-    if (!code || !state) return context.redirect(failed);
-
     /*
-     * Is the person in the state still somebody here?
+     * EVERY WAY OUT OF THIS HANDLER IS A REDIRECT, AND THE `try` IS WHAT MAKES THAT TRUE.
      *
-     * Asked here, before the code is redeemed and before anything is written, because a state is
-     * good for ten minutes and access can end inside them. Removing somebody deny-lists their
-     * address, deletes their sessions and retires the credentials they had already granted — and
-     * none of that reaches a consent already in flight at the vendor. Without this, that consent
-     * comes back and writes a fresh, live refresh token belonging to somebody who no longer has
-     * access, which nothing downstream will ever revoke because nothing knows it was created.
+     * CRITERION. No request to this endpoint ends without a `Location`.
      *
-     * The same anonymous failure as an unreadable state. Whether an address is deny-listed is not a
-     * fact this endpoint owes an unauthenticated caller.
-     */
-    if (!(await connect.personHasAccess(state.userId))) {
-      return context.redirect(failed);
-    }
-
-    const entry = catalogueEntry(state.serverId);
-    if (entry?.auth.kind !== "user-oauth") return context.redirect(failed);
-
-    const client = await store.oauthClientFor(state.serverId);
-    if (!client) return context.redirect(failed);
-
-    const grant = await redeemAuthorizationCode({
-      tokenUrl: entry.auth.tokenUrl,
-      clientId: client.clientId,
-      clientSecret: client.clientSecret,
-      code,
-      redirectUri: redirectUriFor(connect.publicUrl),
-      verifier: state.verifier,
-    });
-    if (!grant) return context.redirect(failed);
-
-    /*
-     * The last thing that can fail, answered the same way as everything before it.
+     * REASON. The header above says every failure ends the same way, and that was true of
+     * every failure this handler ASKED for and of none of the failures its questions could
+     * raise. `personHasAccess` reaches the people store and `oauthClientFor` reaches the
+     * vault, and either of them throwing put somebody who had just consented at another
+     * company on a bodyless 500 with no `Location` at all — no page, no notice, nothing to
+     * press, and a browser left on this API's origin, which locally serves no pages at all.
+     * It is the exact answer this route exists to make impossible: `redeemAuthorizationCode`
+     * guards its own `fetch` against it in as many words, and the vault write below was given
+     * a `catch` for it — one call at a time, which is the shape that keeps leaving one out.
      *
-     * A vault that will not take the grant is this deployment's problem, not the person's, and they
-     * have already done their part at the vendor. Unhandled, this threw past the handler and gave
-     * them the bare 500 that every other failure on this route was written to avoid, on the one
-     * path where they had most reason to think it had worked.
+     * SO IT IS THE WHOLE BODY RATHER THAN EACH CALL. A blanket `catch` is a promise about the
+     * route; a per-call one is a promise about the calls somebody remembered. Nothing is
+     * written before the vault, so a failure anywhere above it leaves the same nothing behind
+     * as an unreadable state does, and the person is told the same sentence either way.
      *
-     * Told, because unlike the refusals above this one is nobody's fault but ours, and the person's
-     * sentence deliberately says nothing about which failure it was. The refresh token is not
-     * logged: it is the one thing here worth stealing, and the row it belonged to was never written.
+     * THE PERSON LEARNS NOTHING NEW FROM IT, deliberately, for the reason the header gives:
+     * there is no useful distinction here between a forged state and a store that would not
+     * answer, and spelling out which is which tells anybody probing this endpoint how far they
+     * got. The console is where the difference survives, and it carries the error stringified
+     * and nothing else — not the state, which names a person, and not the code, which is one
+     * redemption away from a refresh token.
      */
     try {
-      await store.recordConnection({
-        serverId: state.serverId,
-        userId: state.userId,
-        refreshToken: grant.refreshToken,
-        scope: grant.scope,
+      const code = context.req.query("code");
+      const state = await readConnectState(
+        context.req.query("state") ?? "",
+        connect.encryptionKey,
+      );
+      if (!code || !state) return context.redirect(failed);
+
+      /*
+       * Is the person in the state still somebody here?
+       *
+       * Asked here, before the code is redeemed and before anything is written, because a state is
+       * good for ten minutes and access can end inside them. Removing somebody deny-lists their
+       * address, deletes their sessions and retires the credentials they had already granted — and
+       * none of that reaches a consent already in flight at the vendor. Without this, that consent
+       * comes back and writes a fresh, live refresh token belonging to somebody who no longer has
+       * access, which nothing downstream will ever revoke because nothing knows it was created.
+       *
+       * The same anonymous failure as an unreadable state. Whether an address is deny-listed is not a
+       * fact this endpoint owes an unauthenticated caller.
+       */
+      if (!(await connect.personHasAccess(state.userId))) {
+        return context.redirect(failed);
+      }
+
+      const entry = catalogueEntry(state.serverId);
+      if (entry?.auth.kind !== "user-oauth") return context.redirect(failed);
+
+      const client = await store.oauthClientFor(state.serverId);
+      if (!client) return context.redirect(failed);
+
+      const grant = await redeemAuthorizationCode({
+        tokenUrl: entry.auth.tokenUrl,
+        clientId: client.clientId,
+        clientSecret: client.clientSecret,
+        code,
+        redirectUri: redirectUriFor(connect.publicUrl),
+        verifier: state.verifier,
       });
+      if (!grant) return context.redirect(failed);
+
+      /*
+       * The last thing that can fail, answered the same way as everything before it.
+       *
+       * A vault that will not take the grant is this deployment's problem, not the person's, and they
+       * have already done their part at the vendor. Unhandled, this threw past the handler and gave
+       * them the bare 500 that every other failure on this route was written to avoid, on the one
+       * path where they had most reason to think it had worked.
+       *
+       * Told, because unlike the refusals above this one is nobody's fault but ours, and the person's
+       * sentence deliberately says nothing about which failure it was. The refresh token is not
+       * logged: it is the one thing here worth stealing, and the row it belonged to was never written.
+       */
+      try {
+        await store.recordConnection({
+          serverId: state.serverId,
+          userId: state.userId,
+          refreshToken: grant.refreshToken,
+          scope: grant.scope,
+        });
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            type: "oauth-connection-not-recorded",
+            serverId: state.serverId,
+            note: "A person consented and the grant could not be stored. They were sent back to Settings with a failure and will have to connect again.",
+            error: String(error),
+          }),
+        );
+        return context.redirect(failed);
+      }
+
+      return context.redirect(
+        connectedAccountsUrlFor(
+          connect.appUrl,
+          { serverId: state.serverId },
+          // From the sealed state, so the destination is one this deployment chose, not the browser.
+          state.returnTo,
+        ),
+      );
     } catch (error) {
       console.error(
         JSON.stringify({
-          type: "oauth-connection-not-recorded",
-          serverId: state.serverId,
-          note: "A person consented and the grant could not be stored. They were sent back to Settings with a failure and will have to connect again.",
+          type: "oauth-callback-failed",
+          note: "A person came back from a consent screen and a check on this route raised instead of answering. They were sent back to Settings with a failure, nothing was written, and they will have to connect again.",
           error: String(error),
         }),
       );
       return context.redirect(failed);
     }
-
-    return context.redirect(
-      connectedAccountsUrlFor(
-        connect.appUrl,
-        { serverId: state.serverId },
-        // From the sealed state, so the destination is one this deployment chose, not the browser.
-        state.returnTo,
-      ),
-    );
   });
 
   /**
