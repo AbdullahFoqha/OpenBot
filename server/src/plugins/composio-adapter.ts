@@ -1926,6 +1926,47 @@ export type ComposioVendor = {
       options: { callbackUrl: string },
     ): Promise<{ redirectUrl?: unknown }>;
     /**
+     * Create one person's account from the secret they typed, WITHOUT a consent screen anywhere.
+     *
+     * THE RAW CLIENT FOR THE REASON BOTH DELETES ARE RAW, and a sharper one. `@composio/core`'s
+     * `connectedAccounts.initiate` is the wrapper over this endpoint, and the endpoint under it is
+     * retired for the managed-auth path — it throws
+     * `ComposioLegacyConnectedAccountsEndpointRetiredError` (`@composio/core` 0.18.1,
+     * `src/models/ConnectedAccounts.ts:146-160`) — while `link`, which replaced it, mints a consent
+     * url and has nowhere to put a typed value at all. What this flow needs is neither: the person
+     * has already typed their credential into a form here, so there is no screen to send them to
+     * and nothing to come back from. `@composio/client`'s own create takes the state directly
+     * (`0.1.0-alpha.76`, `resources/connected-accounts.d.ts:33`, `:7502-7511`), which is the whole
+     * of what this call is.
+     *
+     * NO `validate_credentials`, AND ITS ABSENCE IS DELIBERATE RATHER THAN AN OVERSIGHT. The
+     * parameter exists on the same body and the vendor marks it EXPERIMENTAL (`:7505-7509`).
+     * Whether a typed key actually works is settled here by making a call with it rather than by
+     * asking Composio to grade it, because a connection Composio accepts is not a connection that
+     * works: a wrong value comes back `ACTIVE`.
+     *
+     * `id` AND `status` READ AS `unknown`, for the reason every other vendor field in this
+     * projection is. The generated client declares both as required
+     * (`ConnectedAccountCreateResponse`, `:121-146`), which is the schema's promise about what
+     * Composio means to send rather than a fact about what arrived — and the id is the one field
+     * this whole call exists to answer, so a missing one is a refusal here rather than an
+     * `undefined` handed on as the account somebody is meant to be able to undo.
+     */
+    create(body: {
+      auth_config: { id: string };
+      /**
+       * The person, and the secret they typed, in the shape the vendor's own builder assembles.
+       *
+       * `state` IS `unknown` BECAUSE WHAT GOES IN IT IS THE APP'S QUESTION RATHER THAN THIS FILE'S
+       * ANSWER. The generated client declares it as a fourteen-member union keyed on the scheme,
+       * each member's `val` carrying whatever fields that app publishes plus `[k: string]: unknown`
+       * (`@composio/client` 0.1.0-alpha.76, `resources/connected-accounts.d.ts:7551`, `:8083-8086`)
+       * — so naming a shape here would be this file asserting which boxes an app asks for, which is
+       * exactly the thing {@link ComposioBroker.connectionFields} exists to go and ask.
+       */
+      connection: { user_id: string; state: unknown };
+    }): Promise<{ id?: unknown; status?: unknown }>;
+    /**
      * Delete one connected account, and ask for the grant behind it to be revoked too.
      *
      * WITHOUT THE FLAG THIS CALL DOES NOT REVOKE ANYTHING, and that is the vendor's own description
@@ -3367,15 +3408,127 @@ export function buildComposioClient(
               `${toolkit} asks for ${textOf(row?.displayName) ?? "a value"} as ${sent(row?.type)}, which cannot be filled in here. Connecting this app is not something this deployment can offer yet.`,
             );
           }
+          /*
+           * THE TRIMMED VALUE IS WHAT REACHES THE FORM, because the trimmed value is what was
+           * judged. This tested `textOf(row.default)` and emitted `String(row.default)`, so a
+           * default Composio padded passed the test on its trimmed form and arrived in the box with
+           * its padding — the same disagreement between guard and return that {@link vendorSentence}
+           * was corrected for, one field away from a value somebody then submits as typed.
+           */
+          const suggested = textOf(row.default);
           return {
             name: String(row.name),
             label: textOf(row.displayName) ?? String(row.name),
             help: textOf(row.description) ?? "",
             required: row.required === true,
             secret: row.is_secret === true,
-            ...(textOf(row.default) ? { default: String(row.default) } : {}),
+            ...(suggested === null ? {} : { default: suggested }),
           };
         });
+    },
+
+    /**
+     * One person's account made from what they typed, and the ONE call here that drops its error.
+     *
+     * THIS IS THE SINGLE PLACE THIS FILE'S CAUSE-CARRYING RULE REVERSES, AND IT SAYS SO ON PURPOSE.
+     * The rule the module comment states and every other path keeps is that a vendor error is never
+     * logged and always carried as `cause`, precisely because the object holds the request it was
+     * made for and whoever is reading a log rather than a page deserves it. On every other call
+     * that request is a link mint or a delete. On this one it is somebody's API key: the body below
+     * carries the value they pasted into the form, and an `APIError` out of a create carries the
+     * body. So the catch reads the vendor's sentence through the one door {@link vendorSentence}
+     * owns and then drops the object entirely — not attached, not rethrown, nothing left for a
+     * handler further out to serialize.
+     *
+     * WHAT THAT COSTS IS THE DIAGNOSTIC TRAIL ON THE FLOW PEOPLE MOST OFTEN MISTYPE, AND THE COST IS
+     * ACCEPTED KNOWINGLY. A key pasted with a newline, a token from the wrong workspace, a secret
+     * for the staging tenant — these are the ordinary failures here, and this leaves nothing behind
+     * about any of them. What an operator gets instead is Composio's own sentence and the request
+     * id inside it, which is what Composio's dashboard searches on: enough to ask the vendor about
+     * that attempt, and not enough to rebuild it here. A `cause` that made the next mistyped key
+     * easier to explain would put every correctly typed one in a log for as long as the log is kept.
+     *
+     * NOT {@link askVendor}, WHICH IS THE SAME DECISION SEEN FROM THE OTHER SIDE. That function is
+     * what every other vendor call in this file goes through, and every refusal it builds attaches
+     * the original — see {@link vendorRefusal}, where the `cause` is the point. Routing this call
+     * through it would be the rule applying here by default, which is the one place it must not.
+     *
+     * NO VERIFICATION HERE, AND THE ABSENCE IS NOT AN OVERSIGHT. Composio does not grade a submitted
+     * key: a connection created with an obviously wrong value comes back `ACTIVE`. Whether the
+     * credential works is settled by making a call with it, which is why this answers the
+     * `accountId` — so whoever does that can take back exactly the account it made and nothing else.
+     * See {@link ComposioBroker.revokeAccount}.
+     */
+    async connectWithFields({
+      userId,
+      toolkit,
+      authScheme,
+      values,
+    }): Promise<{ accountId: string }> {
+      /*
+       * THIS DEPLOYMENT'S OWN CONFIG, FOR THE REASON {@link ComposioBroker.authorize} READS ONE: an
+       * account is a lasting attachment to whatever config it was made against, so attaching
+       * somebody to an operator's hand-made config — scopes this deployment cannot see, tool
+       * restrictions it cannot read, an object it must not delete — is not a guess that can be
+       * corrected afterwards.
+       */
+      const { ours } = await configsFor(toolkit);
+      const config = ours[0];
+      if (!config) {
+        throw new BrokerRefusalError(
+          `This deployment has no authorization config at Composio for ${toolkit}, so there is nothing to connect an account against and nothing was sent. An administrator removing the app on its Plugins page and adding it again creates one.`,
+        );
+      }
+
+      let created: { id?: unknown };
+      try {
+        created = await vendor.connectedAccounts.create({
+          auth_config: { id: config.id },
+          connection: {
+            user_id: userId,
+            /*
+             * THE SCHEME AND THE TYPED VALUES, IN THE SHAPE THE VENDOR'S OWN BUILDER ASSEMBLES.
+             * `AuthScheme.APIKey` and its siblings all return `{ authScheme, val: { status:
+             * ACTIVE, ...fields } }` (`@composio/core` 0.18.1, `src/models/AuthScheme.ts:84-94`),
+             * and the field NAMES are Composio's own — published per app by
+             * {@link ComposioBroker.connectionFields} and sent back verbatim, because a name this
+             * file renamed on the way through is a box somebody filled in that no app ever reads.
+             */
+            state: {
+              authScheme,
+              val: { status: "ACTIVE", ...values },
+            },
+          },
+        });
+      } catch (error) {
+        /*
+         * ONLY THE SENTENCE LEAVES THIS BLOCK. `vendorSentence` is the one door in this deployment
+         * for reading a vendor's own words, and reading it is the whole of what `error` is used
+         * for: it is not attached, not rethrown and not named below this line.
+         */
+        const said = vendorSentence(error);
+        throw new BrokerRefusalError(
+          said === null
+            ? `Composio did not accept the connection to ${toolkit} and said nothing this deployment can pass on. The failure arrived through this deployment's @composio/core with no sentence of Composio's on it, which is what an outage, a cancelled request and a reply the package could not read all look like from here — and the failure itself was dropped rather than recorded, because on this one call the object carrying it also carries what was typed into the form. Nothing was attached. Composio's own dashboard logs the attempt, and asking again is what settles whether the request ever landed.`
+            : `Composio refused the connection to ${toolkit}: ${said} Nothing was attached. Nothing further about this attempt is kept here, because what the failure carried was the value typed into the form — the request id in Composio's own words above is what their dashboard searches on.`,
+        );
+      }
+
+      /*
+       * NO ID IS NOT A CONNECTION, HOWEVER THE REPLY READS. The id is the whole of what this method
+       * answers and the only thing a caller can undo its own work with, so handing back an
+       * `undefined` cast to a string would leave an account standing at Composio that nothing on
+       * this deployment can name, made from a credential somebody typed a moment ago. The dashboard
+       * is named because it is the only place that account can now be seen and removed.
+       */
+      const accountId = textOf(created?.id);
+      if (accountId === null) {
+        throw new BrokerRefusalError(
+          `Composio answered the connection to ${toolkit} with no account id, so this deployment cannot name the account it just asked for and cannot take it back. An account may be standing at Composio over this: ${toolkit} in Composio's own dashboard is where it can be seen and removed. ${VENDOR_SHAPE_REMEDY}`,
+        );
+      }
+
+      return { accountId };
     },
   };
 
@@ -3446,6 +3599,23 @@ export function createComposioClient(apiKey: string): {
       list: (query) => composio.connectedAccounts.list(query),
       link: (userId, authConfigId, options) =>
         composio.connectedAccounts.link(userId, authConfigId, options),
+      /*
+       * The create is the raw client's for a third reason of its own: the SDK's wrapper over this
+       * endpoint is `initiate`, which is retired for the managed-auth path, and `link` above — its
+       * replacement — mints a consent url and has nowhere to put a value a person typed.
+       *
+       * THE ONE ASSERTION IN THIS FUNCTION, AND IT IS ABOUT `state` ALONE. The generated client
+       * declares that field as a fourteen-member union keyed on the scheme, each member's `val`
+       * ending in `[k: string]: unknown` — which is to say the vendor's own type admits any object
+       * once the scheme is picked, and picking it here would be this file asserting which boxes an
+       * app asks a person for. {@link ComposioVendor} therefore says `unknown` and the widening is
+       * spent here, at the one line where this deployment's projection meets the vendor's schema
+       * and nothing else is decided.
+       */
+      create: (body) =>
+        client.connectedAccounts.create(
+          body as Parameters<typeof client.connectedAccounts.create>[0],
+        ),
       delete: (id, params) => client.connectedAccounts.delete(id, params),
     },
   });

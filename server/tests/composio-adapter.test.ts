@@ -88,6 +88,7 @@ function fakeVendor(parts: {
     connectedAccounts: {
       list: refuse("connectedAccounts.list"),
       link: refuse("connectedAccounts.link"),
+      create: refuse("connectedAccounts.create"),
       delete: refuse("connectedAccounts.delete"),
       ...parts.connectedAccounts,
     },
@@ -2562,6 +2563,23 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
         broker.connectionFields({
           toolkit: "perplexityai",
           authScheme: "API_KEY",
+        }),
+    },
+    {
+      method: "connectWithFields",
+      vendor: (raise) => ({
+        // The configs first, for the reason the withdrawal above answers them first: the connection
+        // is made against this deployment's own config, so the read that finds one has to succeed
+        // before the create this row is about can be reached at all.
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: { create: raise },
+      }),
+      ask: ({ broker }) =>
+        broker.connectWithFields({
+          userId: "user_1",
+          toolkit: "linear",
+          authScheme: "API_KEY",
+          values: { generic_api_key: "never-sent-anywhere" },
         }),
     },
     {
@@ -5178,5 +5196,288 @@ describe("the fields an app asks a person to fill in", () => {
         authScheme: "API_KEY",
       }),
     ).toEqual([]);
+  });
+
+  test("a default Composio padded arrives in the box without its padding", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [],
+                    optional: [
+                      {
+                        name: "base_url",
+                        displayName: "Base URL",
+                        description: "",
+                        default: "  https://api.example.com  ",
+                        type: "string",
+                        required: false,
+                        is_secret: false,
+                        user_visible: true,
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    /*
+     * THE GUARD AND THE ANSWER READ THE SAME VALUE, which is what this is about rather than the
+     * whitespace. The method tested `textOf(row.default)` — which trims — and emitted
+     * `String(row.default)` — which does not — so a padded default passed a judgement made about
+     * one string and reached the form as another. What a person then submits is whatever is in the
+     * box, so the padding would travel on into the connection as part of the value.
+     */
+    expect(
+      await broker.connectionFields({
+        toolkit: "padded",
+        authScheme: "API_KEY",
+      }),
+    ).toEqual([
+      {
+        name: "base_url",
+        label: "Base URL",
+        help: "",
+        required: false,
+        secret: false,
+        default: "https://api.example.com",
+      },
+    ]);
+  });
+});
+
+/**
+ * THE ONE CALL IN THIS SEAM THAT DROPS THE VENDOR'S ERROR RATHER THAN CARRYING IT.
+ *
+ * Every other refusal below this adapter keeps the original as `cause`, deliberately, because the
+ * object holds the request it was made for and whoever is reading a log rather than a page deserves
+ * it. On every other call that request is a link mint or a delete. On this one it is somebody's API
+ * key — so the rule reverses here, and the reversal is worth a test rather than a comment because
+ * nothing about it is visible in a type or in a passing happy path.
+ *
+ * THE LEAK TEST ASKS THE WHOLE THROWN OBJECT AND NOT ITS MESSAGE. `JSON.stringify` of an `Error` is
+ * `{}` — its fields are non-enumerable — so a check written against that would stay green over a
+ * `cause` carrying the entire request body, which is exactly the defect this is about. What is
+ * asserted is that a recognisable secret planted on the vendor's error reaches none of the message,
+ * the `cause`, or any own property of what escapes, at any depth.
+ */
+describe("connecting one person with the secret they typed", () => {
+  /** Shaped like the thing a person pastes into the form, and recognisable wherever it surfaces. */
+  const TYPED_SECRET = "pplx-LEAK-CANARY-3f9a2c";
+
+  /**
+   * Every string the thrown object carries, its own property names included, at every depth.
+   *
+   * `JSON.stringify(error)` answers `{}` for an `Error`, because `message`, `stack` and `cause` are
+   * all non-enumerable — so a leak test written against it would pass over a `cause` holding the
+   * whole request. This asks for the own property names at each level and follows whatever hangs
+   * off them, which is where the secret would be if this call ever carried the vendor's object out.
+   */
+  function everythingCarriedBy(value: unknown, depth = 0): string {
+    // Deep enough to reach a typed value at the bottom of a request body hanging off a `cause`,
+    // which is seven levels down from the thrown error and is the whole thing this is looking for.
+    if (depth > 12) return "";
+    if (typeof value === "string") return value;
+    if (typeof value !== "object" || value === null) return String(value);
+    const held = value as Record<string, unknown>;
+    return Object.getOwnPropertyNames(held)
+      .map((name) => `${name}=${everythingCarriedBy(held[name], depth + 1)}`)
+      .join(" ");
+  }
+
+  /**
+   * The thrown object as a handler further out would serialize it, hidden fields expanded.
+   *
+   * `JSON.stringify(error)` IS `{}` AND THE OBVIOUS FIX IS BARELY BETTER. An `Error`'s `message`,
+   * `stack` and `cause` are all non-enumerable, so the first form sees none of them — and
+   * `JSON.stringify(error, Object.getOwnPropertyNames(error))` passes a replacer ARRAY, which is a
+   * key allow-list applied at EVERY depth: it names the top error's three fields and then filters
+   * the request body out of the very `cause` it just let through. Measured against the version of
+   * this adapter that attached the cause, that assertion passed while the key was two levels below
+   * it. The replacer below expands each error into its own property names instead and lets the
+   * plain objects under them through whole, which is the serialization this call has to survive.
+   */
+  function serializedWith(error: Error): string {
+    return JSON.stringify(error, (_key, value: unknown) => {
+      if (!(value instanceof Error)) return value;
+      const own = value as unknown as Record<string, unknown>;
+      return Object.fromEntries(
+        Object.getOwnPropertyNames(own).map((name) => [name, own[name]]),
+      );
+    });
+  }
+
+  test("what the person typed is sent as this connection's state, and the account comes back", async () => {
+    const asked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: {
+          create: async (body: unknown) => {
+            asked.push(body);
+            return { id: "ca_new", status: "ACTIVE" };
+          },
+        },
+      }),
+    );
+
+    expect(
+      await broker.connectWithFields({
+        userId: "user_1",
+        toolkit: "linear",
+        authScheme: "API_KEY",
+        values: { generic_api_key: TYPED_SECRET, subdomain: "acme" },
+      }),
+    ).toEqual({ accountId: "ca_new" });
+
+    /*
+     * THE WHOLE BODY, because every part of it decides something. The config is this deployment's
+     * own rather than whichever row the vendor listed first; the user id is what every later call
+     * names the account by; and the state is the scheme the form was drawn for with the typed
+     * values under it, which is the shape `AuthScheme.APIKey` builds (`@composio/core` 0.18.1,
+     * `src/models/AuthScheme.ts:84-94`) and the one the raw create declares.
+     */
+    expect(asked).toEqual([
+      {
+        auth_config: { id: OURS.id },
+        connection: {
+          user_id: "user_1",
+          state: {
+            authScheme: "API_KEY",
+            val: {
+              status: "ACTIVE",
+              generic_api_key: TYPED_SECRET,
+              subdomain: "acme",
+            },
+          },
+        },
+      },
+    ]);
+  });
+
+  test("a failure on that call carries no vendor object, because the object holds the key", async () => {
+    /*
+     * THE VENDOR'S ERROR AS IT ARRIVES FROM A CREATE THAT WAS REFUSED. `@composio/client` hangs the
+     * response body on `.error` — which is the shallower of the two depths `vendorSentence` reads —
+     * and the object also carries the request it was made for. On this one call that request is the
+     * form somebody just filled in, which is why the secret below is planted there and nowhere in
+     * the sentence: what must survive is Composio's own words, and what must not is everything else.
+     */
+    const raised = Object.assign(
+      new Error(`400 {"error":{"message":"Invalid credential"}}`),
+      {
+        error: {
+          error: {
+            message:
+              "Composio could not use that credential for linear (request req_9f3c).",
+          },
+        },
+        request: {
+          body: {
+            auth_config: { id: OURS.id },
+            connection: {
+              user_id: "user_1",
+              state: {
+                authScheme: "API_KEY",
+                val: { status: "ACTIVE", generic_api_key: TYPED_SECRET },
+              },
+            },
+          },
+        },
+      },
+    );
+
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: {
+          create: async () => {
+            throw raised;
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectWithFields({
+        userId: "user_1",
+        toolkit: "linear",
+        authScheme: "API_KEY",
+        values: { generic_api_key: TYPED_SECRET },
+      }),
+    );
+
+    // Composio's own sentence is what an operator is left with, request id and all, because that is
+    // the string their dashboard searches on and the only diagnostic this call agrees to keep.
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(/req_9f3c/);
+
+    // And the object it came out of is gone: not rethrown, not attached, not reachable from what a
+    // handler further out will serialize.
+    expect(refusal).not.toBe(raised);
+    expect(refusal.cause).toBeUndefined();
+    expect(everythingCarriedBy(refusal)).not.toContain(TYPED_SECRET);
+    expect(serializedWith(refusal)).not.toContain(TYPED_SECRET);
+    expect(everythingSaidBy(refusal).join("\n")).not.toContain(TYPED_SECRET);
+  });
+
+  test("a reply with no account id is refused rather than answered as a connection", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: { create: async () => ({ status: "ACTIVE" }) },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectWithFields({
+        userId: "user_1",
+        toolkit: "linear",
+        authScheme: "API_KEY",
+        values: { generic_api_key: TYPED_SECRET },
+      }),
+    );
+
+    /*
+     * AN ACCOUNT MAY BE STANDING AT COMPOSIO OVER A REFUSAL HERE, which is the one thing this
+     * sentence has to carry: the id is what a caller undoes its own work with, so without one there
+     * is a connection nothing on this deployment can name or take back. The dashboard is where it
+     * can be seen and removed, and it is the only remedy there is.
+     */
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(/dashboard/);
+    expect(refusal.message).not.toContain(TYPED_SECRET);
+  });
+
+  test("an app with no config of this deployment's is refused before anything is sent", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        // The create is left at `fakeVendor`'s refusal, which is what says the value typed in went
+        // nowhere: a call that was made would name itself here rather than answering.
+        authConfigs: { list: async () => ({ items: [BY_HAND] }) },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectWithFields({
+        userId: "user_1",
+        toolkit: "linear",
+        authScheme: "API_KEY",
+        values: { generic_api_key: TYPED_SECRET },
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(NO_CONFIG_REMEDY);
+    expect(refusal.message).not.toContain(TYPED_SECRET);
   });
 });
