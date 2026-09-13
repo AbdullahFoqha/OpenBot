@@ -18,6 +18,7 @@ import {
 } from "@tanstack/react-router";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { BrokerField } from "@/lib/plugins/mutations";
 import type { PluginServer, PluginsPage } from "@/lib/plugins/queries";
 import { Route as AdminAppRoute } from "@/routes/_authed/admin/plugins/$key";
 import { Route as ConnectedAccountRoute } from "@/routes/_authed/settings/connected-accounts/$key";
@@ -61,8 +62,9 @@ afterAll(() => GlobalRegistrator.unregister());
 const APP_KEY = "gmail";
 
 /** A minimal but complete brokered `PluginServer` — the row shape only Composio produces. */
-function brokeredServer(): PluginServer {
+function brokeredServer(authScheme: string): PluginServer {
   return {
+    authScheme,
     id: APP_KEY,
     title: "Gmail",
     vendor: "Google",
@@ -80,10 +82,13 @@ function brokeredServer(): PluginServer {
   };
 }
 
-function pluginsPage(composioConfigured: boolean): PluginsPage {
+function pluginsPage(
+  composioConfigured: boolean,
+  authScheme: string,
+): PluginsPage {
   return {
     catalogue: [],
-    servers: [brokeredServer()],
+    servers: [brokeredServer(authScheme)],
     skills: [],
     botsMayCallBack: true,
     redirectUri: null,
@@ -102,6 +107,13 @@ type Deployment = {
   composioConfigured: boolean;
   recorded: boolean;
   confirms: boolean;
+  /**
+   * How this app's authorization config was created, as the vendor's own scheme literal. Defaults
+   * to the consent scheme, which is what every test written before there was a second kind meant.
+   */
+  authScheme?: string;
+  /** What the app publishes as the things a person types in, for the `API_KEY` schemes. */
+  fields?: BrokerField[];
 };
 
 type Server = {
@@ -118,7 +130,7 @@ type Server = {
  * really take effect somewhere for a later read to be able to disagree with it.
  */
 function installDeployment(deployment: Deployment): Server {
-  const state = { ...deployment };
+  const state = { authScheme: "OAUTH2", fields: [], ...deployment };
   const server: Server = { deletes: 0 };
 
   global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -156,6 +168,14 @@ function installDeployment(deployment: Deployment): Server {
       }
       return json({ connected: state.confirms });
     }
+    /*
+     * The first press on an app nobody consents to: what does it want typed in? The consent half of
+     * this same route carries `?returnTo=`, so the two are told apart by the query rather than by
+     * the method they share.
+     */
+    if (path.endsWith("/connect") && method === "POST") {
+      return json({ fields: state.fields });
+    }
     if (path.endsWith("/connection") && method === "DELETE") {
       server.deletes += 1;
       state.recorded = false;
@@ -164,7 +184,7 @@ function installDeployment(deployment: Deployment): Server {
     }
     if (path.startsWith("/api/agents")) return json({ agents: [] });
     if (path.startsWith("/api/plugins")) {
-      return json(pluginsPage(state.composioConfigured));
+      return json(pluginsPage(state.composioConfigured, state.authScheme));
     }
     return new Response(null, { status: 404 });
   }) as typeof fetch;
@@ -422,4 +442,39 @@ test("the admin page says the key is missing too, rather than offering an action
   // The app is still enabled and still says how it is reached — the row is honest about what is
   // still true, rather than reading as a connector that has gone away.
   expect(view.queryByText("How this is reached")).toBeTruthy();
+});
+
+/**
+ * One real field, as Composio publishes it for Perplexity.
+ *
+ * Kept verbatim rather than trimmed to a label: the help sentence is the app's own, and the point of
+ * the test below is that this deployment reproduces a sentence it has never been taught.
+ */
+const PERPLEXITY_KEY: BrokerField = {
+  name: "generic_api_key",
+  label: "API Key",
+  help: "Your secret Perplexity API key, starting with 'pplx-'. Create one at console.perplexity.ai under API Keys — it's shown only once, so copy it immediately.",
+  required: true,
+  secret: true,
+};
+
+test("a key app asks for what the app asked for, with its own help text", async () => {
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY],
+    recorded: false,
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  await userEvent.click(await view.findByRole("button", { name: "Connect" }));
+
+  // Labelled by what the app called it, which is how a person finds the box the vendor's own
+  // instructions are about.
+  const input = await view.findByLabelText("API Key");
+  // The app said which value is the secret. Nothing here guessed it from the name.
+  expect(input.getAttribute("type")).toBe("password");
+  expect(view.queryByText(/starting with 'pplx-'/)).toBeTruthy();
 });

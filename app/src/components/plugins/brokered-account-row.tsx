@@ -1,7 +1,15 @@
 import { IconArrowUpRight } from "@tabler/icons-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { ConnectionFields } from "@/components/plugins/connection-fields";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Item,
   ItemActions,
@@ -275,8 +283,9 @@ export function useBrokeredAccount(input: {
 /**
  * The row itself, for a `PageRows` card on either screen.
  *
- * Just the `Item`: where it sits in the card, and whether a `Separator` precedes it, is the screen's
- * business and differs between the two.
+ * The `Item` and, for an app whose secret a person types, the dialog that takes it. Where the row
+ * sits in the card, and whether a `Separator` precedes it, is the screen's business and differs
+ * between the two; the dialog is portalled to the body and so sits nowhere at all.
  */
 export function BrokeredAccountRow({
   account,
@@ -289,65 +298,124 @@ export function BrokeredAccountRow({
   /** What connecting would do, in the voice of whoever is reading. */
   disconnectedDescription: string;
 }) {
+  /*
+   * Whether the form is on screen, which is the whole of what this row holds.
+   *
+   * An app nobody consents to is connected by typing a key rather than by leaving for a consent
+   * screen, and the layout's answer to more than one value is a dialog rather than fields wedged
+   * into the row. What goes in those fields is asked for when this opens and is held by the form
+   * itself — see `connection-fields.tsx` — so closing this forgets it.
+   */
+  const [asking, setAsking] = useState(false);
+
+  /*
+   * A connection that landed takes its own form off the screen.
+   *
+   * The row behind redraws as connected on the refetch either way; without this the person is left
+   * reading the form they just submitted, over a row that says it worked.
+   */
+  useEffect(() => {
+    if (account.connected) setAsking(false);
+  }, [account.connected]);
+
   return (
-    <Item size="sm">
-      <ItemContent>
-        {/* Not "Connect your account": the row is also the connected state, and a title has to read
-            for both. */}
-        <ItemTitle>Your account</ItemTitle>
-        {/* Unclamped where the key is missing: that sentence is the only place the setting is named,
-            so it is the point rather than a hint. */}
-        <ItemDescription
-          className={account.configured ? undefined : "line-clamp-none"}
-        >
-          {account.configured
-            ? account.connected
-              ? connectedDescription
-              : disconnectedDescription
-            : "Set COMPOSIO_API_KEY on this deployment. Without it there is no broker to reach, so this account can be neither connected nor ended from here. The app stays enabled and every grant on its tools still stands."}
-        </ItemDescription>
-      </ItemContent>
-      <ItemActions>
-        {!account.configured ? (
-          /*
-           * A value and nothing to press, which is the layout's read-only row: the deployment has
-           * no key, so Connect could only fail at the broker and Disconnect could only fail at it
-           * twice. A button that cannot work is worse than no button — it invites the second press
-           * that files a record of an act that did not happen.
-           */
-          <span className="text-muted-foreground text-xs">Key missing</span>
-        ) : account.connected ? (
-          <>
-            {/* Decorative: the word beside it already says which. */}
-            <span
-              aria-hidden="true"
-              className="size-1.5 rounded-full bg-emerald-500"
-            />
-            <span className="text-muted-foreground text-xs">Connected</span>
+    <>
+      <Item size="sm">
+        <ItemContent>
+          {/* Not "Connect your account": the row is also the connected state, and a title has to
+              read for both. */}
+          <ItemTitle>Your account</ItemTitle>
+          {/* Unclamped where the key is missing: that sentence is the only place the setting is
+              named, so it is the point rather than a hint. */}
+          <ItemDescription
+            className={account.configured ? undefined : "line-clamp-none"}
+          >
+            {account.configured
+              ? account.connected
+                ? connectedDescription
+                : disconnectedDescription
+              : "Set COMPOSIO_API_KEY on this deployment. Without it there is no broker to reach, so this account can be neither connected nor ended from here. The app stays enabled and every grant on its tools still stands."}
+          </ItemDescription>
+        </ItemContent>
+        <ItemActions>
+          {!account.configured ? (
+            /*
+             * A value and nothing to press, which is the layout's read-only row: the deployment has
+             * no key, so Connect could only fail at the broker and Disconnect could only fail at it
+             * twice. A button that cannot work is worse than no button — it invites the second press
+             * that files a record of an act that did not happen.
+             */
+            <span className="text-muted-foreground text-xs">Key missing</span>
+          ) : account.connected ? (
+            <>
+              {/* Decorative: the word beside it already says which. */}
+              <span
+                aria-hidden="true"
+                className="size-1.5 rounded-full bg-emerald-500"
+              />
+              <span className="text-muted-foreground text-xs">Connected</span>
+              <Button
+                disabled={account.disconnecting}
+                onClick={account.disconnect}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                Disconnect
+              </Button>
+            </>
+          ) : (
+            /* The arrow says this leaves OpenBot for the vendor's consent page. It does. */
             <Button
-              disabled={account.disconnecting}
-              onClick={account.disconnect}
+              disabled={account.connecting}
+              onClick={() => {
+                /*
+                 * A key app goes nowhere: it opens the form below and asks the app what belongs in
+                 * it. The question is asked on every open rather than once, because what an app
+                 * publishes is the vendor's and may differ from what it published last time.
+                 */
+                if (account.kind === "fields") {
+                  setAsking(true);
+                  account.requestFields();
+                  return;
+                }
+                account.connect();
+              }}
               size="sm"
               type="button"
               variant="outline"
             >
-              Disconnect
+              Connect
+              <IconArrowUpRight />
             </Button>
-          </>
-        ) : (
-          /* The arrow says this leaves OpenBot for the vendor's consent page. It does. */
-          <Button
-            disabled={account.connecting}
-            onClick={account.connect}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            Connect
-            <IconArrowUpRight />
-          </Button>
-        )}
-      </ItemActions>
-    </Item>
+          )}
+        </ItemActions>
+      </Item>
+
+      <Dialog onOpenChange={setAsking} open={asking}>
+        <DialogContent>
+          <DialogHeader>
+            {/* The title the row above cannot have: this exists only while the account is not
+                connected, so it is free to name the act rather than the subject. */}
+            <DialogTitle>Connect your account</DialogTitle>
+          </DialogHeader>
+          <DialogBody className="mt-4">
+            {account.fields ? (
+              <ConnectionFields
+                busy={account.submittingFields}
+                fields={account.fields}
+                onSubmit={account.submitFields}
+              />
+            ) : (
+              <p className="text-muted-foreground text-sm">
+                {account.requestingFields
+                  ? "Asking the app what it needs…"
+                  : "That app could not be asked what it needs. Close this and try again."}
+              </p>
+            )}
+          </DialogBody>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
