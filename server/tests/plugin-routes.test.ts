@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createApp } from "../src/app";
+import { DEV_ACTOR } from "../src/auth/dev-actor";
 import { loadConfig } from "../src/config";
 import { ServerRowAmbiguousError } from "../src/plugins/access";
 import {
@@ -1960,6 +1961,60 @@ describe("connecting an app whose secret a person types", () => {
     ]);
     expect(asked).toEqual([]);
     expect(submitted).toEqual([]);
+  });
+
+  test("a key app connects on a deployment with no app URL to come back to", async () => {
+    /*
+     * A SETTING WITH NO BEARING ON THIS FLOW DOES NOT GET TO REFUSE IT.
+     *
+     * `OPENBOT_APP_URL` is where Composio sends somebody back to once they have consented, and this
+     * half has no consent screen to come back from: the key is typed here, no link is minted, and
+     * nobody ever leaves the deployment. The guard for it used to stand in front of the fork, so a
+     * single-user deployment with no sign-in — the one shape that genuinely has no app URL — could
+     * connect none of the key apps that make up most of Composio's catalogue, and was told to set a
+     * variable that would not have changed anything about the press it refused.
+     *
+     * The same environment as the consent refusal above, which is what makes the pair meaningful:
+     * one deployment, one missing setting, and the two halves of this route answering differently
+     * because only one of them has a return leg.
+     */
+    const { asked, submitted, authorized, connectFields } = brokeredApp(
+      null,
+      AUTHORIZATION_URL,
+      {
+        environment: {
+          OPENBOT_SINGLE_USER: "true",
+          BETTER_AUTH_URL: undefined,
+          BETTER_AUTH_SECRET: undefined,
+          GOOGLE_OAUTH_CLIENT_ID: undefined,
+          GOOGLE_OAUTH_CLIENT_SECRET: undefined,
+          INITIAL_ADMIN_EMAILS: undefined,
+        },
+      },
+    );
+
+    const response = await connectFields({
+      values: { api_key: "fc-live-a-secret" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      connected: true,
+      verified: true,
+      probe: "FIRECRAWL_SCRAPE",
+    });
+    // The key reached the store rather than a 503, and the form was drawn from the vendor on the
+    // way through.
+    expect(asked).toEqual([{ toolkit: "firecrawl", authScheme: "API_KEY" }]);
+    expect(submitted).toEqual([
+      {
+        toolkit: "firecrawl",
+        userId: DEV_ACTOR.id,
+        values: { api_key: "fc-live-a-secret" },
+      },
+    ]);
+    // And still no consent link, which is the whole reason the setting has no bearing here.
+    expect(authorized).toEqual([]);
   });
 
   test("a broker that will not say what an app asks for answers with its own sentence", async () => {

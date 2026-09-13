@@ -812,31 +812,6 @@ export function createPluginRoutes(
       }
 
       /*
-       * NO APP URL IS A REFUSAL, NOT A LINK WITH NO WAY BACK.
-       *
-       * The address below is where Composio sends this person once they have consented, and it has
-       * to be absolute: the consent screen is on another company's origin, so a relative path
-       * resolves against theirs. A deployment that cannot say where its own pages are cannot
-       * produce one — and minting the link anyway would leave somebody stranded on Composio's
-       * hosted page having just granted access, with no route back to the deployment that asked
-       * for it and nothing here knowing it happened.
-       *
-       * The OAuth flow below refuses for its missing `OPENBOT_PUBLIC_URL` in these same terms and
-       * for this same reason. `OPENBOT_APP_URL` is the setting here because the two addresses are
-       * genuinely different: the API is one origin and the browser app is another, and it is a
-       * page this person is coming back to rather than an endpoint.
-       */
-      if (!connect?.appUrl) {
-        return context.json(
-          {
-            error:
-              "This deployment has no app URL configured, so Composio would have nowhere to send you back to. Set OPENBOT_APP_URL.",
-          },
-          503,
-        );
-      }
-
-      /*
        * THE PERSON IS THE SESSION'S, HERE AND IN THE READ ABOVE IT.
        *
        * Nothing in this branch reads a user id out of the body or the query, and that is the
@@ -1023,6 +998,40 @@ export function createPluginRoutes(
           );
           return context.json({ error: refusal.error }, refusal.status);
         }
+      }
+
+      /*
+       * NO APP URL IS A REFUSAL, NOT A LINK WITH NO WAY BACK.
+       *
+       * The address below is where Composio sends this person once they have consented, and it has
+       * to be absolute: the consent screen is on another company's origin, so a relative path
+       * resolves against theirs. A deployment that cannot say where its own pages are cannot
+       * produce one — and minting the link anyway would leave somebody stranded on Composio's
+       * hosted page having just granted access, with no route back to the deployment that asked
+       * for it and nothing here knowing it happened.
+       *
+       * The OAuth flow below refuses for its missing `OPENBOT_PUBLIC_URL` in these same terms and
+       * for this same reason. `OPENBOT_APP_URL` is the setting here because the two addresses are
+       * genuinely different: the API is one origin and the browser app is another, and it is a
+       * page this person is coming back to rather than an endpoint.
+       *
+       * BELOW THE FIELD BRANCH AND NOT ABOVE IT, FOR THE REASON THIS BRANCH'S OWN HEADER GIVES ONE
+       * GUARD EARLIER. An app whose secret the person types mints no link and has no return leg, so
+       * this setting has no bearing on that flow at all — and standing before the fork, this guard
+       * meant no key app could be connected on a deployment without `OPENBOT_APP_URL`, refused in
+       * the name of a remedy that would not have helped. It stays after the one-account guard for
+       * the reason that guard's own comment gives: somebody who already has an account attached is
+       * told the step to take, rather than handed an operator's configuration complaint about a
+       * link that was never going to be minted for them.
+       */
+      if (!connect?.appUrl) {
+        return context.json(
+          {
+            error:
+              "This deployment has no app URL configured, so Composio would have nowhere to send you back to. Set OPENBOT_APP_URL.",
+          },
+          503,
+        );
       }
 
       /*
