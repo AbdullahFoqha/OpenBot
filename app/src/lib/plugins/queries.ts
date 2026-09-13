@@ -227,22 +227,46 @@ export type PluginConnection = {
    */
   verifiedAt?: string | null;
   /**
-   * Which action this deployment would check this key against, present only on a brokered row.
+   * Which action the last check of this key actually SPENT, present only on a brokered row.
    *
-   * DERIVED BY THE SERVER OUT OF THE APP'S RECORDED ACTIONS, not stored and not asked of the
-   * vendor — which is why it can be here at all, and why it survives a reload where the answer to a
-   * connect or a re-check cannot. Read together with {@link PluginConnection.verified} it separates
-   * the three situations that share the one word `false`: no probe means the app publishes nothing
-   * safe to spend a key on and nothing was tried; a probe with `verified` means the check ran and
-   * passed; and a probe WITHOUT it means the check ran, the vendor refused the key, and the account
-   * could not be withdrawn — because a key connection is always probed as it is made, so no other
-   * history leaves that pair behind.
+   * A RECORD READ OFF THE ROW, not a reading of what the app publishes now — which is why it
+   * survives a reload where the answer to a connect or a re-check cannot, and why nothing the
+   * catalogue does afterwards can move it. Read together with {@link PluginConnection.verified} it
+   * separates the three situations that share the one word `false`: no probe means nothing was
+   * tried, because at the time of the check the app published nothing safe to spend a key on; a
+   * probe with `verified` means the check ran and passed; and a probe WITHOUT it means the check
+   * ran and the vendor refused the key, over an account that is still standing.
+   *
+   * A PAST TENSE, AND ONLY THAT. It is what the SENTENCE beneath the row is drawn from. What it
+   * must never be asked is whether the key could be checked again — see
+   * {@link PluginConnection.checkable}, which is the present-tense answer and a different field
+   * because it is a different question.
    *
    * Optional for the same reason the pair above is: that endpoint concatenates two reads, and only
    * the brokered one carries any of this. Undefined is the absence of the field and not a fourth
    * state.
    */
   probe?: string | null;
+  /**
+   * Whether the app has anything to check this key against TODAY, present only on a brokered row.
+   *
+   * ASKED OF THE APP AND NOT OF THE CONNECTION, out of the same chooser a real check would use: has
+   * this app published an action safe to spend somebody's key on — a vendor-labelled read, not
+   * destructive, needing no arguments, recorded at a version that can be called. It is what the
+   * Re-check button is drawn from, and nothing else here is.
+   *
+   * SEPARATE FROM {@link PluginConnection.probe} BECAUSE COLLAPSING THEM DEADLOCKS THE PAGE. While
+   * the button read the record, a key connected to an app with nothing to try recorded null, for
+   * good — and the button stayed withheld however much the app published later, though pressing it
+   * is the only thing that could ever put an action in the record. The past and the present are two
+   * questions; the row asks them separately and answers them separately.
+   *
+   * Optional for the same reason as the fields above, and false and absent mean the same thing to
+   * the only reader there is: nothing to press. That is why a screen may flatten this where it
+   * passes `probe` through unflattened — a missing verdict and a null verdict are different
+   * sentences, while a missing gate and a closed gate are the same gate.
+   */
+  checkable?: boolean;
 };
 
 export type PluginConnections = {

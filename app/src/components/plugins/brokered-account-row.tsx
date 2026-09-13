@@ -121,13 +121,39 @@ export type BrokeredAccount = {
    *                 nobody has connected. Nothing may read it as either of the two the server sends.
    *
    * CARRIED BY THE READ AS WELL AS BY THE ANSWERS, which is what keeps the three states apart after
-   * a reload. A re-check and a key handed over both come back naming the action, and neither writes
-   * the name down — so while this came only from an answer, a refresh collapsed the third state
-   * into the first and told the one person with a refused key that nothing had been tried. The
-   * connections read derives it instead, from the app's recorded actions and without asking the
-   * vendor anything, and the freshest answer still wins over it.
+   * a reload. A re-check and a key handed over both come back naming the action, and while this
+   * came only from an answer a refresh collapsed the third state into the first and told the one
+   * person with a refused key that nothing had been tried. The connections read carries it now — as
+   * the RECORD of what the last check spent, written down by the check itself and read back off the
+   * row — and the freshest answer still wins over it, because an answer is a newer record of the
+   * same thing.
+   *
+   * A PAST TENSE, WHICH IS THE WHOLE OF WHAT IT IS FOR. This is what the sentence is drawn from and
+   * it is never what the Re-check button is gated on: what the check spent and what there is to
+   * spend now are two questions, and {@link BrokeredAccount.checkable} is the second one. Asking
+   * this field the second question is what deadlocked the button — see that field.
    */
   probe: string | null | undefined;
+  /**
+   * Whether the app has anything to check this key against today.
+   *
+   * THE BUTTON'S OWN QUESTION, AND NOT THE SENTENCE'S. It is asked of the APP — has it published an
+   * action safe to spend a key on — where {@link BrokeredAccount.probe} is asked of the connection,
+   * and answers what the last check actually spent. The two agreed while the probe was derived on
+   * every read, and they part company exactly when they should: an app that publishes something now
+   * and published nothing then.
+   *
+   * WITHOUT IT THE ROW DEADLOCKS. A key accepted against an app with nothing to try records no
+   * action, permanently and correctly; a button gated on that record is withheld permanently too,
+   * even once the app publishes something — and pressing that button is the only thing that could
+   * ever write an action into the record. The one act that would end the state is the act being
+   * withheld.
+   *
+   * FALSE WHERE NOTHING HAS SAID, which is not the hedge `probe` needs. There is no sentence to get
+   * wrong here, only a button to offer or withhold, and withholding is the direction that cannot
+   * mislead: a press with nothing to spend could only ask for the same answer again.
+   */
+  checkable: boolean;
   /**
    * Whether this deployment has a Composio key at all.
    *
@@ -195,15 +221,25 @@ export function useBrokeredAccount(input: {
   /** See {@link BrokeredAccount.verifiedAt}, as this deployment last wrote it down. */
   verifiedAt: string | null;
   /**
-   * Which action a check of this key WOULD be spent on, as the connections read derived it.
+   * Which action the last check of this key SPENT, as the connections read has it recorded.
    *
-   * The read's answer and not an answer to anything pressed here, which is exactly what makes it
+   * The read's record and not an answer to anything pressed here, which is exactly what makes it
    * worth passing: it is all the row has on a page that has only loaded. Undefined where the
    * recorded row carries no such field — a held connection, or an app nobody has connected — and
-   * null where the app publishes nothing safe to spend a key on. See {@link BrokeredAccount.probe}
-   * for what each of those means to the sentence the row draws.
+   * null where the check spent nothing. See {@link BrokeredAccount.probe} for what each of those
+   * means to the sentence the row draws.
    */
   probe: string | null | undefined;
+  /**
+   * Whether the app has anything to check this key against today, as the connections read answers.
+   *
+   * THE ONLY PLACE THIS CAN COME FROM. It is a fact about what the app publishes NOW, so the read
+   * is what knows it, and — unlike the record above — no answer to anything pressed here improves
+   * on it. See {@link BrokeredAccount.checkable}, and the return below for why no answer overrides
+   * it. Flattened to false by the caller where the row carries nothing, because a missing gate and
+   * a closed gate are the same gate.
+   */
+  checkable: boolean;
   /**
    * How the app's authorization config was CREATED, as the vendor's own scheme literal.
    *
@@ -226,6 +262,7 @@ export function useBrokeredAccount(input: {
   const {
     authScheme,
     brokered,
+    checkable,
     configured,
     recorded,
     probe,
@@ -400,18 +437,38 @@ export function useBrokeredAccount(input: {
     verified: recheck.data ? recheck.data.verified : verified,
     verifiedAt: recheck.data ? recheck.data.verifiedAt : verifiedAt,
     /*
-     * The name off whichever answer is newest, and THE READ'S OWN ANSWER UNTIL THERE IS ONE — the
+     * The name off whichever answer is newest, and THE READ'S OWN RECORD UNTIL THERE IS ONE — the
      * same rule `connected` and `verified` follow above, and for the same reason: an answer beats
      * the record, and a just-finished re-check must not be overruled by a read taken before it.
      *
-     * WHAT IS PASSED IN IS NOT A GUESS THIS DEPLOYMENT IS MAKING. The connections read derives the
-     * name from the app's recorded actions — which action a check WOULD be spent on — so its null
-     * is the server saying there is nothing to spend one on, exactly as an answer's null is. That
-     * is why it is passed straight through rather than flattened to undefined: undefined is the
-     * absence of any answer at all, and it is what remains for a row whose read carried no such
-     * field. See {@link BrokeredAccount.probe}.
+     * BOTH SIDES OF THAT `??` ARE THE SAME KIND OF FACT, which is what makes the rule sound here.
+     * The connections read carries what the last check SPENT, written down by that check; an answer
+     * carries what the check just made spent. A newer record of one thing replacing an older record
+     * of the same thing — so its null is the server saying that check spent nothing, exactly as an
+     * answer's null is. That is why it is passed straight through rather than flattened to
+     * undefined: undefined is the absence of any record at all, and it is what remains for a row
+     * whose read carried no such field. See {@link BrokeredAccount.probe}.
      */
     probe: answered ? answered.probe : probe,
+    /*
+     * AND THE READ'S ANSWER ALONE, WITH NO ANSWER ALLOWED TO OVERRULE IT — deliberately not the
+     * rule every field above follows, because this is not the same kind of fact as any of them.
+     *
+     * AN ANSWER REPORTS A CHECK; THIS IS A QUESTION ABOUT THE APP. What a re-check or a submitted
+     * key comes back with is `probe`: the action that press SPENT. It is tempting to read a null
+     * there as "so there was nothing to spend", and at the instant of the press that is even true —
+     * the same chooser answered both. But a mutation's `data` is not query state. It persists until
+     * something resets it, while the connections read behind it refetches on every one of these
+     * mutations, so `answered.probe === null` winning here would PIN the gate shut against every
+     * later read that learns the app has published something. That is this very deadlock rebuilt
+     * one layer up, out of the same mistake: a record of a past check asked what is true now.
+     *
+     * AND NOTHING IS LOST BY REFUSING IT. Every mutation in this hook invalidates the plugin
+     * queries, so the read that owns this field is refetched the moment any press lands; the most a
+     * press can cost is one render on the previous read's answer, and a stale gate is a button
+     * offered or withheld for an instant, not a sentence anybody is told.
+     */
+    checkable,
     recheck: () => {
       report(null);
       recheck.mutate(serverId);
@@ -531,21 +588,30 @@ function accountSentence(input: {
         return `Your key was checked against ${title} and rejected, and the account it was checked in still stands at Composio, so disconnect it here, or fix the key at ${title} and press Re-check.`;
       }
       /*
-       * NOTHING TO CHECK IT WITH, WHICH IS A FACT ABOUT THE APP. The answer named no probe at all:
-       * this app publishes no action safe to spend somebody's key on, so the check was not skipped
-       * and cannot be made. Said plainly because the alternative reading — that this deployment
-       * doubts the key — is the one a person supplies for themselves when a row goes quiet.
+       * NOTHING WAS SPENT ON IT, WHICH IS A FACT ABOUT THE CHECK AND ABOUT THE APP AT THE TIME. The
+       * record names no action: when the key was taken this app published none safe to spend it on,
+       * so the check was not skipped and could not be made. Said plainly because the alternative
+       * reading — that this deployment doubts the key — is the one a person supplies for themselves
+       * when a row goes quiet.
+       *
+       * ITS SECOND CLAUSE IS AS OF THE CHECK, NOT AS OF TODAY, and where the app has since started
+       * publishing something it reads a little behind. That is deliberate and it is the safe half
+       * of the trade: the sentence is drawn from the record because a sentence drawn from today's
+       * listing is how a key nobody tried came to be accused of being rejected. The present-tense
+       * half reaches the person as the Re-check button beside it, which `checkable` puts there in
+       * exactly that state — so the row offers the act that would make this sentence current rather
+       * than asserting a check it has not made.
        */
       if (account.probe === null) {
         return `Connected with a key you provided. It was accepted without being checked against ${title}, which publishes nothing safe to try a key on — that is about the app, not about your key.`;
       }
       /*
-       * AND NOTHING HAS SAID WHICH, which is no longer the page load: the connections read derives
-       * the probe now, so a reload lands on one of the two sentences above. What is left here is a
-       * row nothing has told about a probe either way — a held connection, whose rows carry none of
-       * this, or an answer that named none — and all it knows is that the key was taken. Those two
-       * sentences are the two things a verdict can say; this is what stands where there is no
-       * verdict, and it must not borrow either.
+       * AND NOTHING HAS SAID WHICH, which is no longer the page load: the connections read carries
+       * the recorded probe now, so a reload lands on one of the two sentences above. What is left
+       * here is a row nothing has told about a probe either way — a held connection, whose rows
+       * carry none of this — and all it knows is that the key was taken. Those two sentences are the
+       * two things a record can say; this is what stands where there is no record, and it must not
+       * borrow either.
        */
       return `Connected with a key you provided. It was accepted without being checked against ${title}.`;
     }
@@ -702,11 +768,22 @@ export function BrokeredAccountRow({
                  * AND THE SECOND HALF ASKS WHETHER THERE IS ANYTHING TO CHECK WITH, WHICH IS NOT
                  * "HAS A CHECK PASSED". Gating on `verified` withheld the button in the one state
                  * somebody reaches for it hardest: a key the vendor has just rejected, which they
-                 * have gone and corrected and now want tried again. A null probe is the only state
-                 * with nothing to press — the app publishes nothing to spend the key on, so the
-                 * button could only ask for the same answer again.
+                 * have gone and corrected and now want tried again. An app with nothing to spend
+                 * the key on is the only state with nothing to press, because the button could only
+                 * ask for the same answer again.
+                 *
+                 * AND IT ASKS `checkable`, NOT `probe`, WHICH IS THE WHOLE OF THE DIFFERENCE. This
+                 * is a question about the app TODAY, and `probe` is the record of what the last
+                 * check spent — a fact about the past that no later listing can move. The two
+                 * agreed while the probe was derived on every read. Once it became a record they
+                 * stopped: a key accepted against an app that published nothing records null for
+                 * good, so a gate on that record withheld the button for good, even after a Refresh
+                 * gave the app something to try — and pressing this button is the only thing in the
+                 * product that could ever write an action into that record, so nothing could ever
+                 * end the state from inside it. The sentence above still reads the record, because
+                 * what to SAY is what happened; what to OFFER is what is possible now.
                  */}
-                {account.kind === "fields" && account.probe !== null ? (
+                {account.kind === "fields" && account.checkable ? (
                   <Button
                     disabled={account.rechecking}
                     onClick={account.recheck}

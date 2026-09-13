@@ -254,11 +254,19 @@ function RouteComponent() {
     verifiedAt: connection?.verifiedAt ?? null,
     /*
      * AND THIS ONE IS NOT FLATTENED, for the reason the personal screen gives: the two above fall
-     * back on the server's own column defaults, while a null here is the server's answer that the
-     * app publishes nothing safe to spend a key on — not the absence of an answer. The row draws a
-     * different sentence for each, so the difference has to reach it.
+     * back on the server's own column defaults, while a null here is the server's record that the
+     * last check spent nothing — not the absence of a record. The row draws a different sentence
+     * for each, so the difference has to reach it.
      */
     probe: connection?.probe,
+    /*
+     * WHILE THIS ONE IS, for the reason that screen gives too: it is the Re-check button's gate and
+     * not a sentence. The record above says what was spent and this says whether the app has
+     * anything to spend today — asking the record the second question is what left a key nothing
+     * was tried on with no way to ever have anything tried on it. Absent and false are the same
+     * closed gate, so the fallback costs nothing here.
+     */
+    checkable: connection?.checkable ?? false,
   });
 
   /** Adding is two writes when a token was typed: the credential, then the record pointing at it. */

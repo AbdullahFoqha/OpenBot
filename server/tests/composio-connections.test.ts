@@ -1749,6 +1749,64 @@ test("an action listed after the fact does not rewrite what a key was checked wi
 });
 
 /**
+ * AND WHETHER THERE IS ANYTHING TO CHECK TODAY IS ANSWERED BESIDE IT, NEVER OUT OF IT.
+ *
+ * CRITERION. The connection of the test above — a key the deployment spent nothing on, under an app
+ * that has since started publishing a safe versioned read — is listed with `probe` still null AND
+ * `checkable` true. Nothing is spent at the vendor to find that out either.
+ *
+ * REASON. THIS IS THE DEADLOCK THE RECORDED COLUMN CREATED, and it is the exact price of the fix
+ * above. `probe` became a record so that a refresh could not accuse a key nobody had tried; the
+ * settings page's Re-check button went on reading it, and that button asks a different question —
+ * not "what did the check spend" but "is there anything to spend now". The two answers agreed while
+ * the field was derived and part company the moment it is stored, in one direction that does not
+ * recover: a key connected to an app with nothing to try reads null FOR GOOD, the button stays
+ * withheld however many actions the app later publishes, and pressing that button is the only thing
+ * in the product that could ever record an action on the row. The state is stable, wrong, and
+ * unreachable from inside itself.
+ *
+ * SO THE LISTING ANSWERS BOTH QUESTIONS AND COLLAPSES NEITHER. `probe` is the past — read off the
+ * row, unmoved by anything the catalogue does afterwards — and `checkable` is the present, asked of
+ * {@link createPluginStore.probeActionFor} about the app. The pair below is what a single field can
+ * never be: the check spent nothing AND there is something to spend now.
+ */
+test("a key nothing was spent on becomes checkable when the app publishes something", async () => {
+  useAnsweringClient();
+  await addProbedApp({ withProbe: false });
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: probedToolkit, userId: askerId, verified: false });
+
+  const before = await store.brokeredConnectionsFor(askerId);
+  expect(before).toHaveLength(1);
+  // Nothing was tried, and there is nothing to try: the two agree here, which is why one field
+  // could ever pass for both.
+  expect(before[0]?.probe).toBeNull();
+  expect(before[0]?.checkable).toBe(false);
+
+  // THE REFRESH. An administrator's press re-lists the app's actions and one of them is a safe
+  // versioned read — the very press the transport tells an operator to make when an action appears.
+  await database.insert(mcpTools).values({
+    serverId: probedId,
+    name: probeAction,
+    description: "Says who the key belongs to.",
+    effect: "read",
+    version: probeVersion,
+  });
+
+  const after = await store.brokeredConnectionsFor(askerId);
+  expect(after).toHaveLength(1);
+  // The record does not move, because nothing happened to the key: this is the guard on the fix
+  // that stands above, and a listing that let the catalogue write here would re-open it.
+  expect(after[0]?.probe).toBeNull();
+  expect(after[0]?.verified).toBe(false);
+  // And the present-tense answer does move, which is what puts the button back within reach.
+  expect(after[0]?.checkable).toBe(true);
+  // Both answers are read out of this deployment's own tables.
+  expect(reached).toEqual([]);
+});
+
+/**
  * A CONSENT CONNECTION RECORDS NO ACTION, BECAUSE NONE WAS SPENT.
  *
  * CRITERION. A connection confirmed at the vendor is written verified with no action beside it, and

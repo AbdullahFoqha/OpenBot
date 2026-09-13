@@ -153,6 +153,19 @@ type Deployment = {
    */
   probe?: string | null;
   /**
+   * Whether the app has anything to check a key against today, as the connections read answers.
+   *
+   * A SECOND FIELD BECAUSE IT IS A SECOND QUESTION. `probe` above is the record of what the last
+   * check SPENT; this is what the app publishes NOW, and it is what the Re-check button is drawn
+   * from. They agree until an app starts publishing something it did not publish when the key was
+   * taken — which is the state a deployment reaches by an administrator pressing Refresh, and the
+   * one the button was unreachable in while it read the record.
+   *
+   * Left off by default for the same reason `probe` is, and false where it is left off: a held row
+   * carries neither, and a closed gate is what a row nothing has said about should draw.
+   */
+  checkable?: boolean;
+  /**
    * What a re-check answers when somebody presses for one, as the route's whole body.
    *
    * `probe` travels with the verdict because the verdict alone is not an answer: the only
@@ -189,6 +202,7 @@ function installDeployment(deployment: Deployment): Server {
     verifiedAt: null as string | null,
     rejects: undefined as string | undefined,
     probe: undefined as string | null | undefined,
+    checkable: false,
     recheckAnswer: { verified: true, verifiedAt: RECHECKED_AT, probe: PROBE },
     ...deployment,
   };
@@ -213,12 +227,18 @@ function installDeployment(deployment: Deployment): Server {
                 verified: state.verified,
                 verifiedAt: state.verifiedAt,
                 /*
-                 * Derived by the server out of the app's recorded actions, so it is on every
-                 * brokered row a page load reads and not only on the answer to a write. Undefined
-                 * here is the field being absent from the JSON, which is what a deployment whose
-                 * app publishes nothing this stub was told about sends.
+                 * The action the last check recorded, so it is on every brokered row a page load
+                 * reads and not only on the answer to a write. Undefined here is the field being
+                 * absent from the JSON, which is what a held connection's row looks like.
                  */
                 probe: state.probe,
+                /*
+                 * And what the app publishes today, which is the other question and the one the
+                 * Re-check button asks. A read that sent only the record left the button gated on
+                 * what a past check spent, so a key nothing was spent on could never have anything
+                 * spent on it.
+                 */
+                checkable: state.checkable,
               },
             ]
           : [],
@@ -727,6 +747,12 @@ function accountState(overrides: Partial<BrokeredAccount>): BrokeredAccount {
      * that are about the three the server DOES send say `null` or a name for themselves.
      */
     probe: undefined,
+    /*
+     * FALSE IS THE DEFAULT BECAUSE IT IS THE CLOSED GATE, and the cases below that are about the
+     * Re-check button say so for themselves. It is the app's own question — is there anything to
+     * check a key against today — and not the record `probe` above carries.
+     */
+    checkable: false,
     recheck: () => {},
     rechecking: false,
     requestFields: () => {},
@@ -793,6 +819,9 @@ test("Re-check appears only where a check is possible, and asks when pressed", a
   let checks = 0;
   const checkable = renderRow(
     accountState({
+      // The app has something to spend the key on, which is the button's whole condition and is
+      // asked of the app rather than of anything a past check recorded.
+      checkable: true,
       connected: true,
       kind: "fields",
       recheck: () => {
@@ -809,13 +838,19 @@ test("Re-check appears only where a check is possible, and asks when pressed", a
   cleanup();
 
   /*
-   * AN APP WITH NOTHING TO CHECK A KEY AGAINST, which is the null probe the server sends: no action
-   * this deployment could safely spend the key on, so there is no check to make and nothing to
-   * offer. Not the same as a key nothing has checked YET — that one keeps its button, because the
-   * person who has just fixed their key is exactly who reaches for it.
+   * AN APP WITH NOTHING TO CHECK A KEY AGAINST, which is what the server answers `checkable: false`
+   * for: no action it could safely spend the key on, so there is no check to make and nothing to
+   * offer. Not the same as a key nothing has checked YET — a null RECORD keeps its button, because
+   * the person who has just fixed their key is exactly who reaches for it, and because the record
+   * is the only place an action can come from.
    */
   const unchecked = renderRow(
-    accountState({ connected: true, kind: "fields", probe: null }),
+    accountState({
+      checkable: false,
+      connected: true,
+      kind: "fields",
+      probe: null,
+    }),
   );
 
   expect(unchecked.queryByRole("button", { name: "Re-check" })).toBeNull();
@@ -948,6 +983,9 @@ test("Re-check is offered where the key is bad and withheld where there is nothi
   let checks = 0;
   const rejected = renderRow(
     accountState({
+      // The app still publishes what the refused check was spent on, which is the ordinary shape of
+      // this state and what puts the button within reach of somebody who has fixed their key.
+      checkable: true,
       connected: true,
       kind: "fields",
       probe: PROBE,
@@ -965,11 +1003,16 @@ test("Re-check is offered where the key is bad and withheld where there is nothi
   cleanup();
 
   /*
-   * And withheld where the answer said there is nothing to check with. Pressing it there could only
-   * spend a request to be told the same null probe again.
+   * And withheld where the app has nothing to check with. Pressing it there could only spend a
+   * request to be told the same nothing again.
    */
   const nothingToCheck = renderRow(
-    accountState({ connected: true, kind: "fields", probe: null }),
+    accountState({
+      checkable: false,
+      connected: true,
+      kind: "fields",
+      probe: null,
+    }),
   );
 
   expect(nothingToCheck.queryByRole("button", { name: "Re-check" })).toBeNull();
@@ -995,6 +1038,8 @@ test("disconnecting a key names the step this deployment cannot take", () => {
 test("a key re-checked and then disconnected stops claiming it was checked", async () => {
   installDeployment({
     authScheme: "API_KEY",
+    // The app publishes something to check the key against, so the button this test presses exists.
+    checkable: true,
     composioConfigured: true,
     confirms: true,
     fields: [PERPLEXITY_KEY],
@@ -1065,6 +1110,8 @@ test("a rejected key still says so on a page that has only read, and still offer
    */
   installDeployment({
     authScheme: "API_KEY",
+    // Still publishing what the refused check was spent on, which is what offers the way back.
+    checkable: true,
     composioConfigured: true,
     confirms: true,
     fields: [PERPLEXITY_KEY],
@@ -1096,6 +1143,8 @@ test("a rejected key still says so on a page that has only read, and still offer
    */
   installDeployment({
     authScheme: "API_KEY",
+    // Still publishing what the refused check was spent on, which is what offers the way back.
+    checkable: true,
     composioConfigured: true,
     confirms: true,
     fields: [PERPLEXITY_KEY],
@@ -1109,6 +1158,87 @@ test("a rejected key still says so on a page that has only read, and still offer
 
   expect(
     await admin.findByText(/was checked against Gmail and rejected/),
+  ).toBeTruthy();
+  expect(await admin.findByRole("button", { name: "Re-check" })).toBeTruthy();
+});
+
+test("a key nothing was tried on offers Re-check once the app has something to try, and still says nothing was tried", async () => {
+  /*
+   * THE DEADLOCK, AND ITS GUARD, IN ONE ROW. The server records what a check SPENT and answers
+   * separately whether the app has anything to spend TODAY, and this row is the state where those
+   * two part company: a key accepted against an app that published nothing, under an app that
+   * publishes something now.
+   *
+   * While the button read the record, this row had no way out. The check spent nothing, so the
+   * record is null for good; the button was withheld on a null; and pressing that button is the
+   * only thing in the product that could ever put an action in the record. Withholding it was the
+   * safe direction for a question about the app and the wrong answer to it.
+   *
+   * AND THE SENTENCE MUST NOT MOVE WITH IT. What the row SAYS is drawn from the record, so it goes
+   * on saying the key was taken and never tried — which is what happened, and stays what happened
+   * however much the app has published since. A screen that let the button's question write the
+   * sentence would be the accusation this record exists to prevent, arriving by the other door.
+   */
+  const row = renderRow(
+    accountState({
+      checkable: true,
+      connected: true,
+      kind: "fields",
+      probe: null,
+    }),
+  );
+
+  expect(row.getByRole("button", { name: "Re-check" })).toBeTruthy();
+  expect(
+    row.getByText(/accepted without being checked against Gmail/),
+  ).toBeTruthy();
+  // And never the sentence written for a key the vendor refused: nothing was refused here.
+  expect(row.queryByText(/and rejected/)).toBeNull();
+
+  cleanup();
+
+  /*
+   * AND THE SAME OFF A PAGE THAT HAS ONLY READ, on both screens. Nothing is pressed here, so every
+   * field the row branches on came out of the connections read — which is the only place the second
+   * answer can come from, and the two screens wire the hook up separately.
+   */
+  installDeployment({
+    authScheme: "API_KEY",
+    checkable: true,
+    composioConfigured: true,
+    confirms: true,
+    fields: [PERPLEXITY_KEY],
+    recorded: true,
+    verified: false,
+    verifiedAt: null,
+    probe: null,
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  expect(
+    await view.findByText(/accepted without being checked against Gmail/),
+  ).toBeTruthy();
+  expect(await view.findByRole("button", { name: "Re-check" })).toBeTruthy();
+
+  cleanup();
+
+  installDeployment({
+    authScheme: "API_KEY",
+    checkable: true,
+    composioConfigured: true,
+    confirms: true,
+    fields: [PERPLEXITY_KEY],
+    recorded: true,
+    verified: false,
+    verifiedAt: null,
+    probe: null,
+  });
+
+  const admin = renderAdminScreen(queryClient());
+
+  expect(
+    await admin.findByText(/accepted without being checked against Gmail/),
   ).toBeTruthy();
   expect(await admin.findByRole("button", { name: "Re-check" })).toBeTruthy();
 });

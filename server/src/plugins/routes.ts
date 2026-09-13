@@ -729,20 +729,27 @@ export function createPluginRoutes(
      *
      * CONCATENATED WITHOUT REWRITING, because the fields a settings page draws from — the server
      * id, the scope, the date — line up across the two reads, and one row template can draw either
-     * kind. What does not line up is what `brokeredConnectionsFor` adds — `verified`, `verifiedAt`
-     * and `probe` — so the list that leaves here is not uniform. Those travel because a brokered
-     * row is the only one with anything to re-check: this deployment holds no secret for it, only a
-     * note that Composio said yes, and that note can drift when somebody ends the connection in
-     * Composio's own dashboard. `probe` rides with the other two because the first of them cannot
-     * be read alone — three situations share one `verified: false`, and which action the check
-     * actually SPENT is what separates them on a page that has done nothing but load. It is a
-     * record of that check rather than a reading of what the app publishes now, and the difference
-     * is not academic: see `brokeredConnectionsFor`, where an administrator's press of Refresh
-     * moved the second without touching the first and the page accused a key nobody had tried. A held
-     * connection has no equivalent question, so its rows carry no such fields, and their absence is
-     * what tells the two READS apart. It is not how a reader learns how an app connects: that is
-     * the app's recorded `authScheme`, and a page asking this list instead would be deriving a
-     * second answer to a question the row already carries.
+     * kind. What does not line up is what `brokeredConnectionsFor` adds — `verified`, `verifiedAt`,
+     * `probe` and `checkable` — so the list that leaves here is not uniform. Those travel because a
+     * brokered row is the only one with anything to re-check: this deployment holds no secret for
+     * it, only a note that Composio said yes, and that note can drift when somebody ends the
+     * connection in Composio's own dashboard. `probe` rides with the first two because the flag
+     * cannot be read alone — three situations share one `verified: false`, and which action the
+     * check actually SPENT is what separates them on a page that has done nothing but load.
+     *
+     * `probe` AND `checkable` ARE TWO ANSWERS AND NOT ONE SENT TWICE, and a caller that treats them
+     * as interchangeable breaks the page in one of two opposite ways. `probe` is a record of the
+     * check that was made; `checkable` is whether the app has anything to check with NOW. They
+     * agreed while the first was derived, and an administrator's press of Refresh moved what the
+     * app publishes without touching what the check spent — so the page accused a key nobody had
+     * tried. Recording the first fixed that and deadlocked the other half: a key nothing was spent
+     * on reads null for good, and the button that is the only way to ever spend one was gated on
+     * that null. So the sentence is drawn off `probe` and the button off `checkable`; see
+     * `brokeredConnectionsFor`, which sets both failures out in full. A held connection has no
+     * equivalent question, so its rows carry none of these fields, and their absence is what tells
+     * the two READS apart. It is not how a reader learns how an app connects: that is the app's
+     * recorded `authScheme`, and a page asking this list instead would be deriving a second answer
+     * to a question the row already carries.
      *
      * SORTED, so two requests answer in the same order. Each read is ordered by server id within
      * its own table, and concatenating two sorted lists is not a sorted list. Compared as plain

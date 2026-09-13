@@ -3954,21 +3954,42 @@ export function createPluginStore(options: PluginStoreOptions) {
      * a page that goes on to blame a failed withdrawal is right on the connect path and FALSE on the
      * re-check, where nothing ever tried to remove anything.
      *
-     * WHAT NO LONGER TRAVELS WITH IT IS "COULD THIS BE CHECKED NOW", and that is a different
-     * question with a different answer: {@link probeActionFor}, asked of the app rather than of the
-     * connection. The two diverge exactly when the listing has moved since the check — the case this
-     * column exists for — so a caller that needs the second must ask for it rather than read it off
-     * this one. The settings page gates its Re-check button on this field today, which was the same
-     * question while the field was derived and is not any more: a connection nothing was ever spent
-     * on reads null for good, so the button stays withheld even where the app has since published
-     * something to spend. Withholding it is the safe direction and the honest answer here is still
-     * what happened, but the screen's question is the app's and wants the chooser.
+     * `checkable` IS THE OTHER QUESTION, AND IT TRAVELS SEPARATELY BECAUSE COLLAPSING THE TWO IS
+     * WHAT DEADLOCKED THE SETTINGS SCREEN. "What did the check SPEND" is a fact about the past, and
+     * `probe` answers it. "Does this app have anything to check with TODAY" is a fact about the
+     * present, and this answers that — out of {@link probeActionFor}, asked of the APP rather than
+     * of the connection. The two agreed for as long as `probe` was derived: one field, one moment,
+     * two questions nobody ever had to tell apart. They part company the instant it became a
+     * record, which is the same instant it started being right about the past.
      *
-     * NOTHING IS CHOSEN PER ROW ANY MORE, so a listing is one query again. The chooser reads every
-     * recorded action for one app and applies a rule — vendor-labelled read, not destructive, no
-     * required inputs, a recorded version, identity action preferred — that has no honest spelling
-     * in SQL, and it was called once per connected app to fill this field. It no longer is: the
-     * value is on the row the query already reads.
+     * THE DEADLOCK IN FULL, BECAUSE IT DOES NOT SELF-HEAL. The page gates its Re-check button on
+     * whether there is anything to check with, and it read `probe` for that. Somebody connects a
+     * key to an app that publishes nothing safe to spend it on: the check spends nothing, the row
+     * records null, and both of those are correct and permanent. An administrator presses Refresh,
+     * the app gains a safe versioned read, and the button is STILL withheld — because the record
+     * still says, truthfully, that nothing was spent. And pressing that button is the only thing in
+     * this product that can ever put an action into the record. The state is stable, wrong, and
+     * unreachable from inside itself: the single act that would end it is the act being withheld.
+     *
+     * SO A CALLER TAKES THE PAST FROM ONE AND THE PRESENT FROM THE OTHER, and must take neither out
+     * of the other one. A screen drawing its SENTENCE off `checkable` would accuse a key nobody
+     * tried, which is the defect the recorded column was made for; a screen gating its BUTTON on
+     * `probe` is the deadlock above. Neither field is a weaker spelling of the other, and the
+     * moment one is asked to answer both questions the two failures simply trade places.
+     *
+     * WHICH COSTS ONE QUERY PER CONNECTED APP, AND THAT IS THE RIGHT PRICE. Making `probe` a stored
+     * column took the per-row call out and left a listing that was one query; this puts it back.
+     * The alternative is to fold the chooser's rule into the join — vendor-labelled read, not
+     * destructive, no required inputs, a recorded version — and that rule has no honest spelling in
+     * SQL: `required` is the vendor's own JSON Schema stored unchanged, and deciding whether it is
+     * a non-empty list of names is a thing JavaScript does and a `json` operator does badly. So
+     * folding it in means writing the rule a SECOND time, in a second language, over the same rows,
+     * and this file already records what a rule in two places costs: while the version condition
+     * sat in one of them, an app whose chosen action had no version connected honestly as "nothing
+     * was tried" and reloaded as "your key was checked and rejected". {@link probeActionFor} is the
+     * one authority on what can be checked, and a listing that asks it N times cannot disagree with
+     * the probe that asks it once. N is the apps ONE person has connected — a handful of indexed
+     * reads by server id, made in parallel — behind a settings page and not on any hot path.
      *
      * `verifiedAt` STAYS NULL WHERE IT IS NULL, unlike `connectedAt`, which collapses to `""`
      * because a row cannot exist without one and the fallback is unreachable. Null here is
@@ -3986,6 +4007,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         verified: boolean;
         verifiedAt: string | null;
         probe: string | null;
+        checkable: boolean;
       }[]
     > {
       const rows = await database
@@ -4004,16 +4026,27 @@ export function createPluginStore(options: PluginStoreOptions) {
         .where(eq(composioConnections.userId, userId))
         .orderBy(asc(mcpServers.id));
 
-      return rows.map((row) => ({
-        serverId: row.serverId,
-        scope: "",
-        connectedAt: iso(row.connectedAt) ?? "",
-        verified: row.verified,
-        verifiedAt: iso(row.verifiedAt),
-        // The name alone, because that is what the four states are told apart by; the version the
-        // check was made at is the caller-of-the-call's business, and this read makes none.
-        probe: row.probeAction,
-      }));
+      return await Promise.all(
+        rows.map(async (row) => ({
+          serverId: row.serverId,
+          scope: "",
+          connectedAt: iso(row.connectedAt) ?? "",
+          verified: row.verified,
+          verifiedAt: iso(row.verifiedAt),
+          // The name alone, because that is what the four states are told apart by; the version the
+          // check was made at is the caller-of-the-call's business, and this read makes none.
+          probe: row.probeAction,
+          /*
+           * WHETHER, NOT WHICH. The chooser names an action and this keeps only the yes or no,
+           * because the yes or no is the whole of the question being asked: is there anything to
+           * spend a key on. Carrying the name would put a second action name on a row that already
+           * has one, inches from the field that records what was actually spent — and the first
+           * reader to draw a sentence off the wrong one re-opens the defect that made `probe` a
+           * record. A boolean cannot be mistaken for a record of anything.
+           */
+          checkable: (await this.probeActionFor(row.serverId)) !== null,
+        })),
+      );
     },
 
     /**
@@ -4090,11 +4123,14 @@ export function createPluginStore(options: PluginStoreOptions) {
      * one question. While it sat downstream — read by the probe, unknown to everything else — there
      * were two, and the weaker of them was what the connections listing derived its `probe` field
      * from: an app whose chosen action had no version connected honestly as "nothing was tried",
-     * then reloaded as "your key was checked and rejected". That listing no longer asks this
-     * function anything — {@link brokeredConnectionsFor} reads what the check RECORDED, because no
-     * derivation from today's metadata can be right about yesterday's check — so a split predicate
-     * would no longer show up on a settings page. It would show up somewhere worse: in a probe that
-     * chose an action it then refused to send. A filter also lets the search CONTINUE: a versionless
+     * then reloaded as "your key was checked and rejected". That listing no longer derives that
+     * field from here — {@link brokeredConnectionsFor} reads what the check RECORDED, because no
+     * derivation from today's metadata can be right about yesterday's check. It still asks this
+     * function a question, but a present-tense one: whether the app has anything to check with now,
+     * kept as a yes or no beside the record. A split predicate would therefore no longer put a
+     * false sentence on a settings page; it would show up in two worse places — a probe that chose
+     * an action it then refused to send, and a button offered over an app nothing can be spent on.
+     * A filter also lets the search CONTINUE: a versionless
      * candidate is passed over for the next safe read rather than short-circuiting the whole app to
      * "nothing to try", so an app that can be checked is.
      *

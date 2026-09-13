@@ -98,11 +98,20 @@ function RouteComponent() {
     /*
      * PASSED THROUGH UNFLATTENED, unlike the two above. Their fallbacks are the server's own column
      * defaults, so an absent field and a recorded one mean the same thing; this one's null is the
-     * server saying the app publishes nothing safe to check a key against, which is a different
-     * fact from having been told nothing. Collapsing the two would hand the row a verdict on every
-     * page load that has no answer behind it.
+     * server saying the last check of this key spent nothing, which is a different fact from having
+     * been told nothing. Collapsing the two would hand the row a verdict on every page load that
+     * has no record behind it.
      */
     probe: connection?.probe,
+    /*
+     * AND THIS ONE IS FLATTENED AGAIN, because it is a gate and not a verdict. `probe` is the
+     * record of what the last check spent and this is whether the app has anything to check with
+     * today — two questions, which is why they are two fields: gating the Re-check button on the
+     * record left a key nothing was ever spent on unable to ever have anything spent on it. A
+     * missing gate and a closed gate are the same gate, so absent collapses to false here where a
+     * missing verdict above may not collapse to a null one.
+     */
+    checkable: connection?.checkable ?? false,
   });
 
   if (plugins.isPending) {
