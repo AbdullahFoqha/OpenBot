@@ -96,7 +96,13 @@ export type ComposioAction = {
    * an empty one is.
    */
   inputParameters?: Record<string, unknown>;
-  /** Behaviour labels mixed in with topical ones. See {@link effectOf}. */
+  /**
+   * Behaviour labels mixed in with topical ones. See {@link effectOf}.
+   *
+   * Absent for an action that publishes none, which lands on write like every other unlabelled one.
+   * The vendor spells that absence two ways — no key at all, or a `null` — and the guard in
+   * {@link listTools} reads both as the absence they are rather than as a listing it cannot read.
+   */
   tags?: string[];
   /** The version calling this action requires — `20260903_00` and the like. */
   version?: string;
@@ -633,13 +639,31 @@ export async function listTools(connection: {
    *
    * OF EVERY OFFERED ELEMENT, because the map and the `mcp_tools` row are what the whole argument
    * above is about and neither exists for an action the file filter dropped. See that filter.
+   *
+   * AND `null` IS ABSENT HERE, FOR THE REASON THE VERSION GUARD BELOW SPELLS OUT ON THE FIELD NEXT
+   * DOOR. "This action carries no labels" is a real state with an answer already — {@link effectOf}
+   * reads the field as `tags ?? []` and lands an unlabelled action on write, which is what an
+   * unlabelled action IS — and `null` is how JSON spells it. Exempting only `undefined` made those
+   * two spellings of one absence disagree: the same guard whose whole purpose is to keep an app's
+   * recorded actions, effects, versions and grants standing through a listing it cannot read was
+   * aborting the app's ENTIRE listing over a field it CAN read, on every refresh, permanently. One
+   * action publishing a null took every other action on the app down with it, and no later refresh
+   * recovers what the refusal keeps refusing. That is the loss this guard is written to avoid.
+   *
+   * WHICH IS THE FIELD AND NOT ITS ELEMENTS. A `tags` of `[null]` is still refused: the list is
+   * there, and a label that is not a label is the silent misclassification above, not an absence.
+   *
+   * READ AS `unknown` for the reason the version beside it is — the type is this module's
+   * projection and the value is the vendor's.
    */
-  const oddTags = offered.find(
-    (action) =>
-      action.tags !== undefined &&
-      (!Array.isArray(action.tags) ||
-        action.tags.some((label) => typeof label !== "string")),
-  );
+  const oddTags = offered.find((action) => {
+    const tags: unknown = action.tags;
+    return (
+      tags !== undefined &&
+      tags !== null &&
+      (!Array.isArray(tags) || tags.some((label) => typeof label !== "string"))
+    );
+  });
   if (oddTags) {
     throw new Error(
       `Composio's action list for ${toolkit} described ${oddTags.slug.trim()}'s tags as something other than a list of labels, and those labels are the only thing that says whether an action reads or writes and whether it destroys anything. Nothing was refreshed and the actions already recorded for this app are kept rather than replaced by a listing whose effects could not be read.`,

@@ -1205,8 +1205,26 @@ function actionOf(
    * absent before parsing. Each of those reaches `./composio` as the absence it is and is defaulted
    * where a column has a default. What is refused is the other thing: a field that is THERE and is
    * not what this file has told `./composio` it is.
+   *
+   * AND `null` IS THE WIRE'S OTHER SPELLING OF ABSENT, WHICH ALL THREE OF THESE USED TO REFUSE.
+   * That directly contradicted the file this seam reports to: `./composio`'s version guard exempts
+   * `null` on purpose and writes down why — "refusing it would turn a healthy refresh into a total
+   * failure for every app that publishes one" — and the three reads it makes of these fields are
+   * `description ?? ""`, `inputParameters ?? {}` and `version?.trim()`, every one of them already
+   * null-safe. So the layer that had no trouble with a null was protected by a layer that refused
+   * it, and the refusal is not a dropped field: {@link ComposioBroker}'s listing stops whole, so
+   * every OTHER action on the app keeps neither its effect nor its version, and the grants pointing
+   * at them are stranded until a vendor this deployment does not control stops sending a null.
+   *
+   * NORMALIZED HERE RATHER THAN HANDED ON, because {@link ComposioAction} spells all three
+   * optional-and-typed, and a `null` travelling under that declaration is the same untrue assertion
+   * these guards exist to stop. `undefined` is what an absence is on this side of the seam.
+   *
+   * `tags` IS STILL NOT READ HERE AT ALL, for the reason {@link VendorToolRow} gives: `./composio`
+   * refuses a `tags` that is not a list of labels where it reads them — and exempts a null there on
+   * exactly this argument — and a check on both sides of one seam is a check nobody maintains.
    */
-  const description = row.description;
+  const description = row.description ?? undefined;
   if (description !== undefined && typeof description !== "string") {
     throw new Error(
       `Composio sent ${sent(description)} where the description of ${at} belongs, and that value is written into this app's tools and read back as text, so the list was not refreshed and the tools already held are untouched. ${VENDOR_SHAPE_REMEDY}`,
@@ -1219,19 +1237,17 @@ function actionOf(
    * action, which `./composio` treats as the ordinary case of an action that publishes none: every
    * tool would reach a model with an open schema and nothing would report a fault.
    */
-  const inputParameters = row.input_parameters;
+  const inputParameters = row.input_parameters ?? undefined;
   if (
     inputParameters !== undefined &&
-    (typeof inputParameters !== "object" ||
-      inputParameters === null ||
-      Array.isArray(inputParameters))
+    (typeof inputParameters !== "object" || Array.isArray(inputParameters))
   ) {
     throw new Error(
       `Composio sent ${sent(inputParameters)} where the input schema of ${at} belongs, and this deployment stores that value as the action's schema and shows it to a model as Composio's own. An action offered with a schema that is not one is a call nothing can get right, so the list was not refreshed and the tools already held are untouched. ${VENDOR_SHAPE_REMEDY}`,
     );
   }
 
-  const version = row.version;
+  const version = row.version ?? undefined;
   if (version !== undefined && typeof version !== "string") {
     throw new Error(
       `Composio sent ${sent(version)} where the version of ${at} belongs, and the version is what a later call to this action asks Composio for, so the list was not refreshed and the tools already held are untouched. ${VENDOR_SHAPE_REMEDY}`,
@@ -2574,7 +2590,18 @@ export function buildComposioClient(
        * a passing parse still admits an app with no name — which would compare unequal to every
        * toolkit and refuse this call as a mismatch with nothing on the other side of the sentence.
        */
-      const answeredApp = resolved.toolkit;
+      /*
+       * `?? undefined` BECAUSE ABSENT ALREADY HAS A SENTENCE HERE AND `null` IS THE OTHER SPELLING
+       * OF IT. The mismatch refusal below already says "no app at all" for an action the vendor
+       * attributes to nothing, so absence is an answer on this path rather than a fault. Exempting
+       * only `undefined` read a `null` as an app that was PRESENT and then took `.slug` off it —
+       * `null is not an object (evaluating 'answeredApp.slug')`, thrown from outside every vendor
+       * `try` in this file, which `./composio` puts into a model's context and an audit row as this
+       * deployment's account of what happened. That is the same `undefined`-only exemption the
+       * three field guards in {@link actionOf} carried, failing the loud way instead of the total
+       * one.
+       */
+      const answeredApp = resolved.toolkit ?? undefined;
       let ran: string | undefined;
       if (answeredApp !== undefined) {
         /*

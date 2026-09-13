@@ -1483,6 +1483,43 @@ describe("listing an app's actions", () => {
     }
   });
 
+  test("an absent tags list is still absent rather than unreadable", async () => {
+    /*
+     * THE LIMIT ON THE TWO REFUSALS ABOVE, AND THE SAME ONE THE VERSION GUARD BELOW ALREADY DRAWS.
+     * "This action carries no labels" is a real state with an answer already — `effectOf` reads the
+     * field as `tags ?? []` and lands the action on write, which is what an unlabelled action is —
+     * and `null` is how JSON spells it. Refusing it would abort the WHOLE listing for the app, so
+     * one action publishing a null strands every other action's effect, version and grant, on every
+     * refresh, permanently. That is the loss these refusals exist to prevent rather than to cause.
+     *
+     * ASKED OF THE FIELD AND NOT OF ITS ELEMENTS. A `tags` of `[null]` is still refused above: the
+     * list is present, and a label that is not a label is the silent misclassification that guard
+     * is about.
+     */
+    useComposioClient(
+      recording({
+        listActions: async () =>
+          [
+            { slug: "GMAIL_NO_TAGS", description: "Unlabelled." },
+            {
+              slug: "GMAIL_NULL_TAGS",
+              description: "Null labels.",
+              tags: null,
+            },
+          ] as unknown as ComposioAction[],
+      }).client,
+    );
+
+    const listed = await listTools({ url: "composio://gmail" });
+
+    expect(
+      listed.map((tool) => [tool.name, tool.effect, tool.destructive]),
+    ).toEqual([
+      ["GMAIL_NO_TAGS", "write", false],
+      ["GMAIL_NULL_TAGS", "write", false],
+    ]);
+  });
+
   test("a version that is not a version breaks the listing rather than the runtime", async () => {
     /*
      * THE FIELD BESIDE THE LABELS, WITH THE FAILURE THE LABELS' GUARD EXISTS TO PREVENT. `version`

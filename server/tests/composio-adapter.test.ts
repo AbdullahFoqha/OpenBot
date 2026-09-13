@@ -3897,6 +3897,46 @@ describe("a vendor answer that is one object rather than a listing", () => {
     expect(ran).toEqual([]);
   });
 
+  test("an action resolved with a null app is refused rather than crashed over", async () => {
+    /*
+     * THE SAME `undefined`-ONLY EXEMPTION AS THE THREE FIELD GUARDS IN {@link actionOf}, ONE CALL
+     * OVER, AND IT FAILS HARDER. "Composio named no app for this action" is a state this block
+     * already has a sentence for — `ran ?? "no app at all"` — so absence is an answer here; `null`
+     * is the wire's other spelling of it, and `answeredApp !== undefined` read it as PRESENT and
+     * then took `.slug` off it. That is a bare "null is not an object" thrown from outside every
+     * vendor `try` in the adapter, which is the one outcome this file's sentences may never become:
+     * `./composio` puts what comes out of `execute` into a model's context and an audit row.
+     *
+     * NOTHING IS RUN EITHER WAY, WHICH IS THE HALF THAT WAS NEVER IN DOUBT AND IS ASSERTED ANYWAY.
+     * The refusal exists because the gate in `./access` cleared this run against the app the
+     * connection names, and an action the vendor attributes to nothing cannot be shown to be that
+     * app.
+     */
+    const ran: unknown[] = [];
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          getRawComposioToolBySlug: async () => ({
+            slug: "GMAIL_FETCH_EMAILS",
+            name: "Fetch emails",
+            toolkit: null,
+          }),
+          execute: async (...call: unknown[]) => {
+            ran.push(call);
+            return { successful: true, data: {} };
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(actions.execute(GMAIL_CALL, {}));
+
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/no app at all/);
+    expect(refusal.message).toMatch(/GMAIL_FETCH_EMAILS/);
+    expect(ran).toEqual([]);
+  });
+
   test("a redirect that is not a url is refused rather than handed to a browser", async () => {
     const { broker } = buildComposioClient(
       fakeVendor({
@@ -4190,6 +4230,54 @@ describe("what a malformed field of a row actually costs", () => {
       fakeVendor({
         tools: {
           list: async () => ({ items: [{ slug: "GMAIL_FETCH_EMAILS" }] }),
+        },
+      }),
+    );
+
+    expect(
+      await actions.listActions("gmail", { limit: WHOLE_LISTING }),
+    ).toEqual([
+      {
+        slug: "GMAIL_FETCH_EMAILS",
+        description: undefined,
+        inputParameters: undefined,
+        tags: undefined,
+        version: undefined,
+      },
+    ]);
+  });
+
+  /**
+   * AND `null` IS HOW THE WIRE SPELLS THAT ABSENCE, WHICH IS THE HALF THE THREE GUARDS ABOVE MISSED.
+   *
+   * `./composio` documents the exemption on the field beside these — "`null` IS NOT ONE OF THESE,
+   * and that is deliberate": an action with no version is listed with none, JSON says so with a
+   * null, and refusing it turns a healthy refresh into a total failure for every app that publishes
+   * one. Nothing about a null description or a null input schema is different, and a refusal here
+   * is the same total failure one layer lower down: the whole listing stops, so every OTHER action
+   * on the app loses its effect, its version and the grants pointing at it, on every refresh,
+   * permanently.
+   *
+   * WHAT EACH LANDS ON ALREADY READS A NULL. `./composio` maps `description ?? ""` and
+   * `inputParameters ?? {}` and `version?.trim()`, so the value crossing this seam as absent is the
+   * value those three lines were written for. So a null is normalized to absent HERE rather than
+   * handed on, because {@link ComposioAction} spells all three optional-and-typed and a null
+   * travelling under that declaration is the same untrue assertion the guards exist to stop.
+   */
+  test("an action whose description, schema or version is null is still listed", async () => {
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          list: async () => ({
+            items: [
+              {
+                slug: "GMAIL_FETCH_EMAILS",
+                description: null,
+                input_parameters: null,
+                version: null,
+              },
+            ],
+          }),
         },
       }),
     );
