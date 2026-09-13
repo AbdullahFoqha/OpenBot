@@ -1,4 +1,5 @@
-import { and, desc, eq, gt, inArray, lt, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lt, or, sql } from "drizzle-orm";
+import type { PgColumn } from "drizzle-orm/pg-core";
 import type { Database } from "./db/client";
 import { auditEvents } from "./db/schema";
 
@@ -443,6 +444,13 @@ export const PERSON_INITIATOR: AuditInitiator = { kind: "person" };
 /** The deployment acting as itself: at start-up, or refusing a caller it could not identify. */
 export const DEPLOYMENT_INITIATOR: AuditInitiator = { kind: "deployment" };
 
+/*
+ * The vocabulary, kept as the declaration of what a row's `initiator_kind` can be.
+ *
+ * It no longer screens the `initiatorKind` filter. Screening there dropped an unrecognised kind
+ * from the requested set, and a requested set left empty widened back into no filter at all; see
+ * `matchesRequested`. An unrecognised kind is now simply a kind no row carries.
+ */
 export const auditInitiatorKinds = [
   "person",
   "deployment",
@@ -451,12 +459,6 @@ export const auditInitiatorKinds = [
 ] as const;
 
 export type AuditInitiatorKind = (typeof auditInitiatorKinds)[number];
-
-export function isAuditInitiatorKind(
-  value: string,
-): value is AuditInitiatorKind {
-  return (auditInitiatorKinds as readonly string[]).includes(value);
-}
 
 export type AuditEventInput = {
   eventType: AuditEventType;
@@ -603,31 +605,65 @@ function decodeCursor(cursor: string): AuditCursor {
   }
 }
 
+/**
+ * A comma-separated filter, read as the set of values it names.
+ *
+ * `undefined` means the caller did not ask, and the column goes unconstrained. `[]` means the caller
+ * did ask, and named nothing this trail could hold — a different answer, and the one the conditions
+ * below have to keep telling apart.
+ *
+ * A blank value counts as not asking, the way a blank `?limit=` still reads as the default page.
+ * Anything else the caller typed is an ask.
+ */
+function requestedValues(raw: string | undefined) {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The condition a requested set puts on a column, including the condition that nothing satisfies.
+ *
+ * An asked-for set that came out empty must narrow to nothing. It used to widen instead: both
+ * comma-separated filters collapsed an empty set into `undefined`, which `and(...)` drops, so
+ * `?initiatorKind=nonsense` — where the unrecognised kind was screened out of the set — answered
+ * the question "what did this initiator do" with every row in the trail, indistinguishable from a
+ * real result. On the record of whose credential was spent on what, handing back everything is the
+ * wrong direction to fail.
+ *
+ * A value that matches nothing answers empty rather than 400, matching how every other value
+ * parameter on this endpoint already behaves: `eventType`, `actorUserId`, `targetType` and
+ * `targetId` all take a free-form string and answer with whatever it matches, and `eventType` names
+ * a closed vocabulary just as `initiatorKind` does. What earns a 400 here is a value that cannot be
+ * read at all — `from`, `to`, `cursor` — not one that reads fine and names no row. Rejecting an
+ * unknown kind outright would also break `?initiatorKind=routine,nonsense`, which a caller unioning
+ * kinds can still expect to answer for the kind it did name.
+ */
+function matchesRequested(column: PgColumn, values: string[] | undefined) {
+  if (!values) return undefined;
+  const [first, ...rest] = values;
+  if (first === undefined) return sql`false`;
+  if (rest.length === 0) return eq(column, first);
+  return inArray(column, [first, ...rest]);
+}
+
 export function createAuditReader(database: Database): AuditReader {
   return {
     list: async (query) => {
-      const requestedTypes = (query.eventType ?? "")
-        .split(",")
-        .map((type) => type.trim())
-        .filter(Boolean);
-      const requestedInitiators = (query.initiatorKind ?? "")
-        .split(",")
-        .map((kind) => kind.trim())
-        .filter((kind) => isAuditInitiatorKind(kind));
       const conditions = [
-        requestedTypes.length === 1
-          ? eq(auditEvents.eventType, requestedTypes[0] as string)
-          : requestedTypes.length > 1
-            ? inArray(auditEvents.eventType, requestedTypes)
-            : undefined,
+        matchesRequested(
+          auditEvents.eventType,
+          requestedValues(query.eventType),
+        ),
         query.actorUserId
           ? eq(auditEvents.actorUserId, query.actorUserId)
           : undefined,
-        requestedInitiators.length === 1
-          ? eq(auditEvents.initiatorKind, requestedInitiators[0] as string)
-          : requestedInitiators.length > 1
-            ? inArray(auditEvents.initiatorKind, requestedInitiators)
-            : undefined,
+        matchesRequested(
+          auditEvents.initiatorKind,
+          requestedValues(query.initiatorKind),
+        ),
         query.targetType
           ? eq(auditEvents.targetType, query.targetType)
           : undefined,
