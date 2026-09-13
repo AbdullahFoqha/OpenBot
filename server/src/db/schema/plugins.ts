@@ -76,6 +76,15 @@ export const mcpServers = pgTable("mcp_servers", {
   credentialId: uuid("credential_id").references(() => credentials.id, {
     onDelete: "restrict",
   }),
+  /**
+   * How this app connects, as it was resolved when somebody enabled it.
+   *
+   * Recorded rather than re-derived, because the catalogue is somebody else's and a vendor that
+   * starts publishing a new scheme for an app must not move live connections onto a different
+   * flow underneath them. Null on every row that predates this column, which is exactly the set
+   * that was created by the one path there was: Composio-managed OAuth.
+   */
+  authScheme: text("auth_scheme"),
   /** What the deployment last heard back from it. `null` until the first successful listing. */
   toolsRefreshedAt: timestamp("tools_refreshed_at", { withTimezone: true }),
   /** The last failure, kept so the Plugins page can say why a server has no tools. */
@@ -195,6 +204,10 @@ export const composioConnections = pgTable(
     connectedAt: timestamp("connected_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    /** Whether a real call was made with this connection and answered. See the verify path. */
+    verified: boolean("verified").notNull().default(false),
+    /** When that check last passed, which is what the page reports instead of a present tense. */
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
     updatedAt: updatedAt(),
   },
   (table) => [
