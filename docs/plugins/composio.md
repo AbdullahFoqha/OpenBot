@@ -91,9 +91,16 @@ that finished, `1` for a run that stopped, and `2` for a missing `--user`.
 
 ### 1. Find the app, and read its action count
 
-At `/admin/plugins/composio`, search Composio's directory. The whole directory is fetched in one
-request and searched in this process rather than at the vendor, so what is on screen is the whole
-listing and not a page of it.
+At `/admin/plugins/composio`, search Composio's directory. The directory is read to its end — page
+by page, following Composio's own cursor — and searched in this process rather than at the vendor,
+so what is on screen is a whole listing and not a page of one.
+
+**It is the whole CONNECTABLE listing, which is not the whole catalogue.** The apps that want an
+OAuth application registered by whoever runs this deployment are filtered out before the search
+runs: 56 of the 1540 apps Composio published on 2026-09-13, hidden because there is nowhere here to
+put a client id and secret, and an **Add** button that could only ever meet a refusal is worse than
+an app that is honestly absent. Every other kind is offered. What each of those kinds asks, and of
+whom, is the section after this one.
 
 Each row carries the app's **action count**, and that number is worth reading before pressing
 **Add**. Slack publishes 167 actions, 73 of them reads — several times more than a model handles
@@ -111,11 +118,14 @@ defaults and under a name of its choosing, the first time any person pressed Con
 enable time, named for this deployment, makes it an object an operator can see in their Composio
 dashboard from the moment the app exists — and tighten there, without a code change. It comes before
 anything is written here, so a failure leaves no row behind and pressing the button again is the
-whole recovery.
+whole recovery. Which KIND of config is created depends on how the app connects, and the app that
+needs no authentication gets none at all, because Composio refuses to hold one for it — that is the
+next section.
 
-Connecting an account is then a link minted **against that config**, which is why nothing mints a
-config later: an app whose config was deleted at the dashboard refuses at Connect, naming the
-administrator's step, rather than quietly acquiring a second one that nobody here named or can find.
+An account is then attached **against that config**, whether by a link minted for a consent screen
+or by a key somebody types, which is why nothing mints a config later: an app whose config was
+deleted at the dashboard refuses at Connect, naming the administrator's step, rather than quietly
+acquiring a second one that nobody here named or can find.
 
 Then one ordinary `mcp_servers` row — id `composio-<slug>`, url `composio://<slug>`, provenance
 `composio`, vendor Composio, title from the directory, and no credential of any kind — and then the
@@ -139,13 +149,221 @@ A destructive action renders as danger. Nothing renders as reassurance: an actio
 claim to be destructive is not claiming to be safe, so the absence of the marker is drawn plain,
 never as green.
 
+## The four ways an app connects
+
+Composio's catalogue is not one flow wearing one name. Some apps end at a consent screen the person
+has seen a hundred times; most end at a box asking for an API key they have to go and find; a few
+ask nothing of anybody at all. Measured against the live catalogue on 2026-09-13, 1540 apps:
+
+| Apps | How it connects                                 | What it asks, and of whom                                      |
+| ---: | ----------------------------------------------- | -------------------------------------------------------------- |
+|  121 | Composio's own consent screen                   | Nothing of anybody here. Composio holds the credentials        |
+|   86 | OAuth that registers itself                     | Nothing of anybody at all. A client is minted during consent    |
+| 1243 | A secret the person already holds               | One to three boxes, typed by the person connecting             |
+|   34 | No authentication at all                        | Nothing, ever. There is no account to make                     |
+|   56 | An OAuth application registered by the operator | Not offered here at all — see the last section below           |
+
+**Only the first row of that table used to work.** Every authorization config was created as
+`use_composio_managed_auth`, which is the right object for the apps Composio itself holds developer
+credentials with and the wrong one for everything else. For a self-registering app the failure was
+loud — Composio has no client of its own to manage, so it answered 404 and the app simply could not
+be added. An app that needs no authentication failed in the vendor's own words, because Composio
+will not hold a config for one at all. And for a key app it was quiet and worse: the config was
+accepted, and every person enabled onto it was then sent to a consent screen that had nothing to ask
+them for.
+
+**Which kind an app is, is derived once and then recorded.** The derivation reads what the catalogue
+already publishes — `no_auth`, `composio_managed_auth_schemes`, `auth_schemes` — and the picker and
+the connect screen both read that one answer rather than each guessing for themselves. The order is
+`no_auth` first, and that is not a preference: Composio refuses outright to hold an authorization
+config for an app that needs none, so nothing else an app publishes beside it can be acted on. Then
+managed OAuth, because it asks the person for nothing; then self-registering OAuth, which asks
+nobody for anything; then a scheme whose secret the person already holds. Linear publishes managed
+OAuth *and* an API key, and resolves to the consent flow for exactly that reason.
+
+The resolved answer is written onto the app's row (`mcp_servers.auth_scheme`) when an administrator
+enables it, and every later step — the form, the connect call, the disconnect sentence, the call
+gate — reads the row rather than the catalogue. A connection is a lasting attachment to the
+authorization config it was made against, so a vendor that starts publishing a new scheme for an app
+next month must not move live connections onto a different flow. Pressing **Add** again therefore
+does not rewrite the scheme, with one exception: where nobody has connected there is nothing to
+strand, so the rewrite happens and is how an operator picks up a vendor's change without removing
+the app.
+
+### Composio's consent screen, and an OAuth app that registers itself
+
+These two are one flow from here, which is why the earlier sections describe them without
+distinguishing them: a link is minted, the person leaves for a page at Composio, and they come back
+to a page this deployment chose. Nobody types anything and nobody registers anything.
+
+They differ only in the object created at enable time. A managed app gets
+`use_composio_managed_auth` and rides on the developer app Composio registered with the vendor. A
+self-registering app gets `use_custom_auth` with `DCR_OAUTH` **and no credentials at all**, because
+there are none to hold: the client is registered with the vendor at the moment somebody consents.
+The 86 apps in that row need credentials from nobody — not from Composio, not from whoever runs this
+deployment — and they were unreachable here purely because the wrong kind of config was being asked
+for.
+
+### A secret the person already holds
+
+This is most of the catalogue, and it is the kind that has no consent screen in it. **Connect** on a
+key app does not leave OpenBot: it asks Composio what the app wants, draws those boxes, and the
+press after that carries what was typed in them.
+
+The boxes are the app's own. Their names, labels, help text, defaults and which of them are secret
+are published per app by Composio and used verbatim — one key for most apps, a key and a workspace
+subdomain for Shopify, two values for Firecrawl — and the names are sent back exactly as they came,
+because a name renamed on the way through is a box somebody filled in that no app ever reads. A
+field Composio marks as not user-visible is not drawn. A field of any type other than text, or one
+with no name at all, is a refusal rather than a box drawn blind: somebody typing a path into a box
+labelled *Certificate* and being told they are connected is the failure that guard exists to stop.
+A submitted name the app does not publish is refused too, rather than dropped — a stale form
+connected with the half that still matches is an account every screen here draws as working.
+
+**What is typed in is held by Composio and never by this deployment.** The values arrive on one
+request, travel to Composio in the next call, and are gone when the handler returns. They are not
+written to a table — `composio_connections` goes on being a row that names an app and a person and
+nothing else — not to a log line, not into an error body, and not into the audit row, which records
+the field *names* that were filled and never a value. The one rule this connector reverses for them
+is its own: everywhere else a vendor's thrown object is carried along as `cause` because it holds
+the request it was made for, and on this one call that request is somebody's key, so the adapter
+reads the vendor's sentence and drops the object entirely. What that costs is the diagnostic trail
+on the flow people most often mistype, and the cost is taken knowingly: what an operator gets is
+Composio's own sentence and the request id inside it, which is what Composio's dashboard searches
+on.
+
+### A key is checked once, and the page says when
+
+**Composio does not grade a submitted key.** A connection created with an obviously wrong value
+comes back `ACTIVE`, and stays `ACTIVE` forever after. Left there, "connected" would mean "typed
+something", and the first failure would arrive hours later inside a Bot's answer to somebody.
+
+So a key connection is followed by exactly one call: a read-only, argument-less action the app
+itself publishes, chosen by this deployment from the metadata recorded when the app was enabled and
+never from anything a request said. Both conditions are load-bearing and neither implies the other.
+Read, because a probe must not change anything — and "read" here means Composio labelled the action
+`readOnlyHint`, since everything unlabelled is recorded as a write. Argument-less, because at that
+moment nothing is known about the account beyond the key, so any required argument would have to be
+invented, and an invented one turns *is this key good* into *does this identifier exist*. The two
+together are not belt and braces: the first argument-less action on Stripe's own list is
+`STRIPE_CREATE_BILLING_METER_EVENT_SESSION`, so a probe chosen on "takes no arguments" alone would
+write to somebody's account to find out whether their key works. An identity-shaped name is
+preferred where the app publishes one, and most apps publish some other safe read instead.
+
+It is the only call in this deployment that reaches a vendor without a Bot, a grant check, a policy
+evaluation, content inspection or an `mcp.call_*` row, because there is no Bot to check a grant for.
+What keeps it narrow is structure rather than care. It has exactly two callers — the connect step,
+and a person pressing **Re-check** on their own connection — and neither reads a person out of a
+request body: the account probed is the session's own. The action is chosen by this deployment from
+recorded metadata and never from anything a request named, and it carries no arguments, which is
+also what leaves content inspection nothing to inspect. A probe that ran leaves an
+`mcp.connection_verified` row naming the action and the verdict, so the calls that happened are
+readable; the single exception is a bad key on a first connection, which is undone completely —
+no account, no row, nothing for anybody to do — and files nothing, so that the rows which do exist
+keep meaning *something is still standing here*. The consequence to accept knowingly is that this is
+the first vendor call in this deployment attributable to a person rather than to a Bot, and queries
+over that trail were written assuming otherwise.
+
+What the page then says is the moment it last looked, never a present tense: *Connected with a key
+you provided, last checked 13 Sep.* Three outcomes are possible and the page keeps them apart. The
+probe ran and answered, and the row is verified as of that instant. The probe ran and the vendor
+refused, and the account this connect just made is deleted at Composio **by its id** — not by app,
+because ending every account somebody holds for an app is what disconnect means and the intent here
+is only to undo what just happened — and nothing is recorded. Or there was nothing to try — the app
+publishes no action that passes both conditions, or none at a version this deployment recorded — in
+which case the key is kept and the page says it was accepted without being checked, which is the
+honest sentence and not an apology for one. A person with a perfectly good key must not be told the
+vendor rejected it because an app's listing was thin.
+
+There is one state worse than those, and it has a sentence of its own for that reason: the probe
+failed *and* Composio would not take the account back. Leaving no row then would not mean nothing
+was left behind — it would mean a live account nothing on any screen names and the person cannot
+disconnect, because disconnect works off the row. So the row is written unverified and the person is
+told all three facts rather than left to conclude their key might be fine: *Your key was checked
+against Perplexity and rejected. The account it was checked in still stands at Composio — this
+deployment could not withdraw it — so disconnect it here, or fix the key at Perplexity and press
+Re-check.* An audit row naming the action that was tried records the same state for whoever reads
+the trail a week later, because a sentence one person read once outlives nothing.
+
+**Which of the three a row is in is something only an answer can say.** The connections read carries
+the flag and the date and has no column for the action a check was spent on, so a page load knows
+that a key was taken and nothing has tried it, and says exactly that; the fuller sentences — this
+app publishes nothing safe to try a key on, or your key was checked and rejected and the account is
+still standing — are drawn from an answer that has just named the action. A re-check the vendor
+refuses is not one of those: it is raised, and Composio's own sentence for it reaches the person as
+a refusal rather than as a row that quietly changed its wording. A row that guessed between the
+three on every load would tell somebody their app publishes no probe on the strength of never having
+asked.
+
+**Nothing re-checks on page load.** That call is spent on the person's own account and against their
+own rate limit at the vendor, so verifying on every render would burn somebody's quota at Linear to
+redraw one word on a page they were passing through. **Re-check** is a button, and it runs the same
+probe against the account that already exists: it creates nothing, and a key the vendor rejects
+leaves their account alone — it is the key that is wrong, and taking the account away would destroy
+the thing they are trying to repair. It is drawn on a key connection and on nothing else, and the
+one state it is withheld in is an app that has told this deployment there is nothing to check with,
+where pressing it could only ask for the same answer again. A key the vendor has just rejected keeps
+its button, because that is the person most likely to have gone and fixed something.
+
+### Disconnecting a key does not end it at the vendor
+
+Disconnect promises that an account ends at Composio and not only here, and for a consent app that
+is the whole truth: the grant dies at the provider. For a key app there is nothing upstream to end.
+The account goes at Composio, and the key is still live at the vendor and still works for anyone
+holding it — including whoever else it was already pasted into. So the sentence differs and names
+the step this deployment cannot take: *Removed from Composio. Your key still works at Perplexity —
+rotate it there if you meant to end its access.*
+
+The audit row says the same thing in its own half of the sentence. `vendorRevocationRequested` is
+`false` for a key connection by construction rather than by what the vendor found, because
+`revoke_on_delete` asks a *provider* to end a grant and there is no grant behind a key to withdraw.
+Recording otherwise would be the one thing that field exists not to do: claim a withdrawal nobody
+asked for and nobody could have made.
+
+### An app that needs no authentication has no account, and the gate has to know
+
+Thirty-four apps need no authentication at all, and Composio refuses to hold an authorization config
+for one of them — *"Cannot create an auth config for toolkit hackernews because it does not require
+authentication."* Enabling such an app is therefore the `mcp_servers` row and its actions and
+nothing else: no config, no consent, no account. Its row on a connected-accounts page says the app
+needs none and carries no button, not even a disabled one, because there is no act to offer and a
+greyed control announces a step somebody is missing when they are not.
+
+**The call gate had to learn about this, and the alternative was worse than it looks.** A brokered
+call is decided on one row: `(toolkit, user_id)` in `composio_connections` is the whole of the
+permission. A no-auth app can never have one, so the gate reads the app's recorded scheme beside the
+row it already loads and lets a `NO_AUTH` app through with none. Writing a row anyway would have
+been the easy fix and would have poisoned the table: every row in it means *this person granted this
+deployment access to their account at this app*, and that is how offboarding, the audit trail and
+disconnect all read it. Rows where nobody consented and no account exists are indistinguishable, a
+year later, from rows where somebody did.
+
+### The 56 that are not offered
+
+Fifty-six apps want an OAuth application registered by whoever runs this deployment — a client id
+and a client secret, obtained from each vendor in turn, per app. They are filtered out of the
+picker, so an administrator never meets an **Add** button that cannot work; where one is reached
+anyway, the refusal comes before anything is written and names what the app is asking for.
+
+They are hidden here rather than at the vendor, because the filter is a fact about what this
+deployment can drive and not about what Composio publishes. **A screen to hold a client id and
+secret for a brokered app is a deliberate non-goal, and this sentence exists so that its absence
+does not read as an oversight.** The whole argument of this connector is that there is no OAuth
+client to register and no secret to paste, and an app that requires both is asking for the thing the
+broker was adopted to avoid. One app in thirteen was connectable before this change; these 56 are
+what is left out now, and they are named here so that an operator who goes looking for a Slack-like
+app and does not find it knows which question they are asking.
+
 ## What each person does
 
 At `/settings/connected-accounts`, a brokered app appears beside the OAuth connectors once an
-administrator has enabled it. Open it and press **Connect**. That leaves OpenBot for Composio's
-consent screen and returns to the same page — or, for an administrator who started from the app's
-own page under `/admin/plugins`, back to that page, because leaving a page mid-task and being
-returned to a different one is the round trip this exists to remove.
+administrator has enabled it. Open it and press **Connect**. On a consent app — and on one whose
+OAuth client registers itself, which is the same trip from here — that leaves OpenBot for Composio's
+consent screen and returns to the same page, or, for an administrator who started from the app's own
+page under `/admin/plugins`, back to that page, because leaving a page mid-task and being returned
+to a different one is the round trip this exists to remove. On an app whose secret the person
+already holds, **Connect** goes nowhere: it opens a form and asks for it. The rest of this section
+is about the trip; the section above is about the form.
 
 **The address they come back to is built here, and a caller has no say in it.** It is this
 deployment's `OPENBOT_APP_URL` plus one of two known pages, so what a request can choose is which
@@ -185,9 +403,11 @@ one.* The app's own title, never the row's id. It is per app and nothing more �
 ### Disconnecting
 
 **Disconnect**, on the same page, revokes at Composio first and deletes the row second. The account
-ends at Composio, not just here. Revoke-then-delete is the ordering everywhere in this connector, so
-a failure between the two leaves access dead rather than live and unreachable; pressing Disconnect
-again is the whole recovery. Audited as `mcp.account_disconnected`.
+ends at Composio, not just here — which, for an app whose secret somebody typed, is all it can end,
+and the page says so rather than letting *disconnected* be read as *revoked*. Revoke-then-delete is
+the ordering everywhere in this connector, so a failure between the two leaves access dead rather
+than live and unreachable; pressing Disconnect again is the whole recovery. Audited as
+`mcp.account_disconnected`.
 
 ## The two paths that end somebody else's access
 
@@ -195,7 +415,9 @@ Both of these used to stop at this deployment's own tables, which was the only t
 while there was nothing to revoke with. Both now reach the broker.
 
 **Removing the app** revokes every person's connection to it at Composio, clears the rows, and then
-deletes the authorization config that enabling created. Re-adding the app afterwards starts empty
+deletes the authorization config that enabling created. For an app whose secret people typed, that
+withdrawal again reaches only as far as Composio: their keys stay live at the vendor, and nobody is
+told to rotate one, because nobody here is looking at the screen. Re-adding the app afterwards starts empty
 rather than silently restoring everybody who had connected before.
 
 **Removing the person** revokes each of their brokered connections at Composio before clearing the
