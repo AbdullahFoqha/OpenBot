@@ -179,12 +179,32 @@ export type ServerRecord = {
 /**
  * A server row as the surfaces that only need to know where it is see it.
  *
- * Three columns of {@link ServerRecord} and none of what hangs off it, because the callers this is
+ * Four columns of {@link ServerRecord} and none of what hangs off it, because the callers this is
  * for ask one question: which vendor is this row addressed at. The title travels with the url
  * because their refusals name it — "You already have an account connected to Linear" is the app's
  * name, which is the only one of the two a person has ever seen on a screen.
  */
-export type ServerAddress = { id: string; title: string; url: string };
+export type ServerAddress = {
+  id: string;
+  title: string;
+  url: string;
+  /**
+   * How this row's authorization config was created, for the brokered rows that have one.
+   *
+   * THE RECORDED SCHEME, NEVER A FRESH CATALOGUE READ. An app's config was created as one
+   * particular scheme and every connection standing against that config depends on it, so the
+   * connect path has to open the flow this column names rather than the one the catalogue
+   * publishes for the app today. Re-derived from a listing instead, a vendor that starts
+   * advertising a new scheme would silently move live connections onto a different flow — minting
+   * a consent link against a config that holds keys, or asking for a key where a consent screen is
+   * waiting.
+   *
+   * The same vocabulary the column holds, which the schema comment spells out: the vendor's own
+   * scheme literals, never a {@link BrokerConnection} kind. Null is not an older brokered row; it
+   * is a row that is not brokered.
+   */
+  authScheme: string | null;
+};
 
 export type SkillRecord = {
   id: string;
@@ -3237,6 +3257,7 @@ export function createPluginStore(options: PluginStoreOptions) {
           id: mcpServers.id,
           title: mcpServers.title,
           url: mcpServers.url,
+          authScheme: mcpServers.authScheme,
         })
         .from(mcpServers)
         .where(eq(mcpServers.id, serverId))
