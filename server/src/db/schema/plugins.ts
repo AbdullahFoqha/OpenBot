@@ -216,11 +216,16 @@ export const composioConnections = pgTable(
      *
      * TRUE ON EVERY ROW THAT PREDATES THIS COLUMN WITHOUT A PROBE BEHIND IT. Migration 0030
      * backfilled them to true with `verified_at = connected_at`, and no call was made to earn it:
-     * every one of those rows is a consent connection, which is verified by construction, because
-     * the only way it exists at all is that the vendor's own screen sent the person back connected.
-     * So on a backfilled row the timestamp is the moment of consent, not the moment of a check, and
-     * a reader treating every `verified_at` as "this connection answered then" would be wrong about
-     * exactly the rows that were here first.
+     * every one of the rows it touched is a consent connection, which is verified by construction,
+     * because the only way it exists at all is that the vendor's own screen sent the person back
+     * connected. So on a backfilled row the timestamp is the moment of consent, not the moment of a
+     * check, and a reader treating every `verified_at` as "this connection answered then" would be
+     * wrong about exactly the rows that were here first.
+     *
+     * That is a claim about the backfill and not about the column in general: the writer which
+     * records a consent connection is expected to set `verified` itself, so the meaning holds for
+     * rows written since as well, rather than letting them land on the `false` default that the
+     * never-checked key rows use.
      */
     verified: boolean("verified").notNull().default(false),
     /** When that check last passed, which is what the page reports instead of a present tense. */

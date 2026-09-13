@@ -6542,9 +6542,11 @@ test("a brokered disconnect with nothing to disconnect files nothing in the trai
 /**
  * A brokered connection is visible to the person who made it, under the server row's own id.
  *
- * CRITERION. `brokeredConnectionsFor` answers one row per app this person has connected, shaped
- * exactly as `connectionsFor` answers, and the `serverId` in it is the id of the `mcp_servers` row
- * whose url names that app.
+ * CRITERION. `brokeredConnectionsFor` answers one row per app this person has connected, carrying
+ * the `serverId`, `scope` and `connectedAt` that `connectionsFor` answers with — so one screen
+ * draws both kinds of row — plus the `verified` and `verifiedAt` that only a brokered row has,
+ * because only a brokered row is a thing this deployment can re-check. The `serverId` in it is the
+ * id of the `mcp_servers` row whose url names that app.
  *
  * REASON. `connectionsFor` selects from the vault's join table alone, so a brokered connection was
  * invisible to the browser and the settings screen could not honestly say whether somebody was

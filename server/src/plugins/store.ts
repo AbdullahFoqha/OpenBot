@@ -3739,16 +3739,21 @@ export function createPluginStore(options: PluginStoreOptions) {
      *
      * `scope` IS EMPTY for the reason {@link confirmBrokeredConnection} sets out: Composio grants
      * none that it tells us about, and the field exists to record what the vendor said it granted
-     * rather than what we suppose. It is returned all the same, so the shape matches what
-     * {@link connectionsFor} answers and one screen can draw both kinds of row.
+     * rather than what we suppose. It is returned all the same, so the fields this shares with
+     * {@link connectionsFor} — `serverId`, `scope`, `connectedAt` — line up and one screen can draw
+     * both kinds of row. What comes back here is a SUPERSET of that shape rather than the same one:
+     * `verified` and `verifiedAt` ride along too, and only on a brokered row, because only a
+     * brokered row is a thing this deployment can re-check.
      *
      * `verified` AND `verifiedAt` COME ALONG BECAUSE "connected" IS NOT A PRESENT TENSE HERE.
      * Composio never re-checks a key somebody typed in: it answers ACTIVE for as long as the row
      * exists, whatever the vendor on the other side now thinks of that credential. So a page drawn
      * off `connectedAt` alone would assert something this deployment has not known since the day it
      * was written. These two fields are what lets it say when the claim was last earned instead —
-     * "connected with a key you provided, last checked 13 Sep" — and a consent connection, which
-     * has nothing to re-check, reads differently off the same pair.
+     * "connected with a key you provided, last checked 13 Sep". What the pair separates is a
+     * CHECKED key connection from an unchecked one, and nothing more: which KIND of connection a
+     * row is comes from the app's recorded {@link ServerRecord.authScheme}, which the page branches
+     * on first, and not from anything answered here.
      *
      * `verifiedAt` STAYS NULL WHERE IT IS NULL, unlike `connectedAt`, which collapses to `""`
      * because a row cannot exist without one and the fallback is unreachable. Null here is
