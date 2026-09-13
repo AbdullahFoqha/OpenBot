@@ -167,6 +167,24 @@ export const auditEventTypes = [
    */
   "mcp.oauth_client_registered",
   /*
+   * The vendor was asked whether one person's brokered account is really there, and what it said.
+   *
+   * THE ONE VENDOR CALL IN THIS DEPLOYMENT THAT BELONGS TO A PERSON RATHER THAN TO A BOT, which is
+   * why it is written down on its own instead of joining the `mcp.call_*` family. Every other vendor
+   * call on this trail is a Bot spending a grant: it arrives through the callback endpoint, it names
+   * the Bot that made it, and a reader counting calls per Bot accounts for all of them. This one is
+   * a step inside connect — no endpoint exposes it and no Bot is involved — so what the row names is
+   * the person whose account was asked about, and there is no Bot to name.
+   *
+   * WHICH IS THE PART A QUERY OVER `mcp.*` MUST NOT BE SURPRISED BY. Anything that reads a Bot out
+   * of each payload finds none here, and code that assumes one will either drop the row or
+   * mis-attribute it to whichever Bot was nearest. The row is shaped that way on purpose rather than
+   * borrowing a Bot to look uniform with its neighbours: a call somebody made about their own
+   * account, filed against a Bot that never ran, is the confidently wrong kind of entry that
+   * `mcp.call_failed` exists to keep off this trail.
+   */
+  "mcp.connection_verified",
+  /*
    * One person connected their own account to one server.
    *
    * Its own row rather than a credential event, because what happened is not "a secret was stored" —
