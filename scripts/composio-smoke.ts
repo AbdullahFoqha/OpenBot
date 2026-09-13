@@ -57,6 +57,7 @@
  * missing-key refusal are the same rule reached before there is a key to redact, which is why they
  * are the only two that write to the stream directly.
  */
+import type { BrokerConnection } from "../server/src/plugins/broker";
 import {
   type ComposioResult,
   effectOf,
@@ -289,6 +290,50 @@ function build<T>(attempt: string, make: () => T): T {
   }
 }
 
+/**
+ * One app's resolved connection kind, as the word this script prints for it.
+ *
+ * READ OFF THE CATALOGUE ROW RATHER THAN DERIVED AGAIN. `connectionOf` in
+ * `server/src/plugins/composio-adapter.ts` has already made this decision for every row this
+ * listing carries, and it is the decision the directory, the enable path and the connect screen all
+ * act on. A second reading of the vendor's schemes here would be a second answer, and a diagnostic
+ * whose kinds disagree with the product's is worse than one that prints none.
+ *
+ * THE SCHEME IS NAMED FOR A `fields` APP BECAUSE IT IS THE HALF THAT MOVES. Which of API_KEY,
+ * BASIC, BEARER_TOKEN or BASIC_WITH_JWT an app resolved to decides what the connect form asks a
+ * person to type, and an app that has quietly changed scheme is a form drawn for the wrong secret —
+ * which "fields" on its own would not show.
+ *
+ * THE REASON ON AN `unsupported` APP IS NOT PRINTED. It is a paragraph written for one app's page,
+ * and there is one per app in a listing that runs to four figures; the tally below is what makes a
+ * catalogue full of them legible, and the app's own page is where its sentence is worth reading.
+ *
+ * AN UNKNOWN KIND PRINTS ITSELF rather than being collapsed into a chosen word, which is why this
+ * is not a `switch` with a fallback arm: a kind added to {@link BrokerConnection} after this was
+ * written is exactly the thing an operator reading these lines needs to see by name.
+ */
+function kindOf(connection: BrokerConnection): string {
+  return connection.kind === "fields"
+    ? `fields: ${connection.authScheme}`
+    : kindLabel(connection.kind);
+}
+
+/**
+ * The kind's own literal, hyphen taken out of the one that reads as two words.
+ *
+ * ONE VOCABULARY FOR BOTH THE LINES AND THE TALLY, which is the whole reason it is a function: the
+ * per-app line and the count are about the same fact, and two spellings of it would read as two
+ * different findings on a page an operator is scanning rather than reading.
+ */
+function kindLabel(kind: BrokerConnection["kind"]): string {
+  return kind === "no-auth" ? "no auth" : kind;
+}
+
+/** The width a column has to be for the widest thing going in it to fit. */
+function widest(values: string[]): number {
+  return values.reduce((width, value) => Math.max(width, value.length), 0);
+}
+
 const { actions, broker } = build("Opening Composio with this key", () =>
   createComposioClient(key),
 );
@@ -319,6 +364,65 @@ const app = apps.find((candidate) => candidate.slug === APP);
  * really can arrive and really does need saying.
  */
 say(`Composio listed ${apps.length} apps for this key.`);
+/*
+ * EVERY APP AND THE KIND IT RESOLVED TO, WHICH IS THE ONE READING THAT CATCHES A CATALOGUE GONE
+ * FLAT.
+ *
+ * `connectionOf` reads a malformed `auth_schemes` as an empty list, so a vendor renaming or
+ * reshaping that field resolves EVERY app to `unsupported` — and the directory route hides
+ * unsupported apps. From every other angle that failure is silent: the catalogue lists its usual
+ * four figures, the route answers 200, not one app is offered, and no sentence anywhere says so.
+ * The count printed above is unchanged by it, which is exactly why the count is not enough.
+ *
+ * THE TALLY IS THE LINE THAT MAKES THE SHAPE VISIBLE AT A GLANCE, and it prints the zeros rather
+ * than only the kinds that occurred: "consent 0, self-registering 0, fields 0, no auth 0,
+ * unsupported 1540" is a catalogue that has stopped resolving, and it reads as one without anybody
+ * scrolling the per-app lines. A tally built only from what was seen would print one cheerful line
+ * in that state. The per-app lines are what an operator greps afterwards for the app they came
+ * about.
+ *
+ * SEEDED IN THE ORDER {@link BrokerConnection} DECLARES, AND OPEN AT THE END. The five known kinds
+ * are seeded so their zeros are printed; a kind this script has never heard of increments a key
+ * that was not seeded and is appended by `Map` where it cannot be missed, rather than being
+ * silently dropped by a fixed list of five. The seed is checked against the type rather than
+ * spelled as loose strings, so a kind RENAMED there is a compile error here instead of a zero that
+ * goes on printing for ever beside the new name.
+ *
+ * THROUGH {@link say}, LIKE EVERYTHING ELSE. These lines explain a run that got this far rather
+ * than a non-zero exit, so the rule at the top of this file puts them on stdout, and going through
+ * `say` is what keeps them inside {@link redact}. Nothing of the vendor's object reaches them: a
+ * checked slug, a word chosen here, and a number.
+ */
+const rows = apps.map((candidate) => ({
+  slug: candidate.slug,
+  kind: kindOf(candidate.connection),
+  count: String(candidate.actionCount),
+}));
+const slugColumn = widest(rows.map((row) => row.slug));
+const kindColumn = widest(rows.map((row) => row.kind));
+const countColumn = widest(rows.map((row) => row.count));
+for (const row of rows) {
+  say(
+    `${row.slug.padEnd(slugColumn)}  ${row.kind.padEnd(kindColumn)}  ${row.count.padStart(countColumn)} actions`,
+  );
+}
+const KINDS = [
+  "consent",
+  "self-registering",
+  "fields",
+  "no-auth",
+  "unsupported",
+] satisfies BrokerConnection["kind"][];
+const tally = new Map<string, number>(
+  KINDS.map((kind): [string, number] => [kindLabel(kind), 0]),
+);
+for (const candidate of apps) {
+  const kind = kindLabel(candidate.connection.kind);
+  tally.set(kind, (tally.get(kind) ?? 0) + 1);
+}
+say(
+  `Kinds: ${[...tally].map(([kind, count]) => `${kind} ${count}`).join(", ")}.`,
+);
 if (!app) {
   /*
    * Stated rather than shrugged at. A catalogue that does not contain Gmail is a key pointed at
