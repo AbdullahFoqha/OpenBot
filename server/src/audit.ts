@@ -167,21 +167,33 @@ export const auditEventTypes = [
    */
   "mcp.oauth_client_registered",
   /*
-   * The vendor was asked whether one person's brokered account is really there, and what it said.
+   * One person's brokered account was exercised with a real call, to see whether it is really there.
    *
-   * THE ONE VENDOR CALL IN THIS DEPLOYMENT THAT BELONGS TO A PERSON RATHER THAN TO A BOT, which is
-   * why it is written down on its own instead of joining the `mcp.call_*` family. Every other vendor
-   * call on this trail is a Bot spending a grant: it arrives through the callback endpoint, it names
-   * the Bot that made it, and a reader counting calls per Bot accounts for all of them. This one is
-   * a step inside connect — no endpoint exposes it and no Bot is involved — so what the row names is
-   * the person whose account was asked about, and there is no Bot to name.
+   * THE ONE EXECUTION OF AN APP'S OWN ACTION THAT HAPPENS OUTSIDE `callTool`, which is why it is
+   * written down on its own instead of joining the `mcp.call_*` family. Everything that surrounds a
+   * vendor call on the ordinary path is absent from this one: no grant is consulted, no policy is
+   * evaluated, no arguments are inspected, and no `mcp.call_succeeded`, `mcp.call_rejected` or
+   * `mcp.call_failed` row is left behind it. An action ran at a vendor and the trail's tool-call
+   * family says nothing about it, so this row is the whole of what is recorded.
    *
-   * WHICH IS THE PART A QUERY OVER `mcp.*` MUST NOT BE SURPRISED BY. Anything that reads a Bot out
-   * of each payload finds none here, and code that assumes one will either drop the row or
-   * mis-attribute it to whichever Bot was nearest. The row is shaped that way on purpose rather than
-   * borrowing a Bot to look uniform with its neighbours: a call somebody made about their own
-   * account, filed against a Bot that never ran, is the confidently wrong kind of entry that
-   * `mcp.call_failed` exists to keep off this trail.
+   * WHAT MAKES THAT SAFE IS THE SHAPE OF THE CALL RATHER THAN ANYBODY'S CARE. The action is fixed:
+   * the adapter picks it out of the metadata this deployment already recorded for the app, not out
+   * of anything a caller sent; it is sent with no arguments at all, so there is nothing for content
+   * inspection to have missed; and the only two callers are the connect step and a person
+   * re-checking their own connection. Those three properties are the protection. A later change
+   * that let the action, the arguments or the callers vary would not be loosening a check that is
+   * merely skipped here — it would be removing the reason the check can be skipped at all, and the
+   * one call in this deployment that reaches a vendor unexamined would start taking instructions.
+   *
+   * THE ROW NAMES A PERSON AND HAS NO BOT IN IT, which is not new on this trail and must not be
+   * read as such. `mcp.callback_refused` deliberately names none, and `mcp.account_connected` and
+   * `mcp.account_disconnected` are both filed against the person whose account it was, so code that
+   * reads a Bot out of every `mcp.*` payload was already wrong before this row existed. What IS new
+   * is a vendor action with no `mcp.call_*` row beside it: anybody reconciling this trail against
+   * an app's own logs has a call here to account for that the tool-call rows will never mention.
+   * Borrowing a Bot to make the row look uniform with its neighbours would answer that by lying —
+   * a call somebody made about their own account, filed against a Bot that never ran, is the
+   * confidently wrong kind of entry that `mcp.call_failed` exists to keep off this trail.
    */
   "mcp.connection_verified",
   /*
