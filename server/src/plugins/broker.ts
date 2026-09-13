@@ -13,6 +13,62 @@
  * the import graph of every test that touches enablement.
  */
 
+/** The schemes whose secret a PERSON holds and types in, rather than one anybody registers. */
+export type FieldScheme =
+  | "API_KEY"
+  | "BASIC"
+  | "BEARER_TOKEN"
+  | "BASIC_WITH_JWT";
+
+const FIELD_SCHEME_NAMES: readonly string[] = [
+  "API_KEY",
+  "BASIC",
+  "BEARER_TOKEN",
+  "BASIC_WITH_JWT",
+];
+
+/**
+ * Whether a scheme recorded on a row is one whose secret a person types.
+ *
+ * Takes the column's own type — `string | null` — rather than a `FieldScheme`, because every
+ * caller is asking ABOUT a recorded value, and a signature demanding the answer first would push
+ * the same `includes` into four call sites.
+ */
+export function isFieldScheme(scheme: string | null): scheme is FieldScheme {
+  return scheme !== null && FIELD_SCHEME_NAMES.includes(scheme);
+}
+
+/**
+ * One value Composio wants from the person connecting, as Composio itself describes it.
+ *
+ * Every field here is published per app rather than guessed: `is_secret` says which one to mask,
+ * and the description is written for the person filling it in ("Your Firecrawl API key, a token
+ * starting with fc-"). `name` is sent back on the wire verbatim and is never shown.
+ */
+export type BrokerField = {
+  name: string;
+  label: string;
+  help: string;
+  required: boolean;
+  secret: boolean;
+  default?: string;
+};
+
+/**
+ * How this deployment would connect somebody to an app — the one fact everything else reads.
+ *
+ * Derived once from the catalogue, recorded on the app's row at enable time, and read by the
+ * picker (which hides `unsupported`), by the enable path (which creates the config this names, or
+ * none) and by the connect screen (which draws a link or a form). Deriving it twice is how a
+ * single hard-coded choice came to leak into every app in the first place.
+ */
+export type BrokerConnection =
+  | { kind: "consent" }
+  | { kind: "self-registering" }
+  | { kind: "fields"; authScheme: FieldScheme }
+  | { kind: "no-auth" }
+  | { kind: "unsupported"; reason: string };
+
 /**
  * One app in the catalogue, as much of Composio's toolkit listing as anything here reads.
  *
@@ -36,6 +92,8 @@ export type BrokerApp = {
    * made the choice this field exists to inform.
    */
   actionCount: number;
+  /** How somebody would connect to it. See {@link BrokerConnection}. */
+  connection: BrokerConnection;
 };
 
 /**
