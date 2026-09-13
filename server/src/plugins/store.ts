@@ -148,6 +148,20 @@ export type ServerRecord = {
    * there is nothing for it to collect.
    */
   dynamicClient: boolean;
+  /**
+   * How this server's authorization config was created, for the brokered rows that have one.
+   *
+   * WHAT WAS WRITTEN DOWN WHEN SOMEBODY ENABLED THE APP, NOT WHAT THE CATALOGUE PUBLISHES TODAY.
+   * The catalogue is the vendor's, and an app it starts advertising under a different scheme has
+   * not moved the config this deployment already created — so a reader deciding what a live
+   * connection does must read this and not a fresh listing. The `authScheme` column carries the
+   * same fact and the same warning about which vocabulary it holds: the vendor's own scheme
+   * literals (`OAUTH2`, `DCR_OAUTH`, `API_KEY`, `NO_AUTH`, and the rest), never a
+   * {@link BrokerConnection} kind.
+   *
+   * Null is not an older brokered row. It is a row that is not brokered at all.
+   */
+  authScheme: string | null;
   tools: ToolRecord[];
   /**
    * Grants on tools this server no longer advertises.
@@ -3089,6 +3103,7 @@ export function createPluginStore(options: PluginStoreOptions) {
           dynamicClient:
             entry?.auth.kind === "user-oauth" &&
             entry.auth.clientRegistration === "dynamic",
+          authScheme: row.authScheme,
           tools: tools
             .filter((tool) => tool.serverId === row.id)
             .map((tool) => {
