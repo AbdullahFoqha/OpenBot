@@ -74,6 +74,21 @@ test("no_auth beats every scheme beside it, because Composio refuses a config fo
   ).toEqual({ kind: "no-auth" });
 });
 
+/**
+ * Two of the thirty-four no-auth apps publish a managed scheme beside the flag, and they are the
+ * only rows this precedence decides. Read as managed, they get a config Composio refuses outright.
+ */
+test("no_auth beats managed OAuth, because a config for one is refused however it is asked for", () => {
+  expect(
+    connectionOf({
+      slug: "hackernews",
+      no_auth: true,
+      auth_schemes: ["NO_AUTH", "OAUTH2"],
+      composio_managed_auth_schemes: ["OAUTH2"],
+    }),
+  ).toEqual({ kind: "no-auth" });
+});
+
 test("an app wanting this deployment's own OAuth client is unsupported, and says so", () => {
   const connection = connectionOf({
     slug: "docusign",
