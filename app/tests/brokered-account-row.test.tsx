@@ -663,6 +663,10 @@ test("the row names the app rather than calling it the app", async () => {
  * The hook is exercised through the two screens above, which is where its own defects live. These
  * cases differ only in the three facts the row branches on — `kind`, `connected`, `verified` — and
  * a deployment built for each would be testing the stub rather than the sentence.
+ *
+ * Every field of `BrokeredAccount` has to be kept here by hand: `app/tsconfig.json` covers `src`
+ * and not `app/tests`, and `bun test` does not typecheck, so a field added to the type and missed
+ * here is `undefined` at render time and nothing says so.
  */
 function accountState(overrides: Partial<BrokeredAccount>): BrokeredAccount {
   return {
@@ -679,6 +683,7 @@ function accountState(overrides: Partial<BrokeredAccount>): BrokeredAccount {
     rechecking: false,
     requestFields: () => {},
     requestingFields: false,
+    submissionError: null,
     submitFields: () => {},
     submittingFields: false,
     verified: false,

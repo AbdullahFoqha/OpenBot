@@ -223,6 +223,11 @@ function RouteComponent() {
   const auth = connectionKindFor(server, entry?.auth);
   const title = entry?.title ?? server?.title ?? key;
 
+  /* Bound once because the brokered row below is told it twice — once inside the whole
+     disconnected sentence and once on its own — and two copies of it would drift. */
+  const reassurance =
+    "Setup is complete without it, and it reaches your documents only.";
+
   /*
    * Everything the brokered row below reads and does, shared with the personal connected-accounts
    * screen that draws the same row. See `brokered-account-row.tsx`.
@@ -572,13 +577,13 @@ function RouteComponent() {
                      Composio, so what it undoes is not the row here but the grant on this person's
                      mailbox, and connecting again is a fresh consent. */
                   connectedDescription={`Connected, so a Bot granted these tools uses your ${title} as you. Disconnecting ends the account at Composio, not just here.`}
-                  disconnectedDescription="Connect your own account to try this connector. Setup is complete without it, and it reaches your documents only."
+                  disconnectedDescription={`Connect your own account to try this connector. ${reassurance}`}
                   /* The half of the line above that is true whichever way this app connects. An
                      app whose key somebody types gets a different first sentence from the row —
                      pressing Connect opens a form rather than leaving for a consent screen — and
                      an administrator still has to be told they are not the step that finishes the
                      connector. */
-                  disconnectedReassurance="Setup is complete without it, and it reaches your documents only."
+                  disconnectedReassurance={reassurance}
                   title={title}
                 />
               </>
