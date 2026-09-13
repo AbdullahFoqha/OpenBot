@@ -137,6 +137,10 @@ function RouteComponent() {
                  and connecting again is a fresh consent. */
               connectedDescription={`A Bot granted its tools reads your ${server.title} as you. Disconnecting ends the account at Composio, not just here.`}
               disconnectedDescription="No Bot can read this as you. Connecting takes you to Composio and then to the vendor to consent."
+              /* What is true either way. The trip to Composio is not — an app whose key somebody
+                 types never leaves this page — but which Bots can read this person's mail is the
+                 whole point of the screen and holds for both kinds. */
+              disconnectedReassurance="No Bot can read this as you."
               title={server.title}
             />
           </PageRows>

@@ -573,6 +573,12 @@ function RouteComponent() {
                      mailbox, and connecting again is a fresh consent. */
                   connectedDescription={`Connected, so a Bot granted these tools uses your ${title} as you. Disconnecting ends the account at Composio, not just here.`}
                   disconnectedDescription="Connect your own account to try this connector. Setup is complete without it, and it reaches your documents only."
+                  /* The half of the line above that is true whichever way this app connects. An
+                     app whose key somebody types gets a different first sentence from the row —
+                     pressing Connect opens a form rather than leaving for a consent screen — and
+                     an administrator still has to be told they are not the step that finishes the
+                     connector. */
+                  disconnectedReassurance="Setup is complete without it, and it reaches your documents only."
                   title={title}
                 />
               </>

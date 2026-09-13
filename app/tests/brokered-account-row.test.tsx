@@ -135,6 +135,8 @@ type Deployment = {
   verifiedAt?: string | null;
   /** What a re-check answers when somebody presses for one. */
   recheckAnswer?: { verified: boolean; verifiedAt: string | null };
+  /** What Composio refuses a submitted key with, where this deployment refuses it at all. */
+  rejects?: string;
 };
 
 type Server = {
@@ -156,6 +158,7 @@ function installDeployment(deployment: Deployment): Server {
     fields: [] as BrokerField[],
     verified: false,
     verifiedAt: null as string | null,
+    rejects: undefined as string | undefined,
     recheckAnswer: { verified: true, verifiedAt: RECHECKED_AT },
     ...deployment,
   };
@@ -210,9 +213,21 @@ function installDeployment(deployment: Deployment): Server {
        * asks the app what it wants and the second hands it over.
        */
       if (typeof init?.body === "string" && init.body.includes("values")) {
+        /*
+         * The vendor's own refusal, carried on the envelope `client` unwraps. It is the sentence
+         * this whole path exists to preserve, and the only thing that tells somebody their key was
+         * mistyped rather than their deployment broken.
+         */
+        if (state.rejects) {
+          return new Response(JSON.stringify({ error: state.rejects }), {
+            headers: { "content-type": "application/json" },
+            status: 400,
+          });
+        }
         state.recorded = true;
         state.confirms = true;
-        // A fresh key, checked against nothing: this app published no probe to spend it on.
+        // A fresh key, and the store writes every one of those unverified: nothing has been spent
+        // on it, whatever the app does or does not publish to spend.
         state.verified = false;
         state.verifiedAt = null;
         return json({ connected: true, verified: false });
@@ -556,6 +571,67 @@ test("a key app nobody has connected says it will ask for a key, not send you of
   ).toBeNull();
 });
 
+test("a key app nobody has connected keeps the screen's own reassurance", async () => {
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY],
+    recorded: false,
+  });
+
+  const view = renderAdminScreen(queryClient());
+
+  // The row's own sentence, which is the one the screen's cannot be: pressing Connect here opens a
+  // form rather than leaving for a consent screen.
+  expect(await view.findByText(/Connect asks for it\./)).toBeTruthy();
+  /*
+   * And the half of the screen's line that survives it. Replacing the whole line took away the one
+   * thing an administrator reading this row needs to know — that the connector is finished whether
+   * or not they ever connect themselves — and left them looking at a step they do not have to take.
+   */
+  expect(
+    view.getByText(
+      /Setup is complete without it, and it reaches your documents only/,
+    ),
+  ).toBeTruthy();
+});
+
+/** Composio's own words for a key it would not take, which is the sentence worth carrying. */
+const REFUSED = "Composio rejected that key: invalid API key for perplexityai.";
+
+test("a key the broker refuses says so inside the dialog, not only behind it", async () => {
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY],
+    recorded: false,
+    rejects: REFUSED,
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  await userEvent.click(await view.findByRole("button", { name: "Connect" }));
+  const dialog = await view.findByRole("dialog");
+  await userEvent.type(await view.findByLabelText("API Key"), "pplx-mistyped");
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "Connect" }),
+  );
+
+  /*
+   * WHERE THE PERSON IS LOOKING. The screen's banner is behind this dialog's backdrop, so a
+   * refusal that lands only there lands nowhere: the form sits open over it as though nothing had
+   * been answered, and the one sentence that says "you mistyped it" rather than "we are broken" is
+   * unreadable until somebody closes the thing they were trying to finish.
+   */
+  await waitFor(() => expect(within(dialog).queryByText(REFUSED)).toBeTruthy());
+  // Reported to the screen as well, not instead: the dialog is closable and the reason outlives it.
+  expect(view.getAllByText(REFUSED).length).toBe(2);
+  // And the form stays up holding what was typed. A mistyped key is corrected, not retyped.
+  expect(within(dialog).queryByLabelText("API Key")).toBeTruthy();
+});
+
 test("the row names the app rather than calling it the app", async () => {
   installDeployment({
     authScheme: "API_KEY",
@@ -574,12 +650,10 @@ test("the row names the app rather than calling it the app", async () => {
    * nowhere at all.
    */
   expect(
-    await view.findByText(
-      /Gmail publishes nothing this deployment can check it against/,
-    ),
+    await view.findByText(/accepted without being checked against Gmail/),
   ).toBeTruthy();
   expect(
-    view.queryByText(/the app publishes nothing this deployment can check it/),
+    view.queryByText(/accepted without being checked against the app/),
   ).toBeNull();
 });
 
@@ -682,20 +756,40 @@ test("Re-check appears only where a check is possible, and asks when pressed", a
   cleanup();
 
   /*
-   * An app that published nothing to check a key against. It was never verified and re-checking it
-   * would ask the same unanswerable question again, so the button is not offered — and the sentence
-   * says why rather than leaving the missing word looking like a failure.
+   * A key nothing has ever checked, which is every key on the day it is typed: the store writes
+   * `verified: false` on every one of them. There is no check to repeat, so nothing is offered —
+   * and the sentence does not say why, because this row is not told why.
    */
-  const unverifiable = renderRow(
+  const unchecked = renderRow(
     accountState({ connected: true, kind: "fields" }),
   );
 
-  expect(unverifiable.queryByRole("button", { name: "Re-check" })).toBeNull();
+  expect(unchecked.queryByRole("button", { name: "Re-check" })).toBeNull();
   expect(
-    unverifiable.getByText(
-      /publishes nothing this deployment can check it against/,
-    ),
+    unchecked.getByText(/accepted without being checked against Gmail/),
   ).toBeTruthy();
+});
+
+test("a connected consent app offers no Re-check at all", () => {
+  /*
+   * WHAT A CONSENT ROW ACTUALLY LOOKS LIKE, and what every one of them was backfilled to by
+   * migration 0030: connected and verified, with no probe anywhere behind the flag. Gating the
+   * button on `verified` alone drew Re-check on all of them, and pressing it reached an endpoint
+   * this deployment does not serve — a red banner, guaranteed, on the one kind that works today.
+   */
+  const view = renderRow(
+    accountState({
+      connected: true,
+      kind: "consent",
+      verified: true,
+      verifiedAt: CHECKED_AT,
+    }),
+  );
+
+  expect(view.queryByRole("button", { name: "Re-check" })).toBeNull();
+  // The row is otherwise itself: a live account somebody can still end.
+  expect(view.getByRole("button", { name: "Disconnect" })).toBeTruthy();
+  expect(view.getByText(/through Gmail's consent screen/)).toBeTruthy();
 });
 
 test("disconnecting a key names the step this deployment cannot take", () => {
@@ -765,7 +859,7 @@ test("a key re-checked and then disconnected stops claiming it was checked", asy
 
   await waitFor(() => expect(view.queryByText("Connected")).toBeTruthy());
   expect(
-    view.queryByText(/publishes nothing this deployment can check it against/),
+    view.queryByText(/accepted without being checked against Gmail/),
   ).toBeTruthy();
   expect(view.queryByText(/last checked/)).toBeNull();
 });

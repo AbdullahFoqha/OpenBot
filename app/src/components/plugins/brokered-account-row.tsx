@@ -76,12 +76,22 @@ export type BrokeredAccount = {
   /** Whether this person's account is live, as the vendor last answered. */
   connected: boolean;
   /**
-   * Whether a real call was last made with this account's key and worked.
+   * Whether this deployment holds a verdict that the account works, which is a different fact for
+   * each kind and is NOT "a real call was made with this key".
    *
    * A different fact from `connected`, and the reason both are here. Composio does not check a
    * submitted key: a connection created with an obviously wrong value comes back ACTIVE and stays
-   * ACTIVE, so `connected` for a key app is only that the vendor accepted the row. This is whether
-   * anything was ever actually read with it.
+   * ACTIVE, so `connected` for a key app is only that the vendor accepted the row.
+   *
+   * ON A CONSENT APP THERE IS NO PROBE BEHIND THIS. The confirm writes it true off the vendor's own
+   * answer that the account is attached — a consent screen somebody completed is the check — and
+   * migration 0030 backfilled every consent row that came before. So nothing here may read `true`
+   * as evidence that a call was spent, nor offer an act that needs one.
+   *
+   * AND `false` IS A PLACEHOLDER AS MUCH AS A VERDICT. The store writes it unconditionally on every
+   * key connection, whether or not the app publishes anything to check a key against, so nothing
+   * here may explain the `false` either. Three states share this one word — never tried, tried and
+   * failed, nothing to try — and they stay unsaid until the server sends the reason.
    */
   verified: boolean;
   /**
@@ -132,6 +142,15 @@ export type BrokeredAccount = {
   submitFields: (values: Record<string, string>) => void;
   requestingFields: boolean;
   submittingFields: boolean;
+  /**
+   * Why the last attempt to hand over what somebody typed was refused, or null.
+   *
+   * Carried out of the hook as well as reported to the screen's banner, because the form is a
+   * modal. The banner is behind its backdrop, so Composio's own sentence — the one this path spends
+   * a dropped `cause` to preserve — arrived where the person could not read it, over a form still
+   * holding the key it was about.
+   */
+  submissionError: string | null;
   /** Spend one read-only call at the vendor to find out whether the key still works. */
   recheck: () => void;
   rechecking: boolean;
@@ -359,6 +378,12 @@ export function useBrokeredAccount(input: {
     fields: fieldsRequest.data ?? null,
     requestFields: () => {
       report(null);
+      /*
+       * A fresh attempt, so the last one's refusal goes with it. This press is also what opens the
+       * form, and a mutation's error outlives the dialog that showed it: without this, reopening
+       * would present the sentence the previous key was refused with, above an empty field.
+       */
+      submission.reset();
       fieldsRequest.mutate(serverId);
     },
     requestingFields: fieldsRequest.isPending,
@@ -367,6 +392,7 @@ export function useBrokeredAccount(input: {
       submission.mutate({ serverId, values });
     },
     submittingFields: submission.isPending,
+    submissionError: submission.error?.message ?? null,
   };
 }
 
@@ -398,9 +424,15 @@ function accountSentence(input: {
   title: string;
   connectedDescription: string;
   disconnectedDescription: string;
+  disconnectedReassurance: string | undefined;
 }): string {
-  const { account, connectedDescription, disconnectedDescription, title } =
-    input;
+  const {
+    account,
+    connectedDescription,
+    disconnectedDescription,
+    disconnectedReassurance,
+    title,
+  } = input;
 
   if (!account.configured) {
     return "Set COMPOSIO_API_KEY on this deployment. Without it there is no broker to reach, so this account can be neither connected nor ended from here. The app stays enabled and every grant on its tools still stands.";
@@ -416,9 +448,22 @@ function accountSentence(input: {
 
   if (account.kind === "fields") {
     if (account.connected) {
-      return account.verified && account.verifiedAt
-        ? `Connected with a key you provided, last checked ${formatDate(account.verifiedAt)}.`
-        : `Connected with a key you provided. ${title} publishes nothing this deployment can check it against, so it was accepted without being tried.`;
+      if (account.verified && account.verifiedAt) {
+        return `Connected with a key you provided, last checked ${formatDate(account.verifiedAt)}.`;
+      }
+      /*
+       * NO REASON GIVEN, BECAUSE THIS ROW HAS NOT BEEN TOLD ONE. The sentence here used to explain
+       * the missing check as a fact about the app — that it publishes nothing to try a key on —
+       * and the store writes `verified: false` on every key connection it makes, publisher or not.
+       * So the row was asserting that Perplexity publishes nothing checkable while Perplexity
+       * publishes a perfectly good probe. What is true of all three states behind that one word is
+       * only that the key was taken and nothing has tried it, so that is the whole of what is said.
+       *
+       * THE FOLLOW-UP IS THE VERIFICATION PROBE, not a bigger sentence here: three states need the
+       * server to say WHICH — never tried, tried and failed, nothing to try — and the reason
+       * arrives with the probe that lands next. See {@link BrokeredAccount.verified}.
+       */
+      return `Connected with a key you provided. It was accepted without being checked against ${title}.`;
     }
     /*
      * WHAT DISCONNECTING DID NOT DO. The account ends at Composio and the key does not end
@@ -434,8 +479,16 @@ function accountSentence(input: {
      * connecting takes you to Composio and then to the vendor to consent, and pressing Connect here
      * opens a form and asks for a secret instead. A sentence that promises a trip nobody is about to
      * take is a worse preparation for the dialog than no sentence at all.
+     *
+     * THE SCREEN'S REASSURANCE IS KEPT THOUGH ITS SENTENCE IS NOT. What an administrator needs to
+     * read here — that finishing the connector does not wait on them connecting — is true whichever
+     * way this app is connected, and a row that replaced the whole line took it away with the trip
+     * it was right to drop.
      */
-    return `This app is connected with a key you already hold, not a trip to ${title}'s consent screen. Connect asks for it.`;
+    const asked = `This app is connected with a key you already hold, not a trip to ${title}'s consent screen. Connect asks for it.`;
+    return disconnectedReassurance
+      ? `${asked} ${disconnectedReassurance}`
+      : asked;
   }
 
   /*
@@ -459,6 +512,7 @@ export function BrokeredAccountRow({
   account,
   connectedDescription,
   disconnectedDescription,
+  disconnectedReassurance,
   title,
 }: {
   account: BrokeredAccount;
@@ -466,6 +520,15 @@ export function BrokeredAccountRow({
   connectedDescription: string;
   /** What connecting would do, in the voice of whoever is reading. */
   disconnectedDescription: string;
+  /**
+   * What stays true whether or not this person ever connects, in that same voice.
+   *
+   * Separate from `disconnectedDescription` because only part of a screen's line survives the kind
+   * that does not leave: the half describing the trip to a consent screen is wrong for an app whose
+   * key somebody types, and the half telling an administrator their setup is already complete is
+   * right for both. A screen with nothing of the second kind to say passes nothing.
+   */
+  disconnectedReassurance?: string;
   /**
    * The app's own name, for the sentences that name it.
    *
@@ -512,6 +575,7 @@ export function BrokeredAccountRow({
               account,
               connectedDescription,
               disconnectedDescription,
+              disconnectedReassurance,
               title,
             })}
           </ItemDescription>
@@ -544,13 +608,18 @@ export function BrokeredAccountRow({
                 {/* The same word for both kinds. The line beneath says what it rests on. */}
                 <span className="text-muted-foreground text-xs">Connected</span>
                 {/*
-                 * OFFERED ONLY WHERE A CHECK IS POSSIBLE, which is exactly where one has already been
-                 * made: `verified` is written by a probe, and a probe exists only where the app
-                 * published a read that takes no arguments to spend on it. An app that published none
-                 * connected unverified and would be asked the same unanswerable question again, so
-                 * the button is not there and the sentence above says why.
+                 * OFFERED ONLY ON A KEY APP, BECAUSE THAT IS THE ONLY KIND A RE-CHECK IS AN ACT ON.
+                 * `verified` on its own is not that question and never was — see
+                 * {@link BrokeredAccount.verified}: a consent connection is written verified by the
+                 * confirm, with no probe behind it, and migration 0030 backfilled every consent row
+                 * that came before. The flag alone therefore drew Re-check on every connected Gmail
+                 * a deployment already had, where pressing it could only fail.
+                 *
+                 * THE FLAG STILL COUNTS BESIDE THE KIND. A key nothing has ever checked has no check
+                 * to repeat, so there is nothing to press and the sentence above says where that
+                 * leaves it — without claiming to know why, which this row is not told.
                  */}
-                {account.verified ? (
+                {account.kind === "fields" && account.verified ? (
                   <Button
                     disabled={account.rechecking}
                     onClick={account.recheck}
@@ -621,6 +690,20 @@ export function BrokeredAccountRow({
                   : "That app could not be asked what it needs. Close this and try again."}
               </p>
             )}
+            {/*
+             * THE REFUSAL WHERE THE PERSON IS LOOKING. It reaches the screen's banner too, and that
+             * banner is behind this dialog's own backdrop: a key Composio would not take said so in
+             * the vendor's words, at the top of a page nobody could see, while the form sat open as
+             * though nothing had been answered.
+             *
+             * Under the form rather than over it, beside the button that was just pressed, and the
+             * form stays up holding what was typed — a key is corrected, not retyped.
+             */}
+            {account.submissionError ? (
+              <p className="mt-3 text-destructive text-sm" role="alert">
+                {account.submissionError}
+              </p>
+            ) : null}
           </DialogBody>
         </DialogContent>
       </Dialog>
