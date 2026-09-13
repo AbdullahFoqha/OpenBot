@@ -39,6 +39,20 @@ test("OAuth that registers itself needs nobody's credentials", () => {
   ).toEqual({ kind: "self-registering" });
 });
 
+/**
+ * A consent screen asks the person for nothing and a key asks them to go and find one, so an app
+ * offering both should never send them looking.
+ */
+test("an app offering both a self-registering consent and a key prefers the consent", () => {
+  expect(
+    connectionOf({
+      slug: "x",
+      auth_schemes: ["DCR_OAUTH", "API_KEY"],
+      composio_managed_auth_schemes: [],
+    }),
+  ).toEqual({ kind: "self-registering" });
+});
+
 test("an app the person holds a key for asks for fields", () => {
   expect(
     connectionOf({

@@ -5,6 +5,7 @@ import {
   BrokerRefusalError,
   type ComposioBroker,
   type FieldScheme,
+  isFieldScheme,
 } from "./broker";
 import {
   type ComposioAction,
@@ -635,13 +636,34 @@ async function pageOf<Row>(
   return { items: answered.items as Row[], nextCursor: answered.next_cursor };
 }
 
-/** The field schemes, in the order a person would rather meet them. */
-const FIELD_SCHEMES: readonly FieldScheme[] = [
-  "API_KEY",
-  "BEARER_TOKEN",
-  "BASIC",
-  "BASIC_WITH_JWT",
-];
+/**
+ * Where each field scheme sits in the order a person would rather meet them.
+ *
+ * A RECORD KEYED BY {@link FieldScheme} RATHER THAN A LIST OF THEM, because the compiler counts the
+ * keys of a record and counts nothing at all about a list. This was a `readonly FieldScheme[]`
+ * spelling the same four names a second time, which is precisely what the comment on
+ * {@link FIELD_SCHEME_NAMES} argues against: the same set stated twice, where a member added to one
+ * of them and not the other typechecks perfectly. An element type refuses a name that is not a
+ * scheme and says nothing whatever about a scheme left out.
+ *
+ * AND THE ONE LEFT OUT FAILS OPEN, MORE QUIETLY HERE THAN THERE. A fifth scheme added to the names
+ * and not given a rank here would match nothing in the pick below, so every app publishing it would
+ * fall through to `unsupported` — and the directory route hides an unsupported app, so those apps
+ * would simply leave the picker: no refusal for anyone to read, no operator sentence, and no failing
+ * test. `Record<FieldScheme, number>` does not compile until the new scheme has a place, which is
+ * the whole of the protection, and the reason the pick goes through {@link isFieldScheme} rather
+ * than through a second list of names.
+ *
+ * THE ORDER ITSELF IS THE PERSON'S AND NOT THE WIRE'S, and it is unchanged: a plain key first,
+ * because it is the one they are likeliest to already hold, then the other three ways of spelling a
+ * secret they have to go and assemble.
+ */
+const FIELD_SCHEME_ORDER: Record<FieldScheme, number> = {
+  API_KEY: 0,
+  BEARER_TOKEN: 1,
+  BASIC: 2,
+  BASIC_WITH_JWT: 3,
+};
 
 /** The strings out of an `unknown`, which is all a vendor list promises. */
 function labelsOf(value: unknown): string[] {
@@ -671,7 +693,11 @@ export function connectionOf(row: VendorToolkit): BrokerConnection {
   if (managed.length > 0) return { kind: "consent" };
   if (offered.includes("DCR_OAUTH")) return { kind: "self-registering" };
 
-  const field = FIELD_SCHEMES.find((scheme) => offered.includes(scheme));
+  const field = offered
+    .filter((scheme) => isFieldScheme(scheme))
+    .sort(
+      (left, right) => FIELD_SCHEME_ORDER[left] - FIELD_SCHEME_ORDER[right],
+    )[0];
   if (field) return { kind: "fields", authScheme: field };
 
   return {
