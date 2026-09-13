@@ -1794,6 +1794,22 @@ test("an undo that fails leaves the account reachable rather than invisible", as
   });
   // No date on a claim nobody made, which is the pair `recordBrokeredConnection` writes together.
   expect(row.verifiedAt).toBeNull();
+
+  // AND THE TRAIL CARRIES THE STATE, not just the person who happened to be at the screen. This is
+  // the one outcome here that leaves a live account nobody can reach through this deployment, and
+  // an operator reading the trail later is exactly who needs to find it — so the refusal being
+  // thorough is not a substitute for a row.
+  const checked = recordedOfType("mcp.connection_verified");
+  expect(checked).toHaveLength(1);
+  expect(checked[0].payload).toMatchObject({
+    actor: askerId,
+    // The action that was TRIED, which is the whole of what separates this row from the unchecked
+    // one: both say `verified: false`, and only the name says the vendor was asked and said no.
+    action: probeAction,
+    verified: false,
+  });
+  // And the key is in none of it, on the path that fails as much as on the one that works.
+  expect(JSON.stringify(checked)).not.toContain(typedKey);
 });
 
 /**
@@ -1991,6 +2007,25 @@ test("a key that works is recorded verified, with the action it was checked with
   // The row names the person and no Bot, which is what `mcp.connection_verified` documents: nothing
   // ran on a Bot's behalf here, and borrowing one to make the row look uniform would be a lie.
   expect(JSON.stringify(checked[0].payload)).not.toContain(botId);
+  /*
+   * BOTH ROWS THIS METHOD WRITES COME BACK UNDER ONE ID, which is the question anybody asks this
+   * trail: what happened to this person's access to this app. The two used to be filed under
+   * different keys — the connection under the app slug, the verification under the server row id —
+   * so a reader got half the story depending on which one they asked with, and neither half said
+   * it was a half. {@link probedId} is named first because it is the id that was used and the one
+   * a regression puts back; the set is asked after it, because the criterion is a single query
+   * finding all of these rows and that is true of no other id either.
+   */
+  const forApp = events.filter(
+    (event) =>
+      event.eventType === "mcp.connection_verified" ||
+      event.eventType === "mcp.account_connected",
+  );
+  expect(forApp).toHaveLength(2);
+  expect(forApp.map((event) => event.targetId)).not.toContain(probedId);
+  expect(new Set(forApp.map((event) => event.targetId))).toEqual(
+    new Set([probedToolkit]),
+  );
   // And the key itself is in none of it, the promise every write on this path keeps.
   expect(JSON.stringify(checked)).not.toContain(typedKey);
 });

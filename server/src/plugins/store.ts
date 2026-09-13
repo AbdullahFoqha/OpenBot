@@ -4387,6 +4387,44 @@ export function createPluginStore(options: PluginStoreOptions) {
               userId: input.userId,
               verified: false,
             });
+
+            /*
+             * AND THE TRAIL SAYS SO TOO, WHICH IS THE HALF THE SENTENCE BELOW CANNOT REACH. The
+             * refusal is told to one person in one moment; what outlives it is an unverified row
+             * and a live account at the vendor, and the person who most needs to know both exist
+             * is an operator reading this trail a week later. Filed BEFORE the throw for the only
+             * reason that matters here: every way out of this branch is that throw, so a row
+             * written after it is a row never written — which is exactly how this state came to
+             * be the one thing the trail did not record.
+             *
+             * `action` IS THE PROBE THAT WAS TRIED, and it is what tells this row from the
+             * unchecked one. Both say `verified: false`; only the name separates "this app
+             * published nothing safe to call" from "it ran, the vendor said no, and the account
+             * could not be withdrawn" — the same distinction the `probe` response field exists
+             * for, made for a reader of the trail rather than of a screen.
+             *
+             * AND NOTHING IS FILED ON THE CLEAN UNDO ABOVE, which is a decision rather than the
+             * same omission repeated. A probe that failed and whose account WAS withdrawn leaves
+             * no account, no row and nothing for anybody to do: this trail records state that
+             * persists, the criterion {@link disconnectBrokered} already files its own row on —
+             * no row deleted and no grant withdrawn means nobody was disconnected and nothing is
+             * written. Filing one anyway would also cost this row the meaning it was just given.
+             * A `verified: false` verification row under an app would stop meaning "there is a
+             * live account here somebody has to deal with", because most of them would mean "a
+             * key was mistyped and cleaned up after" — and the one state an operator must act on
+             * would be unfindable again, in a different way.
+             */
+            await recordAuditEvent(auditStore, {
+              eventType: "mcp.connection_verified",
+              targetType: "mcp_server",
+              targetId: input.toolkit,
+              payload: {
+                actor: input.userId,
+                action: probe,
+                verified: false,
+              },
+            });
+
             throw new PluginRefusedError(
               `What you entered for ${input.toolkit} did not work — ${answer.text} — and Composio would not take the account back either, so it is recorded here as unchecked rather than left somewhere nothing could name it. Disconnect it on the Plugins page and try again.`,
               null,
@@ -4457,23 +4495,25 @@ export function createPluginStore(options: PluginStoreOptions) {
        * one nothing else records. `action` is the null the response field is: it separates an
        * unchecked connection from a checked one, which `verified: false` alone cannot.
        *
-       * AND IT IS FILED ONLY ON THE PATH THAT REACHES HERE, because both refusals above throw.
-       * Where the account was withdrawn that is right: no connection exists, and a verification row
-       * about one would have the trail recording a state this deployment deliberately does not
-       * hold. Where the withdrawal ITSELF failed a row does stand — unverified, with a live account
-       * behind it — and nothing on this trail names it. That is the one gap this event leaves: what
-       * tells the person is the refusal, which names all three facts, and the row they are told to
-       * disconnect files `mcp.account_disconnected` when they do.
+       * THE FAILED UNDO ABOVE FILES THE SAME ROW BEFORE IT THROWS, so the worst state this feature
+       * has — a live account, an unverified row, and a withdrawal the vendor refused — is no longer
+       * named only in a sentence one person read once. The clean undo files nothing, and the reason
+       * is written out at that branch: this trail records state that persists, and a row there
+       * would cost the failed-undo row the one meaning that makes it worth reading.
        *
-       * Under the SERVER row's id and not the app slug, unlike the `mcp.account_connected` row
-       * above. That row is about a person's access to an app, which is what the connection table is
-       * keyed on; this one is about an ACTION of a server — the id `probeActionFor` was asked and
-       * the id an operator sees on the Plugins page — and `targetType` here is `mcp_server`.
+       * UNDER THE APP SLUG, which is the id `mcp.account_connected` above, {@link
+       * confirmBrokeredConnection}, {@link disconnectBrokered} and {@link retireConnectionsFor} all
+       * file under — so the two rows this method can write about one person's access to one app
+       * come back in ONE query, however that access began and however it ended. This row was filed
+       * under the SERVER row's id instead, on the reasoning that it is about an ACTION of a server
+       * rather than about access; that is true and it cost the reader the only question anybody
+       * asks this trail, which was answered half by one id and half by the other. Nothing goes with
+       * the change: the server id is `composio-` and the slug, and the action is in the payload.
        */
       await recordAuditEvent(auditStore, {
         eventType: "mcp.connection_verified",
         targetType: "mcp_server",
-        targetId: serverId,
+        targetId: input.toolkit,
         payload: {
           actor: input.userId,
           action: probe,
