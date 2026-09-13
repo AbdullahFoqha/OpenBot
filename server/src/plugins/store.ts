@@ -4771,6 +4771,25 @@ export function createPluginStore(options: PluginStoreOptions) {
      * that the provider has been asked, because the withdrawal itself runs as a background job with
      * no supported way to poll it.
      *
+     * EXCEPT WHERE THE APP IS ONE SOMEBODY TYPED A KEY INTO, AND THERE IT IS FALSE BY CONSTRUCTION
+     * RATHER THAN BY WHAT THE VENDOR FOUND. `revoke_on_delete` asks the PROVIDER to end a grant,
+     * which is a real request for a consent account — Google or Slack acts on it — and a
+     * meaningless one for an API key. There is no grant behind a key to withdraw: the value is
+     * still valid at the app and still works for anyone holding it, so the account ends at Composio
+     * and nothing was asked of anybody else. Saying otherwise would be the one row in this trail
+     * nobody could rely on, which is the failure the paragraph above describes arriving a second
+     * time by a different road — a withdrawal recorded for something that was never granted. So the
+     * scheme recorded on the app's row decides this field for a field connection, and the broker's
+     * own answer decides it for every other.
+     *
+     * THE SCHEME IS THE ONE ON THE APP'S ROW, for {@link connectBrokeredWithFields}' reason: it is
+     * what this deployment's authorization config was created AS and what the account was attached
+     * to, and a fresh read of the catalogue is a second answer — a key connection described as
+     * consent because the vendor has since started publishing managed OAuth for the app. The
+     * person's half of this fact is already written on the disconnect row they are shown: their key
+     * still works at the app, and rotating it there is what ends it. This is the trail's half of
+     * the same sentence.
+     *
      * THE VENDOR IS ASKED WHETHER OR NOT A ROW IS HERE. The row is a cache of Composio's answer
      * and never the account itself (see {@link brokeredConnection}), so its absence is not
      * evidence that the grant is gone: the confirm above deletes it on any `false` from the
@@ -4797,6 +4816,12 @@ export function createPluginStore(options: PluginStoreOptions) {
      * account was ended; the event is filed for that as well. Only where both are absent is there
      * no act to record, and the two cases stay legible in the trail because the field still says
      * which of them happened.
+     *
+     * SO THE FILING IS DECIDED ON THE BROKER'S OWN ANSWER AND NOT ON THE FIELD, because for a field
+     * connection the two part company on purpose. A key account the vendor found and ended with no
+     * row here is an act — somebody's live connection stopped existing — and gating the event on a
+     * value that is false by construction would leave exactly that act unrecorded. The field
+     * answers what was asked of the provider; `ended` answers whether anything was there.
      */
     async disconnectBrokered(input: {
       toolkit: string;
@@ -4814,10 +4839,35 @@ export function createPluginStore(options: PluginStoreOptions) {
     }): Promise<{ vendorRevocationRequested: boolean }> {
       if (!broker) throw new BrokerUnconfiguredError();
 
-      const vendorRevocationRequested = await broker.revoke({
+      /*
+       * Keyed on the url, which is where a brokered row records which app it is; `mcp_servers.id`
+       * is a display name and nothing holds the two equal. It is the lookup
+       * {@link connectBrokeredWithFields} makes, for the same stake: a row called `gmail` at
+       * `composio://slack` would have this disconnect reading Gmail's scheme to describe what
+       * happened to a Slack account.
+       *
+       * AN APP WITH NO ROW HERE IS NOT A FIELD APP. A person can hold an account at Composio for
+       * an app this deployment has since removed — the row is a cache and the removal takes no
+       * grant with it — and the revoke below is the one operation that can still end it. Nothing
+       * names the scheme it was connected under any more, so the honest reading is the broker's
+       * own answer, which is what an absent row falls through to.
+       */
+      const [app] = await database
+        .select({ authScheme: mcpServers.authScheme })
+        .from(mcpServers)
+        .where(eq(mcpServers.url, `composio://${input.toolkit}`))
+        .limit(1);
+      const fieldScheme = isFieldScheme(app?.authScheme ?? null);
+
+      // Whether there was an account to end at all, which is what decides if anybody was
+      // disconnected. Named apart from the field below because for a key the two differ: something
+      // ended, and nothing was asked of the provider.
+      const ended = await broker.revoke({
         userId: input.userId,
         toolkit: input.toolkit,
       });
+
+      const vendorRevocationRequested = fieldScheme ? false : ended;
 
       // `returning` because whether a row was here is half of what decides if anybody was
       // disconnected, and a delete that answered nothing would leave the two cases indistinguishable.
@@ -4831,7 +4881,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         )
         .returning({ toolkit: composioConnections.toolkit });
 
-      if (deleted || vendorRevocationRequested) {
+      if (deleted || ended) {
         await recordAuditEvent(auditStore, {
           eventType: "mcp.account_disconnected",
           targetType: "mcp_server",

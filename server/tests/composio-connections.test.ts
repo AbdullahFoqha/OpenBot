@@ -34,9 +34,11 @@ import { TEST_POOL } from "./support/database";
  * when somebody is offboarded, `removeServer` when the app itself is taken away, and
  * `disconnectBrokered` when a person ends their own account. This file is about the two an
  * administrator performs on somebody else's behalf, and about the trail those two leave;
- * `disconnectBrokered` has its own coverage in `plugin-store.integration.test.ts`, which is why the
- * two here are described throughout as the two ACTS AN ADMINISTRATOR PERFORMS and never as all the
- * ways a connection can end.
+ * `disconnectBrokered` has its coverage in `plugin-store.integration.test.ts`, which is why the two
+ * here are described throughout as the two ACTS AN ADMINISTRATOR PERFORMS and never as all the ways
+ * a connection can end. It is asked about here in one place only — the test at the foot of this
+ * file, where what the trail may claim is decided by the app's recorded scheme, and so needs an app
+ * that arrived the way Add makes one arrive and a key that arrived the way a person types one.
  *
  * WHY THIS FILE OWNS ITS IDS OUTRIGHT, AND SO NEEDS NO REFUSE-TO-RUN GUARD.
  * `plugin-store.integration.test.ts` inserts at `gmail`, `notion` and `bot_helper` and refuses to
@@ -2297,4 +2299,99 @@ test("a re-check with no connection refuses rather than making one", async () =>
   expect(await connectedToolkitsFor(askerId)).toEqual([]);
   expect(reached).toEqual([]);
   expect(recordedOfType("mcp.connection_verified")).toEqual([]);
+});
+
+/**
+ * DISCONNECTING A KEY CLAIMS NO REVOCATION, BECAUSE A KEY HAS NO GRANT BEHIND IT TO WITHDRAW.
+ *
+ * CRITERION. Ending a connection somebody typed a key into answers `vendorRevocationRequested:
+ * false` and files a trail row saying false — while the vendor is still asked, still finds the
+ * account, and still ends it; and while the SAME app under a consent scheme, disconnected the same
+ * way against the same vendor answer, says true.
+ *
+ * REASON. `revoke_on_delete` asks the PROVIDER to end a grant. For a consent connection that is a
+ * real request Google or Slack acts on, and the field says a withdrawal was asked for. For a key
+ * there is no grant: the value is still valid at the app and still works for anyone holding it, so
+ * the account ends at Composio and nothing was asked of anybody else. `ComposioBroker.revoke`'s own
+ * doc argues that "requested" is as far as any implementation can honestly go and that the whole
+ * worth of the boolean is letting a reader tell an account this deployment acted on from one that
+ * outlives it somewhere else — a key reporting true would be the one row in that trail nobody could
+ * rely on, a withdrawal recorded for something nobody ever granted. The person is already told the
+ * other half of this fact in their own words on the disconnect row: their key still works at the
+ * app, and rotating it there is what ends it.
+ *
+ * WHY BOTH SCHEMES IN ONE TEST. The vendor here answers `true` to every revoke, so the false above
+ * is the implementation's doing and not the stub's — and the second half is what separates a field
+ * this deployment computes from a constant of either polarity. One app rather than two, re-enabled
+ * onto the other flow with nobody connected, so the ONLY thing that differs between the two acts is
+ * the scheme recorded on the row.
+ */
+test("disconnecting a key claims no revocation", async () => {
+  useAnsweringClient();
+  await store.addBrokeredApp({
+    slug: enabledToolkit,
+    title: "Enablable App",
+    by: admin,
+    connection: { kind: "fields", authScheme: "API_KEY" },
+  });
+  await store.connectBrokeredWithFields({
+    toolkit: enabledToolkit,
+    userId: askerId,
+    values: { generic_api_key: typedKey },
+  });
+
+  expect(
+    await store.disconnectBrokered({
+      toolkit: enabledToolkit,
+      userId: askerId,
+      by: askerId,
+      reason: "self",
+    }),
+  ).toEqual({ vendorRevocationRequested: false });
+
+  /*
+   * AND THE ACCOUNT DID END AT COMPOSIO, which is the half of the sentence the false must not be
+   * allowed to swallow. The broker was asked, it answered that it found an account — {@link
+   * vendorFinds} is true for everybody here — and it is holding nothing afterwards. Without these
+   * the assertion above would be satisfied just as well by a disconnect that skipped the revoke
+   * and left somebody's key attached at the vendor with no row here pointing at it.
+   */
+  expect(asksMade()).toEqual([
+    `ensureAuthConfig:${enabledToolkit}/fields`,
+    `connectWithFields:${enabledToolkit}/${askerId}`,
+    `revoke:${enabledToolkit}/${askerId}`,
+  ]);
+  expect(vendorHolds).toEqual([]);
+  expect(await connectedToolkitsFor(askerId)).toEqual([]);
+
+  // THE SAME APP AND THE SAME ACT, with the scheme moved underneath it. Re-enabling may rewrite the
+  // column because the disconnect above left nobody connected to be stranded by it.
+  await store.addBrokeredApp({
+    slug: enabledToolkit,
+    title: "Enablable App",
+    by: admin,
+    connection: { kind: "consent" },
+  });
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: enabledToolkit, userId: askerId });
+
+  expect(
+    await store.disconnectBrokered({
+      toolkit: enabledToolkit,
+      userId: askerId,
+      by: askerId,
+      reason: "self",
+    }),
+  ).toEqual({ vendorRevocationRequested: true });
+
+  // Read in the order the two acts happened, which is what makes the pair an assertion about the
+  // scheme rather than two separate assertions about a boolean.
+  expect(
+    recordedOfType("mcp.account_disconnected").map(
+      (event) =>
+        (event.payload as { vendorRevocationRequested: boolean })
+          .vendorRevocationRequested,
+    ),
+  ).toEqual([false, true]);
 });
