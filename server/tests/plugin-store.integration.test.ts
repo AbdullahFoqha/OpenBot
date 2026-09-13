@@ -4840,6 +4840,10 @@ test("a server's address is the url the row holds, not one composed from its id"
     // Not `composio://gmail`. That is what composing the url from the id would have answered, and
     // it is the app this row does not run against.
     url: "composio://slack",
+    // Null, because a scheme is written down when an authorization config is CREATED and this
+    // fixture creates none. The column holds nothing for a row nothing was created against rather
+    // than a default standing in for one, so null here is the read passing the column through.
+    authScheme: null,
   });
   /*
    * By membership rather than by equality, because this database is not only this test's: the

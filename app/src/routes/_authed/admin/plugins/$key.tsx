@@ -225,6 +225,7 @@ function RouteComponent() {
    * no Disconnect beside it and nothing brokered to confirm.
    */
   const brokeredAccount = useBrokeredAccount({
+    authScheme: server?.authScheme ?? null,
     brokered: auth === "brokered",
     configured: plugins.data?.composioConfigured ?? false,
     recorded: youConnected,
