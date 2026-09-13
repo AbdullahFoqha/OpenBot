@@ -3741,14 +3741,38 @@ export function createPluginStore(options: PluginStoreOptions) {
      * none that it tells us about, and the field exists to record what the vendor said it granted
      * rather than what we suppose. It is returned all the same, so the shape matches what
      * {@link connectionsFor} answers and one screen can draw both kinds of row.
+     *
+     * `verified` AND `verifiedAt` COME ALONG BECAUSE "connected" IS NOT A PRESENT TENSE HERE.
+     * Composio never re-checks a key somebody typed in: it answers ACTIVE for as long as the row
+     * exists, whatever the vendor on the other side now thinks of that credential. So a page drawn
+     * off `connectedAt` alone would assert something this deployment has not known since the day it
+     * was written. These two fields are what lets it say when the claim was last earned instead —
+     * "connected with a key you provided, last checked 13 Sep" — and a consent connection, which
+     * has nothing to re-check, reads differently off the same pair.
+     *
+     * `verifiedAt` STAYS NULL WHERE IT IS NULL, unlike `connectedAt`, which collapses to `""`
+     * because a row cannot exist without one and the fallback is unreachable. Null here is
+     * reachable and it means something: never checked. Folding it into `""` would hand the page a
+     * row that was checked at a time nobody recorded, which is a different fact and not one this
+     * table ever holds. Note also what {@link composioConnections.verified} sets out about the rows
+     * migration 0030 backfilled: their `verifiedAt` is the moment of consent, not the moment of a
+     * probe, so a caller must not read every timestamp here as "this connection answered then".
      */
-    async brokeredConnectionsFor(
-      userId: string,
-    ): Promise<{ serverId: string; scope: string; connectedAt: string }[]> {
+    async brokeredConnectionsFor(userId: string): Promise<
+      {
+        serverId: string;
+        scope: string;
+        connectedAt: string;
+        verified: boolean;
+        verifiedAt: string | null;
+      }[]
+    > {
       const rows = await database
         .select({
           serverId: mcpServers.id,
           connectedAt: composioConnections.connectedAt,
+          verified: composioConnections.verified,
+          verifiedAt: composioConnections.verifiedAt,
         })
         .from(composioConnections)
         .innerJoin(
@@ -3762,6 +3786,8 @@ export function createPluginStore(options: PluginStoreOptions) {
         serverId: row.serverId,
         scope: "",
         connectedAt: iso(row.connectedAt) ?? "",
+        verified: row.verified,
+        verifiedAt: iso(row.verifiedAt),
       }));
     },
 
