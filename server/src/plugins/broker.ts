@@ -130,7 +130,17 @@ export type ComposioBroker = {
    * administrators can press the button together. An implementation that created a second config
    * on the second call would leave a person's existing connections pointing at the first one.
    */
-  ensureAuthConfig(config: { toolkit: string; name: string }): Promise<void>;
+  ensureAuthConfig(config: {
+    toolkit: string;
+    name: string;
+    /**
+     * Which flow this app was resolved to, which decides what is created and whether anything is.
+     *
+     * Passed in rather than read here, because the caller has already resolved it from the
+     * catalogue row the administrator chose, and a second derivation is a second answer.
+     */
+    connection: BrokerConnection;
+  }): Promise<void>;
   /**
    * Drop this deployment's own auth configs for the app, which is what removing an app has to do.
    *
