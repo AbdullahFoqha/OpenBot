@@ -222,12 +222,22 @@ export const composioConnections = pgTable(
      * check, and a reader treating every `verified_at` as "this connection answered then" would be
      * wrong about exactly the rows that were here first.
      *
-     * That is a claim about the backfill and not about the column in general. For the meaning to
-     * hold generally the writer which records a consent connection has to set `verified` itself,
-     * and today it does not: `confirmBrokeredConnection` inserts on the defaults, so a consent
-     * connection made since the backfill reads `false` with a null `verified_at` — the same pair a
-     * key connection that was never checked reads. The extracted connection writer is where that is
-     * settled.
+     * AND THE SAME NOW HOLDS OF EVERY CONSENT ROW AND NOT ONLY THE BACKFILLED ONES, because the
+     * writer that records a connection sets `verified` itself: `recordBrokeredConnection` is the
+     * one place a row is written, and `confirmBrokeredConnection` calls it with `verified: true` on
+     * the vendor's yes. So a consent connection made today carries the same true migration 0030
+     * wrote and earns it the same way — the vendor answered that the account is attached — and its
+     * `verified_at` is the moment of that answer: the consent itself on the first confirm, and the
+     * vendor's yes again on every later one, because a confirm really does go and ask. What it used
+     * to do was insert on the defaults, and until it stopped, every consent connection made since
+     * the backfill read `false` beside a null `verified_at` — the very pair a key connection nobody
+     * has ever checked reads — so nothing could tell the two apart, and the rows the migration
+     * touched were the only ones in the table saying anything true.
+     *
+     * WHAT THE PAIR SEPARATES IS A CHECKED CONNECTION FROM AN UNCHECKED ONE, and never one KIND of
+     * connection from another. Which kind a row is comes from the app's own `auth_scheme`, which
+     * the settings page branches on first; this column says only that somebody established the
+     * account is live, and `verified_at` when that was last done.
      */
     verified: boolean("verified").notNull().default(false),
     /** When that check last passed, which is what the page reports instead of a present tense. */

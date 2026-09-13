@@ -3951,6 +3951,54 @@ export function createPluginStore(options: PluginStoreOptions) {
     },
 
     /**
+     * Write down that this person holds this brokered app, and how well that is known.
+     *
+     * ONE WRITER SO THE VERIFIED AND UNVERIFIED PATHS CANNOT DRIFT INTO TWO ROW SHAPES. What says
+     * how well a connection is known is a SET of fields and not a column: `verified` is meaningless
+     * without the moment it was earned, and `verified_at` without the flag is a date on a claim
+     * nobody made. Every path that records a connection therefore comes through here rather than
+     * spelling that set for itself — {@link confirmBrokeredConnection} with `true` today, and the
+     * verify path, which is the caller `false` exists for, when a probe against a key connection
+     * comes back unanswered. Two call sites each writing the set by hand is how one of them comes
+     * to set the flag and leave the timestamp null, or to move `connected_at` on a confirm that
+     * healed a row nothing changed; spelled once, a reader asking what shape a connection row takes
+     * has one answer and every path takes it.
+     *
+     * `verified` IS THE CALLER'S CLAIM AND `verifiedAt` FOLLOWS FROM IT, never the other way round.
+     * True means the caller has evidence as of now — the vendor's own yes at the end of a consent
+     * screen, or a call that went out and came back — so the timestamp is stamped here rather than
+     * passed in, and it is the moment of the write because that is the moment the evidence was in
+     * hand. False takes the timestamp back to null rather than leaving the old one standing: a row
+     * that has stopped being verified must not keep a date saying when it last was, because the one
+     * sentence the page builds out of the pair — "last checked 13 Sep" — would then be drawn for a
+     * connection this deployment is no longer claiming anything about.
+     *
+     * `connected_at` IS LEFT ALONE, which is the whole reason this is an upsert with an explicit
+     * `set` rather than a delete and an insert. The person connected when they connected; a write
+     * that moved it would make every page load look like a fresh connection on their own settings
+     * page, and would erase the one date the row holds that nothing else in this deployment knows.
+     */
+    async recordBrokeredConnection(input: {
+      toolkit: string;
+      userId: string;
+      verified: boolean;
+    }): Promise<void> {
+      const verifiedAt = input.verified ? new Date() : null;
+      await database
+        .insert(composioConnections)
+        .values({
+          toolkit: input.toolkit,
+          userId: input.userId,
+          verified: input.verified,
+          verifiedAt,
+        })
+        .onConflictDoUpdate({
+          target: [composioConnections.toolkit, composioConnections.userId],
+          set: { verified: input.verified, verifiedAt, updatedAt: new Date() },
+        });
+    },
+
+    /**
      * Ask Composio whether this person's account is really attached, and write down the answer.
      *
      * THE VENDOR IS ASKED, NOT THE BROWSER. The return trip from a consent screen is an ordinary
@@ -4030,16 +4078,20 @@ export function createPluginStore(options: PluginStoreOptions) {
       // apart, and whether a row was already here is the whole of what decides if anybody acted.
       const existing = await this.brokeredConnection(input);
 
-      await database
-        .insert(composioConnections)
-        .values({ toolkit: input.toolkit, userId: input.userId })
-        .onConflictDoUpdate({
-          target: [composioConnections.toolkit, composioConnections.userId],
-          // `connected_at` is left alone on purpose: the person connected when they connected, and
-          // a confirm that moved it would make every page load look like a fresh connection on
-          // their own settings page.
-          set: { updatedAt: new Date() },
-        });
+      // VERIFIED, BECAUSE A CONSENT SCREEN IS A VERIFICATION AND NOT A LESSER KIND OF ONE. The
+      // vendor has just answered that this person's account is attached, which is the same
+      // question a probe goes and asks; that the evidence arrived through a consent flow rather
+      // than through a call this deployment made does not make it weaker. Writing on the column
+      // defaults instead left every consent connection reading `false` with a null `verified_at` —
+      // the pair a key somebody typed in and nobody ever checked reads — so the settings page could
+      // not tell the two apart. Written through the single writer above rather than here, so this
+      // path and the verify path cannot come to write two different row shapes; see
+      // {@link composioConnections.verified}.
+      await this.recordBrokeredConnection({
+        toolkit: input.toolkit,
+        userId: input.userId,
+        verified: true,
+      });
 
       if (!existing) {
         await recordAuditEvent(auditStore, {

@@ -225,13 +225,13 @@ async function connectionsHeld(): Promise<string[]> {
  * for its reason. "The removal asked the broker to revoke" is worth little beside "and asked it
  * nothing else": a removal that also listed the catalogue or began somebody's connection would be
  * acting on somebody's behalf in a way nothing here has reasoned about, and a stub answering
- * plausibly would let that pass unremarked. Nothing in this file lists the catalogue or confirms a
- * connection, so those three methods have no caller here and say so.
+ * plausibly would let that pass unremarked. Nothing in this file lists the catalogue or begins
+ * somebody's connection, so those two methods have no caller here and say so.
  *
- * `ensureAuthConfig` is the exception, and it is recorded rather than answered silently: the two
- * tests at the foot of this file enable an app for real, so it has a caller — and every assertion
- * above compares {@link asksMade} whole, so recording it keeps "and asked it nothing else" true of
- * the removals as well.
+ * `ensureAuthConfig` and `isConnected` are the exceptions, and both are recorded rather than
+ * answered silently: the tests at the foot of this file enable an app for real and confirm a
+ * connection for real, so each has a caller — and every assertion above compares {@link asksMade}
+ * whole, so recording them keeps "and asked it nothing else" true of the removals as well.
  */
 const unasked = (what: string) => async (): Promise<never> => {
   throw new Error(`this suite's path asked the broker to ${what}`);
@@ -287,7 +287,19 @@ const broker: ComposioBroker = {
     });
   },
   authorize: unasked("begin somebody's connection"),
-  isConnected: unasked("check somebody's connection"),
+  isConnected: async (request) => {
+    asks.push({
+      // Named by app AND person for the reason `revoke` is: a confirm is about one person's account
+      // at one app, and "a connection was checked" names neither.
+      ask: `isConnected:${request.toolkit}/${request.userId}`,
+      held: await connectionsHeld(),
+    });
+    // Constant, and deliberately not a knob like {@link vendorFinds}. The no-answer is the branch
+    // that DELETES a row, which is somebody else's coverage; what this file asks of the confirm is
+    // what the yes-answer writes down, so a second polarity here would be a seam with no test
+    // behind it pretending the other branch were covered.
+    return true;
+  },
   revoke: async (request) => {
     asks.push({
       // Named by app AND person: "two revokes happened" says nothing about who they were for, and
@@ -1159,4 +1171,54 @@ test("re-enabling an app nobody has connected picks up the vendor's change", asy
     .from(mcpServers)
     .where(eq(mcpServers.id, enabledId));
   expect(row.authScheme).toBe("OAUTH2");
+});
+
+/**
+ * CONFIRMING A CONNECTION RECORDS IT VERIFIED, BECAUSE A CONSENT SCREEN IS A VERIFICATION.
+ *
+ * CRITERION. After a confirm the vendor answers yes to, the row reads `verified` true and carries a
+ * `verified_at` no earlier than the moment the confirm was made.
+ *
+ * REASON. `verified` is what the settings page dates its sentence from — "connected, last checked
+ * 13 Sep" rather than a present tense this deployment has not earned — and the pair separates a
+ * connection whose liveness somebody established from one nobody ever checked. A consent connection
+ * belongs on the checked side by construction: it exists at all only because the person
+ * authenticated at the vendor's own screen and Composio then answered that the account is attached,
+ * which is the same evidence a probe goes and asks for. Writing it on the defaults instead left
+ * every consent connection made since migration 0030 reading `false` with a null `verified_at` —
+ * byte-identical to a key somebody typed in and nobody has tested — so the page had to describe the
+ * two the same way, and the backfilled rows were the only ones in the table telling the truth.
+ *
+ * THE TIMESTAMP IS HALF THE CRITERION AND NOT A DETAIL. `verified` true beside a null `verified_at`
+ * is a claim with no date on it, and the page has nothing to print; the two are written together by
+ * one writer or the row is a shape no reader here has reasoned about.
+ */
+test("a confirmed connection is recorded verified, at the moment it was earned", async () => {
+  await seedApp({ connect: false });
+  // Taken before the call, so the comparison below is against a moment that cannot postdate the
+  // write. Both this and the column are written in this process, so no clock but one is involved.
+  const before = new Date();
+
+  expect(
+    await store.confirmBrokeredConnection({ toolkit, userId: askerId }),
+  ).toEqual({ connected: true });
+  // And the vendor was asked, which is what makes the row a record of Composio's answer rather than
+  // of a browser arriving back on a page.
+  expect(asksMade()).toEqual([`isConnected:${toolkit}/${askerId}`]);
+
+  const [row] = await database
+    .select({
+      verified: composioConnections.verified,
+      verifiedAt: composioConnections.verifiedAt,
+    })
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, toolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(row.verified).toBe(true);
+  expect(row.verifiedAt).not.toBeNull();
+  expect(row.verifiedAt?.getTime()).toBeGreaterThanOrEqual(before.getTime());
 });
