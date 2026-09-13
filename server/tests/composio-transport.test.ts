@@ -707,6 +707,120 @@ describe("listing an app's actions", () => {
     }
   });
 
+  test("a file parameter is found down the keywords the wire can actually carry", async () => {
+    /*
+     * THE KEYWORDS THE STRIP USED TO MAKE UNREACHABLE, which is why they were never walked and why
+     * they are reachable now.
+     *
+     * The list beside the walk was bounded by a premise about the WRAPPER: a keyword
+     * `ParametersSchema` and `JSONSchemaPropertySchema` did not name could not be present to be
+     * walked, because `ToolSchema.parse` removed it before any caller saw the schema. That premise
+     * is retired. `./composio-adapter` reads `client.tools.list` and runs no parse at all — the
+     * listing left the wrapper because the wrapper is the one method of the vendor's tool model
+     * that cannot be paged — so what reaches the walk is the schema Composio published, whole.
+     *
+     * Every keyword below is a 2020-12 (or draft-07) applicator carrying a subschema, and none of
+     * them appears in either of those two zod objects. So before the strip went away they could
+     * not arrive; after it went away they arrived and went unwalked, which is an action offered to
+     * a model whose every call fails at the vendor's staging lookup.
+     */
+    const carried: { where: string; schema: Record<string, unknown> }[] = [
+      {
+        where: "prefixItems",
+        schema: underProperty("prefixItems", [
+          { type: "string" },
+          FILE_PROPERTY,
+        ]),
+      },
+      { where: "contains", schema: underProperty("contains", FILE_PROPERTY) },
+      {
+        where: "dependentSchemas at the root",
+        schema: {
+          type: "object",
+          properties: { send: { type: "boolean" } },
+          dependentSchemas: {
+            send: { type: "object", properties: { body: FILE_PROPERTY } },
+          },
+        },
+      },
+      {
+        where: "dependentSchemas under a property",
+        schema: underProperty("dependentSchemas", { send: FILE_PROPERTY }),
+      },
+      {
+        where: "dependencies under a property",
+        schema: underProperty("dependencies", { send: FILE_PROPERTY }),
+      },
+      {
+        where: "propertyNames",
+        schema: underProperty("propertyNames", FILE_PROPERTY),
+      },
+      {
+        where: "unevaluatedProperties at the root",
+        schema: { type: "object", unevaluatedProperties: FILE_PROPERTY },
+      },
+      {
+        where: "unevaluatedProperties under a property",
+        schema: underProperty("unevaluatedProperties", FILE_PROPERTY),
+      },
+      {
+        where: "unevaluatedItems",
+        schema: underProperty("unevaluatedItems", FILE_PROPERTY),
+      },
+    ];
+
+    for (const { where, schema } of carried) {
+      useComposioClient(listing(schema));
+      const listed = await listTools({ url: "composio://gmail" });
+      // The keyword is carried into the comparison so a failure names which one escaped.
+      expect({ where, offered: listed.map((tool) => tool.name) }).toEqual({
+        where,
+        offered: ["GMAIL_FETCH_EMAILS"],
+      });
+    }
+  });
+
+  test("the keywords the wire carries drop an action only where the flag is set", async () => {
+    /*
+     * THE OTHER HALF, on the keywords beside them. `dependencies` is draft-07's overload and its
+     * other arm is a list of required property NAMES rather than a subschema; `unevaluatedItems`
+     * and `unevaluatedProperties` are unions with `boolean` exactly as `additionalProperties` is.
+     * A walk that recursed into those without reading them as "not a subschema" would drop an
+     * action nobody has to stage anything for.
+     */
+    const kept: { where: string; schema: Record<string, unknown> }[] = [
+      {
+        where: "dependencies naming required properties",
+        schema: {
+          type: "object",
+          properties: { send: { type: "boolean" }, body: { type: "string" } },
+          dependencies: { send: ["body"] },
+        },
+      },
+      {
+        where: "unevaluatedProperties is closed",
+        schema: { type: "object", unevaluatedProperties: false },
+      },
+      {
+        where: "unevaluatedItems is open",
+        schema: underProperty("unevaluatedItems", true),
+      },
+      {
+        where: "contains without the flag",
+        schema: underProperty("contains", { type: "string" }),
+      },
+    ];
+
+    for (const { where, schema } of kept) {
+      useComposioClient(listing(schema));
+      const listed = await listTools({ url: "composio://gmail" });
+      expect({ where, offered: listed.map((tool) => tool.name) }).toEqual({
+        where,
+        offered: ["GMAIL_FETCH_EMAILS", "GMAIL_STAGES_A_FILE"],
+      });
+    }
+  });
+
   test("an action is dropped only where the flag is actually set", async () => {
     /*
      * THE OTHER HALF OF THE WALK, which decides what stays offered. `file_uploadable` is
@@ -1557,6 +1671,77 @@ describe("listing an app's actions", () => {
      */
     useComposioClient(recording({ listActions: async () => [] }).client);
     expect(await listTools({ url: "composio://gmail" })).toEqual([]);
+  });
+
+  test("an action this deployment will not offer cannot refuse the listing", async () => {
+    /*
+     * THE GUARDS ARE ABOUT THE MAP, SO THEY ARE ABOUT THE ACTIONS THE MAP SEES.
+     *
+     * Each of the three refusals below is written in `./composio` as a fact about the map at the
+     * end of `listTools`: a slug that is absent becomes `a tool named undefined that fails the
+     * insert`, a `tags` that is not iterable throws `{} is not iterable` out of it, a `version`
+     * that is not a string throws `version?.trim is not a function` out of it. The map runs over
+     * the OFFERED actions. An action that stages a file never reaches it — the file filter has
+     * already dropped it, deliberately and on every refresh — so nothing it carries can reach the
+     * thing the guard exists to protect.
+     *
+     * Asked of the whole listing instead, they cost the opposite of what they buy. A refusal here
+     * is a total failure of the refresh: `refreshTools` records the sentence and keeps the rows, so
+     * every OTHER action on the app stops being refreshable because of one action this deployment
+     * was never going to publish. That is exactly the tool-and-version stranding the refusals were
+     * written to prevent, caused by the refusals.
+     *
+     * The malformed field is paired with a staged file in each case, so the only thing keeping the
+     * listing alive is that the action was dropped before it was read.
+     */
+    const dropped: { where: string; action: Record<string, unknown> }[] = [
+      { where: "no slug", action: { slug: undefined } },
+      { where: "a slug of only padding", action: { slug: "   " } },
+      { where: "a slug that is not a string", action: { slug: 7 } },
+      {
+        where: "tags that are not a list",
+        action: { slug: "GMAIL_SEND_EMAIL", tags: {} },
+      },
+      {
+        where: "tags whose labels are not labels",
+        action: {
+          slug: "GMAIL_SEND_EMAIL",
+          tags: [{ name: "destructiveHint" }],
+        },
+      },
+      {
+        where: "a version that is not a version",
+        action: { slug: "GMAIL_SEND_EMAIL", version: 20260903 },
+      },
+    ];
+
+    for (const { where, action } of dropped) {
+      useComposioClient(
+        recording({
+          listActions: async () =>
+            [
+              GMAIL_READ,
+              {
+                ...action,
+                inputParameters: {
+                  type: "object",
+                  properties: { attachment: FILE_PROPERTY },
+                },
+              },
+            ] as unknown as ComposioAction[],
+        }).client,
+      );
+
+      const outcome = await listTools({ url: "composio://gmail" }).then(
+        (listed) => listed.map((tool) => tool.name),
+        (error: unknown) => (error as Error).message,
+      );
+
+      expect({ where, outcome }).toEqual({
+        where,
+        outcome: ["GMAIL_FETCH_EMAILS"],
+      });
+    }
   });
 });
 

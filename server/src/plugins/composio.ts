@@ -318,20 +318,32 @@ function schemaNode(value: unknown): Record<string, unknown> | null {
  * only the top level of `properties` would answer false for every ref-based schema, which is the
  * majority of the ones that carry a file.
  *
- * WHAT BOUNDS THE LIST IS NOT WHAT COMPLETES IT, and this comment used to claim the second from the
- * first. A keyword `ParametersSchema` and `JSONSchemaPropertySchema` strip cannot be present to be
- * walked, so nothing outside those two needs a branch — but every subschema-bearing keyword inside
- * them does, and `additionalProperties` had none. Both of them keep it as a FULL SUBSCHEMA
- * (`src/types/tool.types.ts:154` and `:111`), which is how a toolkit spells a bag of attachments, so
- * a file hidden there was offered to a model under both auto-upload settings and every call against
- * the action failed.
+ * WHAT BOUNDS THE LIST IS WHAT THE WIRE CAN CARRY, AND THAT IS NO LONGER WHAT THE SDK KEPT. This
+ * comment bounded the list by a strip: a keyword `ParametersSchema` and `JSONSchemaPropertySchema`
+ * did not name could not be present to be walked, because `ToolSchema.parse` removed it before any
+ * caller saw the schema, so nothing outside those two zod objects needed a branch. That premise
+ * belonged to the WRAPPER and the wrapper is gone. `./composio-adapter` reads `client.tools.list`
+ * and runs no parse over the answer — it had to, because `getRawComposioTools` is the one method of
+ * the vendor's tool model that cannot be paged — so what arrives here is the schema Composio
+ * published, whole, which is what {@link ComposioAction.inputParameters} above now promises.
  *
- * `additionalProperties` and `items` are unions rather than plain subschemas — the first with
- * `boolean`, the second with a tuple array. The boolean arm falls out of {@link schemaNode} and the
- * array arm is what the second loop's `Array.isArray` is for, so neither needs a case of its own.
+ * SO THE APPLICATORS THE STRIP USED TO REMOVE ARE WALKED, because every one of them is now a place
+ * a toolkit can hide a file. `prefixItems`, `contains`, `dependentSchemas`, `propertyNames`,
+ * `unevaluatedItems` and `unevaluatedProperties` are 2020-12 applicators and `dependencies` is
+ * draft-07's, and none of the seven appears in either zod object. Each was unreachable while the
+ * parse stood and reachable the moment it went, and an unwalked one is an action offered to a model
+ * under both auto-upload settings whose every call fails at the vendor's staging lookup — the same
+ * defect `additionalProperties` was, arriving through six more doors.
  *
- * Wider than the vendor's predicate by `patternProperties`, `not` and the conditional trio, which
- * that one skips: a file staged only under a condition is still a file this deployment cannot stage.
+ * SEVERAL OF THESE ARE UNIONS RATHER THAN PLAIN SUBSCHEMAS, and no arm needs a case of its own.
+ * `additionalProperties`, `unevaluatedItems` and `unevaluatedProperties` union with `boolean`;
+ * `items` unions with a tuple array; `dependencies` maps a name to a subschema OR to a list of
+ * required property names. The boolean and the string list fall out of {@link schemaNode}, which
+ * answers null for both, and the tuple arm is what the second loop's `Array.isArray` is for.
+ *
+ * Wider than the vendor's predicate by `patternProperties`, `not`, the conditional trio and the
+ * seven above, which that one skips: a file staged only under a condition is still a file this
+ * deployment cannot stage.
  */
 function stagesAFile(schema: unknown): boolean {
   const node = schemaNode(schema);
@@ -343,6 +355,8 @@ function stagesAFile(schema: unknown): boolean {
     "patternProperties",
     "$defs",
     "definitions",
+    "dependentSchemas",
+    "dependencies",
   ]) {
     const children = schemaNode(node[key]);
     if (children && Object.values(children).some(stagesAFile)) return true;
@@ -353,7 +367,12 @@ function stagesAFile(schema: unknown): boolean {
     "oneOf",
     "allOf",
     "items",
+    "prefixItems",
+    "contains",
     "additionalProperties",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+    "propertyNames",
     "not",
     "if",
     "then",
@@ -444,10 +463,16 @@ export async function listTools(connection: {
      * grant pointing at a name nothing advertises. So a listing this deployment could not read must
      * propagate.
      *
-     * What propagates is a sentence. `refreshTools` puts `error.message` on the admin page, and a
-     * `ToolSchema` mismatch's message is the Zod issue array as JSON — an operator reading 400
-     * characters of `{"code":"invalid_type","path":[...]}` learns nothing they can act on, and the
-     * same string was reaching a model's context. The original is kept as `cause` for a log.
+     * What propagates is a sentence. `refreshTools` puts `error.message` on the admin page, and
+     * what a listing throws with is nobody's sentence: `@composio/client`'s `APIError` builds its
+     * message from the whole response body, and a zod parse's is the issue array as JSON. An
+     * operator reading 400 characters of `{"code":"invalid_type","path":[...]}` or of a validation
+     * payload learns nothing they can act on, and the same string was reaching a model's context.
+     * The original is kept as `cause` for a log.
+     *
+     * `ToolSchema` USED TO BE THE THROWER NAMED HERE AND IS NO LONGER ON THIS PATH. The listing
+     * left the wrapper for the raw client, which runs no parse, so the zod half of that sentence is
+     * now about the seam rather than about the adapter — see {@link listingSentence}.
      */
     throw new Error(listingSentence(toolkit, error), { cause: error });
   }
@@ -483,34 +508,80 @@ export async function listTools(connection: {
   }
 
   /*
+   * AN ACTION IS OFFERED ONLY IF A MODEL COULD ACTUALLY FILL IN ITS ARGUMENTS.
+   *
+   * A `file_uploadable` parameter fails that. Under the SDK's default file handling — the flag is
+   * `dangerouslyAllowAutoUploadDownloadFiles` and it is off unless a client asks for it
+   * (`src/models/Tools.ts:136`, `:242-248`) — the parameter reaches the model as the vendor's
+   * internal staging descriptor, `{ name, mimetype, s3key }`. An `s3key` is issued by an upload to
+   * Composio's bucket. Nothing in this deployment performs one, and a model has no way to obtain
+   * one, so the only value it can produce is invented and the vendor's staging lookup rejects the
+   * call. The SDK says as much itself in the warning it logs on that path (`:349-366`).
+   *
+   * WHY THIS IS NOT THE SAME AS THE SCHEMALESS ACTION BELOW, which is deliberately still offered.
+   * There the vendor is the right party to reject a bad argument, and the action might well
+   * succeed. Here it cannot: every call is a rejection, and an advertised action that can only
+   * fail is worse than an absent one, because an administrator grants it, the audit trail records
+   * attempts against it, and the model spends turns retrying with a different invented key.
+   *
+   * ENABLING AUTO-UPLOAD WOULD NOT FIX IT EITHER, which is why the answer is not "turn the flag
+   * on". That flag collapses the parameter to `{ type: 'string', format: 'path' }` — a promise
+   * that the SDK will read a local path off this server's disk. A model naming a server-side path
+   * is a worse offer than one naming a bucket key, not a better one.
+   *
+   * IT RUNS BEFORE THE FIELD GUARDS RATHER THAN AFTER THEM, AND THAT ORDER IS THE POINT. Each of
+   * the three below is written as a fact about the MAP at the end of this function — a slug that
+   * becomes a tool named `undefined`, a `tags` that is not iterable, a `version` whose `trim` is
+   * not a function — and the map runs over what this filter returns. Asked of the whole listing
+   * they refuse on behalf of an action that never reaches the thing they protect: a file-staging
+   * action this deployment was never going to publish took down the refresh of every other action
+   * on the app, which is the tool-and-version stranding those refusals exist to prevent, caused by
+   * the refusals. The only read this filter makes is `inputParameters`, which the element check
+   * above has already settled is reachable, so nothing it needs is owed to a guard below it.
+   *
+   * WHAT DOES NOT CHANGE IS WHAT THE GUARDS DO WITH WHAT THEY SEE. A malformed field on an action
+   * that IS offered is still a total refusal, for the reasons each of them gives, because that one
+   * really does reach the map.
+   */
+  const offered = actions.filter(
+    (action) => !stagesAFile(action.inputParameters),
+  );
+
+  /*
    * AN ACTION WITH NO SLUG BREAKS THE LISTING RATHER THAN BEING DROPPED FROM IT.
    *
    * The slug is the action's whole identity here: it becomes `name` in `mcp_tools`, which is NOT
    * NULL and half the primary key, it is what a grant records, and it is the `slug` {@link callTool}
-   * sends back to Composio. `ToolSchema` spells it required, so an element without one is not an
-   * action the vendor published — and left to the map below it becomes a tool named `undefined`
-   * that fails the insert, taking down the refresh of an app whose other sixty actions were fine.
+   * sends back to Composio. Left to the map below it becomes a tool named `undefined` that fails
+   * the insert, taking down the refresh of an app whose other sixty actions were fine.
+   *
+   * NOTHING SPELLS IT REQUIRED ANY MORE, WHICH IS WHY THIS IS A CHECK AND NOT A RESTATEMENT. This
+   * said `ToolSchema` required the field, and that was a fact about the wrapper: the listing now
+   * reads `client.tools.list` through `./composio-adapter`, which runs no parse, so the only thing
+   * between Composio and this line is `actionOf`'s own guard one file over and this one.
    *
    * SKIPPING IT WOULD BE THE WRONG REPAIR, and this file's own distinction between an empty answer
    * and a broken one says why. Dropping the element makes this a SHORT listing, and `refreshTools`
    * commits a listing as the complete truth about the app: the replace is a delete and an insert,
    * so every recorded action missing from it is deleted with its `effect`, `destructive` and
    * `version` — and `version` is the one no refresh can reconstruct where the vendor publishes
-   * none. That is the fragment committed as complete that the full-page refusal below exists to
-   * prevent, arriving one element at a time; and here nobody could even be told which action went
-   * missing, because the thing that names it is the thing that is absent.
+   * none. That is a fragment committed as complete, arriving one element at a time; and here
+   * nobody could even be told which action went missing, because the thing that names it is the
+   * thing that is absent.
    *
-   * NOR IS IT THE FILE FILTER'S CASE, which drops actions and is right to. Those are well-formed
-   * actions the vendor published in full that this deployment cannot serve — a standing decision
-   * about a known action, taken the same way on every refresh. This is an answer that could not be
-   * read, which is the criterion the element check above already throws on, one field further in.
+   * NOR IS IT THE FILE FILTER'S CASE, which drops actions and is right to, and which now runs
+   * ABOVE this. Those are well-formed actions the vendor published in full that this deployment
+   * cannot serve — a standing decision about a known action, taken the same way on every refresh —
+   * and an action it dropped is one the map never sees, so a missing slug on one of those is not
+   * this guard's business. This is an answer that could not be read about an action that WILL be
+   * published, which is the criterion the element check above already throws on, one field in.
    *
    * BLANK COUNTS AS ABSENT, for the reason the version below is trimmed: `callTool` would send the
    * padding to Composio as the action's name, and no `mcp_tools` row keyed on whitespace is a name
    * anybody meant to grant.
    */
   if (
-    actions.some(
+    offered.some(
       (action) => typeof action.slug !== "string" || action.slug.trim() === "",
     )
   ) {
@@ -559,8 +630,11 @@ export async function listTools(connection: {
    * way round rather than the cautious one, so it is answered the same way and in the same breath.
    * ASKED OF EVERY ELEMENT rather than of any, because a list that is mostly labels with one
    * malformed entry is the shape a vendor actually sends, and it is the one a looser check passes.
+   *
+   * OF EVERY OFFERED ELEMENT, because the map and the `mcp_tools` row are what the whole argument
+   * above is about and neither exists for an action the file filter dropped. See that filter.
    */
-  const oddTags = actions.find(
+  const oddTags = offered.find(
     (action) =>
       action.tags !== undefined &&
       (!Array.isArray(action.tags) ||
@@ -596,8 +670,12 @@ export async function listTools(connection: {
    *
    * Both fields are read as `unknown` for the reason {@link reportedFailure} reads its two that way:
    * the types above are this module's projection and the values are the vendor's.
+   *
+   * ASKED OF THE OFFERED ACTIONS for the reason the two guards above it are: the map that reads
+   * this field, and the `version` column a refresh would wipe, are both about actions that get
+   * published, and an action the file filter dropped is published nowhere.
    */
-  const oddVersion = actions.find((action) => {
+  const oddVersion = offered.find((action) => {
     const version: unknown = action.version;
     return (
       version !== undefined && version !== null && typeof version !== "string"
@@ -633,32 +711,6 @@ export async function listTools(connection: {
    */
 
   /*
-   * AN ACTION IS OFFERED ONLY IF A MODEL COULD ACTUALLY FILL IN ITS ARGUMENTS.
-   *
-   * A `file_uploadable` parameter fails that. Under the SDK's default file handling — the flag is
-   * `dangerouslyAllowAutoUploadDownloadFiles` and it is off unless a client asks for it
-   * (`src/models/Tools.ts:136`, `:242-248`) — the parameter reaches the model as the vendor's
-   * internal staging descriptor, `{ name, mimetype, s3key }`. An `s3key` is issued by an upload to
-   * Composio's bucket. Nothing in this deployment performs one, and a model has no way to obtain
-   * one, so the only value it can produce is invented and the vendor's staging lookup rejects the
-   * call. The SDK says as much itself in the warning it logs on that path (`:349-366`).
-   *
-   * WHY THIS IS NOT THE SAME AS THE SCHEMALESS ACTION ABOVE, which is deliberately still offered.
-   * There the vendor is the right party to reject a bad argument, and the action might well
-   * succeed. Here it cannot: every call is a rejection, and an advertised action that can only
-   * fail is worse than an absent one, because an administrator grants it, the audit trail records
-   * attempts against it, and the model spends turns retrying with a different invented key.
-   *
-   * ENABLING AUTO-UPLOAD WOULD NOT FIX IT EITHER, which is why the answer is not "turn the flag
-   * on". That flag collapses the parameter to `{ type: 'string', format: 'path' }` — a promise
-   * that the SDK will read a local path off this server's disk. A model naming a server-side path
-   * is a worse offer than one naming a bucket key, not a better one.
-   */
-  const offered = actions.filter(
-    (action) => !stagesAFile(action.inputParameters),
-  );
-
-  /*
    * THE FILTER MAY SHORTEN A LISTING AND MAY NOT EMPTY ONE.
    *
    * Dropping an action is a standing decision about an action this deployment cannot serve, taken
@@ -667,8 +719,8 @@ export async function listTools(connection: {
    * everywhere in this codebase, and `refreshTools` commits it as a healthy refresh — a delete and
    * an insert that takes every recorded action with its `effect`, `destructive` and, fatally, its
    * `version`, which no later refresh reconstructs where Composio publishes none. That is the same
-   * tool-and-version wipe the empty answer, the unreadable answer, the slug-less action and the
-   * full page above all refuse; arriving through this filter does not make it a different event.
+   * tool-and-version wipe the empty answer, the unreadable answer and the slug-less action above
+   * all refuse; arriving through this filter does not make it a different event.
    *
    * A vendor answer that was genuinely empty is left alone, because that one IS the vendor
    * advertising nothing and is the sentence `refreshTools` should record. Which is also the one
@@ -918,6 +970,16 @@ function isSchemaMismatch(error: unknown): boolean {
  * The schema case names the fix, because it is a vendor change rather than a misconfiguration: the
  * answer arrived and this deployment's copy of their SDK would not accept it, so nothing an
  * administrator can do to this row will help and upgrading the package will.
+ *
+ * IT IS A CLAIM ABOUT THE SEAM NOW RATHER THAN ABOUT THE ADAPTER, which is worth saying because it
+ * used to be the other way round. This branch was written for `getRawComposioTools`, whose last act
+ * was `ToolSchema.parse`, and the listing does not go through it any more: `./composio-adapter`
+ * reads `client.tools.list`, which parses nothing, so today's implementation of
+ * {@link ComposioActions.listActions} cannot raise a `ZodError` here. What the branch still covers
+ * is the seam — a `ComposioActions` is anything satisfying two methods — and a sentence naming the
+ * package remains the only useful thing to say about a zod complaint arriving through one. Deleting
+ * it would leave that answer to be reconstructed by whoever meets it; what would be wrong is
+ * keeping a comment that says the adapter throws it.
  *
  * THE PLACEHOLDER IS REFUSED HERE ON THE SAME GROUNDS {@link callTool} REFUSES IT, which is the
  * half this function was missing. "Error executing the tool X" names only the thing the reader
