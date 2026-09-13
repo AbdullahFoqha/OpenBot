@@ -893,10 +893,10 @@ test("a connected consent app offers no Re-check at all", () => {
 
 test("an app with nothing to check a key against says that about the app", () => {
   /*
-   * STATE ONE: a null probe beside an unverified key. The app publishes no action this deployment
-   * could safely spend the key on, so nothing was tried and nothing can be — a fact about what the
-   * app publishes, which is why the sentence has to say so rather than leave a person reading
-   * suspicion of their own key into it.
+   * STATE ONE: a null probe beside an unverified key. When the key was taken the app published no
+   * action this deployment could safely spend it on, so nothing was tried — a fact about what the
+   * app published then, which is why the sentence has to say so, in that tense, rather than leave a
+   * person reading suspicion of their own key into it.
    */
   const view = renderRow(
     accountState({ connected: true, kind: "fields", probe: null }),
@@ -905,7 +905,9 @@ test("an app with nothing to check a key against says that about the app", () =>
   expect(
     view.getByText(/accepted without being checked against Gmail/),
   ).toBeTruthy();
-  expect(view.getByText(/publishes nothing safe to try a key on/)).toBeTruthy();
+  expect(
+    view.getByText(/published nothing safe to try a key on at the time/),
+  ).toBeTruthy();
   expect(view.getByText(/about the app, not about your key/)).toBeTruthy();
   // The one thing this state must never read as: a verdict on the key.
   expect(view.queryByText(/rejected/)).toBeNull();
@@ -1101,8 +1103,8 @@ test("a rejected key still says so on a page that has only read, and still offer
    * THE RELOAD, WHICH IS THE STATE THIS WHOLE FIELD WAS MISSING FROM. Nothing has been pressed
    * here: no key has just been handed over and no re-check has been made, so the hook holds no
    * mutation answer at all and everything the row knows came out of the connections read. That read
-   * now derives `probe` from the app's recorded actions, which is what lets the three states behind
-   * one `verified: false` survive a refresh.
+   * now carries `probe` as the record of what the check spent, written down when it was spent, which
+   * is what lets the three states behind one `verified: false` survive a refresh.
    *
    * Before it did, this exact page said "accepted without being checked" — to the one person whose
    * key HAS been checked and refused, and whose account is standing at Composio. The button they
@@ -1191,6 +1193,15 @@ test("a key nothing was tried on offers Re-check once the app has something to t
   expect(row.getByRole("button", { name: "Re-check" })).toBeTruthy();
   expect(
     row.getByText(/accepted without being checked against Gmail/),
+  ).toBeTruthy();
+  /*
+   * AND IN THE PAST TENSE, which is what keeps the line and the button from contradicting each
+   * other. The app publishes something NOW — that is why the button is there — so a clause claiming
+   * it publishes nothing would be read off the same row as the offer to check, and one of the two
+   * would have to be wrong. The clause is about the moment of the check, and says so.
+   */
+  expect(
+    row.getByText(/published nothing safe to try a key on at the time/),
   ).toBeTruthy();
   // And never the sentence written for a key the vendor refused: nothing was refused here.
   expect(row.queryByText(/and rejected/)).toBeNull();

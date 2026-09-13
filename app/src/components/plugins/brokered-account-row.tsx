@@ -109,8 +109,9 @@ export type BrokeredAccount = {
    * THE THREE STATES BEHIND `verified` ARE THIS FIELD'S DOING, and the sentences below are written
    * off it rather than off the flag:
    *
-   *   `null`      — the answer said this app publishes nothing safe to spend a key on. Nothing was
-   *                 tried and nothing can be, which is a fact about the app and not about the key.
+   *   `null`      — nothing was tried: at the time of the check this app published nothing safe to
+   *                 spend a key on. A fact about the app and not about the key, and about the app
+   *                 THEN — whether it has anything to spend one on now is `checkable`'s question.
    *   a name, verified — the action ran in this person's account and the vendor took the key.
    *   a name, NOT verified — it ran and the vendor refused the key, and the account it ran in is
    *                 still there: a connect leaves it because its withdrawal failed, a re-check
@@ -594,16 +595,19 @@ function accountSentence(input: {
        * reading — that this deployment doubts the key — is the one a person supplies for themselves
        * when a row goes quiet.
        *
-       * ITS SECOND CLAUSE IS AS OF THE CHECK, NOT AS OF TODAY, and where the app has since started
-       * publishing something it reads a little behind. That is deliberate and it is the safe half
-       * of the trade: the sentence is drawn from the record because a sentence drawn from today's
-       * listing is how a key nobody tried came to be accused of being rejected. The present-tense
-       * half reaches the person as the Re-check button beside it, which `checkable` puts there in
-       * exactly that state — so the row offers the act that would make this sentence current rather
-       * than asserting a check it has not made.
+       * ITS SECOND CLAUSE IS AS OF THE CHECK, NOT AS OF TODAY, AND SAYS SO IN ITS TENSE. The app
+       * published nothing safe to try a key on when the key was taken; whether it publishes
+       * something now is a question this sentence does not answer, and must not, because a sentence
+       * drawn from today's listing is how a key nobody tried came to be accused of being rejected.
+       * Where the app HAS since published something the present-tense half reaches the person as
+       * the Re-check button beside this line, which `checkable` puts there in exactly that state —
+       * so the row offers the act that would make this sentence current rather than asserting a
+       * check it has not made. A past tense is what keeps the two from reading as a contradiction:
+       * a button to check with, beside a line that never claimed there was nothing to check with
+       * today.
        */
       if (account.probe === null) {
-        return `Connected with a key you provided. It was accepted without being checked against ${title}, which publishes nothing safe to try a key on — that is about the app, not about your key.`;
+        return `Connected with a key you provided. It was accepted without being checked against ${title}, which published nothing safe to try a key on at the time — that is about the app, not about your key.`;
       }
       /*
        * AND NOTHING HAS SAID WHICH, which is no longer the page load: the connections read carries

@@ -312,17 +312,31 @@ rather than a second connection. An audit row naming the action that was tried r
 state for whoever reads the trail a week later, because a sentence one person read once outlives
 nothing.
 
-**Which of the three a row is in is a fact about the action a check would be spent on, and the page
-keeps it across a reload.** The flag alone cannot say: `false` is both *this app publishes nothing
+**Which of the three a row is in is a fact about the action a check actually spent, and the page
+keeps it across a reload.** The flag alone cannot say: `false` is both *this app published nothing
 safe to try a key on* and *your key was checked and rejected and the account is still standing*.
-So the connections read names the probe beside the flag and the date, deriving it from the app's
-recorded actions without asking the vendor anything, and the sentences are written off that name.
-A re-check or a key just handed over names the action it was actually spent on, and that answer
-wins over the derived name — an answer beats a record, and a check that has just run must not be
-overruled by a read taken before it. A re-check the vendor refuses is not an answer at all: it is
-raised, and Composio's own sentence for it reaches the person as a refusal rather than as a row
-that quietly changed its wording. While the name came only from an answer, a reload collapsed the
-third state into the first and told the one person with a refused key that nothing had been tried.
+So the connections read carries two fields beside the flag and the date, and they answer two
+different questions. `probe` is the action the last check SPENT, written down by that check and read
+back off the row — a fact about the past, and what the row's sentence is drawn from. `checkable` is
+whether the app publishes anything safe to spend a key on TODAY, asked of the app and kept as a yes
+or no — a fact about the present, and what the Re-check button is drawn from. Neither is a weaker
+spelling of the other, and a screen that asks either of them the other's question breaks in the way
+the other field exists to prevent. A re-check or a key just handed over names the action it was
+actually spent on, and that answer wins over the recorded one, because an answer is a newer record
+of the same thing and a check that has just run must not be overruled by a read taken before it. A
+re-check the vendor refuses is not an answer at all: it is raised, and Composio's own sentence for
+it reaches the person as a refusal rather than as a row that quietly changed its wording.
+
+While the name was derived on every read, an administrator's Refresh could rewrite what a check had
+found. Somebody connects a key to an app that publishes nothing safe to try it on, and the row
+honestly says the key was accepted unchecked. Then an administrator presses Refresh, which is the
+very press this transport tells them to make when an action appears or gains the version that makes
+it callable. The derivation names an action, and from that page load on the row draws the sentence
+written for a REFUSED key: checked and rejected, the account it was checked in still standing, so
+disconnect it. Every clause of that is false for somebody whose key nobody had touched, it tells
+them to take down a connection that works, and it persists until they press Re-check. The recorded
+column is what puts that state out of reach: what a check spent is written by the check, and no
+later reading of today's metadata can move it.
 
 **Nothing re-checks on page load.** That call is spent on the person's own account and against their
 own rate limit at the vendor, so verifying on every render would burn somebody's quota at Linear to
@@ -330,9 +344,13 @@ redraw one word on a page they were passing through. **Re-check** is a button, a
 probe against the account that already exists: it creates nothing, and a key the vendor rejects
 leaves their account alone — it is the key that is wrong, and taking the account away would destroy
 the thing they are trying to repair. It is drawn on a key connection and on nothing else, and the
-one state it is withheld in is an app that has told this deployment there is nothing to check with,
-where pressing it could only ask for the same answer again. A key the vendor has just rejected keeps
-its button, because that is the person most likely to have gone and fixed something.
+one state it is withheld in is an app with nothing to check a key against today, where pressing it
+could only ask for the same answer again. That question is asked of the app and never of the record:
+a key accepted when the app published nothing records no action, permanently and correctly, and a
+button withheld on that record stays withheld even after a Refresh has given the app something to
+try — while pressing that button is the only thing in the product that could ever put an action into
+the record. A key the vendor has just rejected keeps its button, because that is the person most
+likely to have gone and fixed something.
 
 ### Disconnecting a key does not end it at the vendor
 
