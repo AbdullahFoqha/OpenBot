@@ -889,19 +889,38 @@ describe("the Composio directory", () => {
       );
     });
 
-    const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ slug: "docusign" }),
-      },
-    );
+    const said: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      said.push(args.map(String).join(" "));
+    };
 
-    expect(response.status).toBe(503);
-    expect(((await response.json()) as { error: string }).error).toContain(
-      "its own OAuth client",
-    );
+    try {
+      const response = await app.request(
+        "http://openbot.test/api/plugins/composio/apps",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ slug: "docusign" }),
+        },
+      );
+
+      expect(response.status).toBe(503);
+      expect(((await response.json()) as { error: string }).error).toContain(
+        "its own OAuth client",
+      );
+    } finally {
+      console.error = realError;
+    }
+
+    // AND NOTHING ON THE CONSOLE. The log below this branch is for the failure whose explanation
+    // cannot be read off the response; this refusal's explanation is the response. Widen that
+    // guard to fire on every refusal — or add a third sentence source and leave the guard out of
+    // step with it — and an operator gets a console line per dead button, about failures they can
+    // already read in the browser.
+    expect(
+      said.find((line) => line.includes("composio-app-not-enabled")),
+    ).toBeUndefined();
   });
 
   test("a deployment fault while enabling is still a 409 in its own words", async () => {
@@ -947,29 +966,56 @@ describe("the Composio directory", () => {
      * console — the one failure whose explanation cannot be read off the response, because the
      * response is the generic sentence and nothing more.
      *
-     * The other two enable cases take the branches above this one, so without this the guard's
-     * condition is unpinned: a later reader could widen it to log every refusal, or drop it, and
-     * both existing cases would still pass.
+     * SO THE CONSOLE IS READ HERE, not only the body. The response half alone pins nothing about
+     * the guard — `brokerRefusal` produces that same 502 whether the log block exists or not — so
+     * the line itself is asserted: it has to carry the sentence the response withholds, and the app
+     * it was about. Delete the guard and this case fails; widen its condition to log every refusal
+     * and the authored refusal above fails.
+     *
+     * THE FAKE KEY ON THE THROWN OBJECT pins the restraint the route's comment promises. The error
+     * is stringified, never spread, logged as an object or reached into, so a property that rode
+     * along on it reaches nobody. `JSON.stringify(error)` in place of `String(error)` is the quiet
+     * way to lose that, and it is what these last two assertions catch.
      */
     const { app } = directoryApp(undefined, "admin", [], async () => {
-      throw new Error("Cannot read properties of undefined (reading 'slug')");
+      throw Object.assign(
+        new Error("Cannot read properties of undefined (reading 'slug')"),
+        { apiKey: "ak_a_key_nobody_should_read" },
+      );
     });
+    const said: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      said.push(args.map(String).join(" "));
+    };
 
-    const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ slug: "slack" }),
-      },
-    );
+    try {
+      const response = await app.request(
+        "http://openbot.test/api/plugins/composio/apps",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ slug: "slack" }),
+        },
+      );
 
-    expect(response.status).toBe(502);
-    const refusal = ((await response.json()) as { error: string }).error;
-    expect(refusal).toContain("Composio said nothing about why");
-    // Never the thrown object's own text: on this path it is as likely to be a stack frame as a
-    // sentence, and it is the console line that carries it to an operator.
-    expect(refusal).not.toContain("Cannot read properties");
+      expect(response.status).toBe(502);
+      const refusal = ((await response.json()) as { error: string }).error;
+      expect(refusal).toContain("Composio said nothing about why");
+      // Never the thrown object's own text: on this path it is as likely to be a stack frame as a
+      // sentence, and it is the console line that carries it to an operator.
+      expect(refusal).not.toContain("Cannot read properties");
+    } finally {
+      console.error = realError;
+    }
+
+    const line = said.find((said) => said.includes("composio-app-not-enabled"));
+    expect(line).toBeDefined();
+    // Which app an operator is about to be asked about, and the cause the browser was not given —
+    // the complement of the assertion above, and the whole point of the guard.
+    expect(line).toContain("slack");
+    expect(line).toContain("Cannot read properties");
+    expect(line).not.toContain("ak_a_key_nobody_should_read");
   });
 });
 
