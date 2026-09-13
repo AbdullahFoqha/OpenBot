@@ -698,7 +698,10 @@ export function createPluginRoutes(
      * brokered row is the only one with anything to re-check: this deployment holds no secret for
      * it, only a note that Composio said yes, and that note can drift when somebody ends the
      * connection in Composio's own dashboard. A held connection has no equivalent question, so its
-     * rows carry no such fields, and their absence is what tells a reader which kind a row is.
+     * rows carry no such fields, and their absence is what tells the two READS apart. It is not how
+     * a reader learns how an app connects: that is the app's recorded `authScheme`, and a page
+     * asking this list instead would be deriving a second answer to a question the row already
+     * carries.
      *
      * SORTED, so two requests answer in the same order. Each read is ordered by server id within
      * its own table, and concatenating two sorted lists is not a sorted list. Compared as plain

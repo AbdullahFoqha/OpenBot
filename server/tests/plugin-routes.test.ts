@@ -937,6 +937,40 @@ describe("the Composio directory", () => {
     expect(refusal).toContain("Two rows claim the url");
     expect(refusal).not.toContain("Composio said nothing about why");
   });
+
+  test("a failure nobody explained is a 502 in the route's own words", async () => {
+    /*
+     * THE LAST CLASS ON THIS ROUTE, and the only one that gets logged. A refusal this deployment
+     * authored carries its own sentence, and a sentence Composio wrote carries Composio's; a bare
+     * `Error` carries neither, which is what `brokerSentence` and `vendorSentence` both answering
+     * null means. That is most often a programmer error on this side, so the route writes it to the
+     * console — the one failure whose explanation cannot be read off the response, because the
+     * response is the generic sentence and nothing more.
+     *
+     * The other two enable cases take the branches above this one, so without this the guard's
+     * condition is unpinned: a later reader could widen it to log every refusal, or drop it, and
+     * both existing cases would still pass.
+     */
+    const { app } = directoryApp(undefined, "admin", [], async () => {
+      throw new Error("Cannot read properties of undefined (reading 'slug')");
+    });
+
+    const response = await app.request(
+      "http://openbot.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "slack" }),
+      },
+    );
+
+    expect(response.status).toBe(502);
+    const refusal = ((await response.json()) as { error: string }).error;
+    expect(refusal).toContain("Composio said nothing about why");
+    // Never the thrown object's own text: on this path it is as likely to be a stack frame as a
+    // sentence, and it is the console line that carries it to an operator.
+    expect(refusal).not.toContain("Cannot read properties");
+  });
 });
 
 /**

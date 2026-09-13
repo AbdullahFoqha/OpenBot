@@ -222,10 +222,12 @@ export const composioConnections = pgTable(
      * check, and a reader treating every `verified_at` as "this connection answered then" would be
      * wrong about exactly the rows that were here first.
      *
-     * That is a claim about the backfill and not about the column in general: the writer which
-     * records a consent connection is expected to set `verified` itself, so the meaning holds for
-     * rows written since as well, rather than letting them land on the `false` default that the
-     * never-checked key rows use.
+     * That is a claim about the backfill and not about the column in general. For the meaning to
+     * hold generally the writer which records a consent connection has to set `verified` itself,
+     * and today it does not: `confirmBrokeredConnection` inserts on the defaults, so a consent
+     * connection made since the backfill reads `false` with a null `verified_at` — the same pair a
+     * key connection that was never checked reads. The extracted connection writer is where that is
+     * settled.
      */
     verified: boolean("verified").notNull().default(false),
     /** When that check last passed, which is what the page reports instead of a present tense. */
