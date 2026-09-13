@@ -428,6 +428,17 @@ export function connectBrokeredWithFieldsMutationOptions(
  * A button rather than something a page does on its own. Verifying on every render would spend the
  * person's own rate limit at the vendor to redraw a word, so the check happens when somebody asks
  * for it and the answer is recorded with the time it was taken.
+ *
+ * `probe` TRAVELS WITH THE VERDICT, for the reason spelled out over
+ * {@link connectBrokeredWithFieldsMutationOptions}: the flag alone means three different things and
+ * a reader cannot tell them apart. On this route it also decides whether there is anything left to
+ * press — a null probe is an app publishing nothing safe to spend a key on, so the check that just
+ * ran is the last one there is to run, where a named probe is a check that can be made again as
+ * soon as somebody has corrected their key at the vendor.
+ *
+ * A CHECK THE VENDOR REFUSED DOES NOT ARRIVE HERE AT ALL. That path raises with Composio's own
+ * sentence in it, which the banner and the dialog draw; the only `verified: false` this answers with
+ * is the one carrying a null probe.
  */
 export function recheckBrokeredConnectionMutationOptions(
   queryClient: QueryClient,
@@ -435,7 +446,11 @@ export function recheckBrokeredConnectionMutationOptions(
   return mutationOptions({
     mutationFn: async (
       serverId: string,
-    ): Promise<{ verified: boolean; verifiedAt: string | null }> => {
+    ): Promise<{
+      verified: boolean;
+      verifiedAt: string | null;
+      probe: string | null;
+    }> => {
       const response = await client(
         `/api/plugins/servers/${encodeURIComponent(serverId)}/connection/recheck`,
         { method: "POST", fallback: "That connection could not be checked." },
@@ -443,6 +458,7 @@ export function recheckBrokeredConnectionMutationOptions(
       return (await response.json()) as {
         verified: boolean;
         verifiedAt: string | null;
+        probe: string | null;
       };
     },
     onSuccess: () => invalidatePlugins(queryClient),

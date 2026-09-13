@@ -71,6 +71,15 @@ const CHECKED_AT = "2026-09-10T09:00:00.000Z";
 /** When a re-check pressed during a test finds out again. A different day, so the two read apart. */
 const RECHECKED_AT = "2026-09-13T09:00:00.000Z";
 
+/**
+ * The action Composio publishes for this app, as the server names it in an answer.
+ *
+ * A real name rather than a flag, because the name is the whole of what separates the two things
+ * `verified: false` means: a null probe is an app with nothing safe to spend a key on, and this
+ * beside the same false is a key the vendor looked at and refused.
+ */
+const PROBE = "GMAIL_FETCH_EMAILS";
+
 /** The same day, spelled the way the row spells it — the reader's own locale, not this file's. */
 function asDay(iso: string): string {
   return new Date(iso).toLocaleDateString();
@@ -133,8 +142,18 @@ type Deployment = {
   verified?: boolean;
   /** When that happened. Null wherever `verified` is false — a check that failed records no time. */
   verifiedAt?: string | null;
-  /** What a re-check answers when somebody presses for one. */
-  recheckAnswer?: { verified: boolean; verifiedAt: string | null };
+  /**
+   * What a re-check answers when somebody presses for one, as the route's whole body.
+   *
+   * `probe` travels with the verdict because the verdict alone is not an answer: the only
+   * `verified: false` that arrives here as a 200 is the one carrying a null probe, and a re-check
+   * the vendor refused is raised rather than answered.
+   */
+  recheckAnswer?: {
+    verified: boolean;
+    verifiedAt: string | null;
+    probe: string | null;
+  };
   /** What Composio refuses a submitted key with, where this deployment refuses it at all. */
   rejects?: string;
 };
@@ -159,7 +178,7 @@ function installDeployment(deployment: Deployment): Server {
     verified: false,
     verifiedAt: null as string | null,
     rejects: undefined as string | undefined,
-    recheckAnswer: { verified: true, verifiedAt: RECHECKED_AT },
+    recheckAnswer: { verified: true, verifiedAt: RECHECKED_AT, probe: PROBE },
     ...deployment,
   };
   const server: Server = { deletes: 0 };
@@ -230,7 +249,12 @@ function installDeployment(deployment: Deployment): Server {
         // on it, whatever the app does or does not publish to spend.
         state.verified = false;
         state.verifiedAt = null;
-        return json({ connected: true, verified: false });
+        /*
+         * The route's whole body, `probe` included. This deployment's app publishes nothing safe to
+         * spend a key on, which is what a null probe beside an unverified key says — and a stub that
+         * left the field off would answer `undefined`, a state the server has no way to send.
+         */
+        return json({ connected: true, verified: false, probe: null });
       }
       return json({ fields: state.fields });
     }
@@ -679,6 +703,12 @@ function accountState(overrides: Partial<BrokeredAccount>): BrokeredAccount {
     disconnecting: false,
     fields: null,
     kind: "consent",
+    /*
+     * UNDEFINED IS THE DEFAULT BECAUSE IT IS THE COMMON STATE, not because the field is optional to
+     * fill in: a row drawn from a page load has been told nothing about a probe, and the cases below
+     * that are about the three the server DOES send say `null` or a name for themselves.
+     */
+    probe: undefined,
     recheck: () => {},
     rechecking: false,
     requestFields: () => {},
@@ -761,12 +791,13 @@ test("Re-check appears only where a check is possible, and asks when pressed", a
   cleanup();
 
   /*
-   * A key nothing has ever checked, which is every key on the day it is typed: the store writes
-   * `verified: false` on every one of them. There is no check to repeat, so nothing is offered —
-   * and the sentence does not say why, because this row is not told why.
+   * AN APP WITH NOTHING TO CHECK A KEY AGAINST, which is the null probe the server sends: no action
+   * this deployment could safely spend the key on, so there is no check to make and nothing to
+   * offer. Not the same as a key nothing has checked YET — that one keeps its button, because the
+   * person who has just fixed their key is exactly who reaches for it.
    */
   const unchecked = renderRow(
-    accountState({ connected: true, kind: "fields" }),
+    accountState({ connected: true, kind: "fields", probe: null }),
   );
 
   expect(unchecked.queryByRole("button", { name: "Re-check" })).toBeNull();
@@ -795,6 +826,133 @@ test("a connected consent app offers no Re-check at all", () => {
   // The row is otherwise itself: a live account somebody can still end.
   expect(view.getByRole("button", { name: "Disconnect" })).toBeTruthy();
   expect(view.getByText(/through Gmail's consent screen/)).toBeTruthy();
+});
+
+/**
+ * THE THREE THINGS A KEY CONNECTION'S VERIFICATION CAN MEAN, one test apiece.
+ *
+ * The row used to collapse all three into "It was accepted without being checked against Gmail",
+ * which is vague for two of them and FALSE for the third: there the key was checked, the vendor
+ * refused it, and the account that check ran in could not be withdrawn — so the one person whose
+ * key is definitely bad, and whose account is definitely standing at Composio, was told nothing had
+ * ever been tried. `probe` is what tells them apart, and these are the three shapes it arrives in.
+ */
+
+test("an app with nothing to check a key against says that about the app", () => {
+  /*
+   * STATE ONE: a null probe beside an unverified key. The app publishes no action this deployment
+   * could safely spend the key on, so nothing was tried and nothing can be — a fact about what the
+   * app publishes, which is why the sentence has to say so rather than leave a person reading
+   * suspicion of their own key into it.
+   */
+  const view = renderRow(
+    accountState({ connected: true, kind: "fields", probe: null }),
+  );
+
+  expect(
+    view.getByText(/accepted without being checked against Gmail/),
+  ).toBeTruthy();
+  expect(view.getByText(/publishes nothing safe to try a key on/)).toBeTruthy();
+  expect(view.getByText(/about the app, not about your key/)).toBeTruthy();
+  // The one thing this state must never read as: a verdict on the key.
+  expect(view.queryByText(/rejected/)).toBeNull();
+});
+
+test("a key that passed its check says when it passed", () => {
+  /*
+   * STATE TWO: a named probe and a verdict that it answered. The action ran in this person's own
+   * account and the vendor took the key — and because Composio never re-checks a key once it has
+   * taken it, the sentence names the moment rather than asserting a present tense.
+   */
+  const view = renderRow(
+    accountState({
+      connected: true,
+      kind: "fields",
+      probe: PROBE,
+      verified: true,
+      verifiedAt: CHECKED_AT,
+    }),
+  );
+
+  expect(
+    view.getByText(
+      `Connected with a key you provided, last checked ${asDay(CHECKED_AT)}.`,
+    ),
+  ).toBeTruthy();
+  expect(
+    view.queryByText(/accepted without being checked against Gmail/),
+  ).toBeNull();
+});
+
+test("a key the vendor rejected says so, and that the account still stands", () => {
+  /*
+   * STATE THREE, AND THE WHOLE REASON `probe` TRAVELS. It is reachable only on the worst path: the
+   * check ran, the vendor refused the key, and the account it had just created could NOT be
+   * withdrawn. All three facts are the person's to act on — the key is bad, an account of theirs is
+   * live at Composio that this deployment could not take back, and the row says which button ends
+   * which.
+   */
+  const view = renderRow(
+    accountState({
+      connected: true,
+      kind: "fields",
+      probe: PROBE,
+      verified: false,
+      verifiedAt: null,
+    }),
+  );
+
+  expect(view.getByText(/was checked against Gmail and rejected/)).toBeTruthy();
+  expect(view.getByText(/still stands at Composio/)).toBeTruthy();
+  expect(view.getByText(/could not withdraw it/)).toBeTruthy();
+  /*
+   * AND NOT THE OTHER SENTENCE. This is the state that sentence was false in: saying nothing had
+   * been checked, to the one person whose key has definitely been checked and definitely refused.
+   */
+  expect(
+    view.queryByText(/accepted without being checked against Gmail/),
+  ).toBeNull();
+});
+
+test("Re-check is offered where the key is bad and withheld where there is nothing to check", async () => {
+  /*
+   * THE BUTTON BELONGS TO THE APP'S PROBE, NOT TO A CHECK THAT HAS ALREADY PASSED. Gating it on
+   * `verified` hid it in state three, which is precisely where somebody stands after correcting the
+   * key at the vendor and wanting to try it again — and the row that hid it also told them nothing
+   * had ever been tried.
+   */
+  let checks = 0;
+  const rejected = renderRow(
+    accountState({
+      connected: true,
+      kind: "fields",
+      probe: PROBE,
+      recheck: () => {
+        checks += 1;
+      },
+      verified: false,
+      verifiedAt: null,
+    }),
+  );
+
+  await userEvent.click(rejected.getByRole("button", { name: "Re-check" }));
+  expect(checks).toBe(1);
+
+  cleanup();
+
+  /*
+   * And withheld where the answer said there is nothing to check with. Pressing it there could only
+   * spend a request to be told the same null probe again.
+   */
+  const nothingToCheck = renderRow(
+    accountState({ connected: true, kind: "fields", probe: null }),
+  );
+
+  expect(nothingToCheck.queryByRole("button", { name: "Re-check" })).toBeNull();
+  // Still a live account somebody can end: the missing button is about checking, not about acting.
+  expect(
+    nothingToCheck.getByRole("button", { name: "Disconnect" }),
+  ).toBeTruthy();
 });
 
 test("disconnecting a key names the step this deployment cannot take", () => {

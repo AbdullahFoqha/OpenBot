@@ -90,8 +90,9 @@ export type BrokeredAccount = {
    *
    * AND `false` IS A PLACEHOLDER AS MUCH AS A VERDICT. The store writes it unconditionally on every
    * key connection, whether or not the app publishes anything to check a key against, so nothing
-   * here may explain the `false` either. Three states share this one word — never tried, tried and
-   * failed, nothing to try — and they stay unsaid until the server sends the reason.
+   * here may explain the `false` off this field. Three states share this one word — nothing to try,
+   * tried and passed, tried and refused — and {@link BrokeredAccount.probe} is what tells them
+   * apart. Read the two together or not at all.
    */
   verified: boolean;
   /**
@@ -102,6 +103,29 @@ export type BrokeredAccount = {
    * about a key that may have been revoked at the vendor an hour ago.
    */
   verifiedAt: string | null;
+  /**
+   * The action that check was spent on, as the last answer named it.
+   *
+   * THE THREE STATES BEHIND `verified` ARE THIS FIELD'S DOING, and the sentences below are written
+   * off it rather than off the flag:
+   *
+   *   `null`      — the answer said this app publishes nothing safe to spend a key on. Nothing was
+   *                 tried and nothing can be, which is a fact about the app and not about the key.
+   *   a name, verified — the action ran in this person's account and the vendor took the key.
+   *   a name, NOT verified — it ran, the vendor refused the key, and the account it had just made
+   *                 could not be withdrawn. The row exists, the key is bad, and something of theirs
+   *                 is standing at Composio. This is the worst state the feature has.
+   *   `undefined` — NOT A FOURTH VERDICT BUT THE ABSENCE OF ONE. No answer has been given here,
+   *                 which is every first render: the connections read carries the flag and the date
+   *                 and has no column for this, so a page load knows whether a check passed and
+   *                 never what it was spent on, nor whether there was anything to spend one on.
+   *                 Nothing may read it as either of the two answers the server actually sends.
+   *
+   * Carried out of the answers rather than out of the recorded row, because only the answers have
+   * it: a re-check and a key handed over both come back naming the action, and neither writes the
+   * name anywhere a later read could find it.
+   */
+  probe: string | null | undefined;
   /**
    * Whether this deployment has a Composio key at all.
    *
@@ -333,6 +357,16 @@ export function useBrokeredAccount(input: {
     },
   });
 
+  /*
+   * The freshest thing either check has said about this key, or nothing at all.
+   *
+   * Two answers name a probe — a re-check, and a key just handed over — and the newer of the two
+   * wins for the reason `verified` below gives: an answer beats the record, and these two cannot
+   * both be new. A submission clears the re-check's answer as it lands, and opening the form clears
+   * the submission's, so whichever is present is the one that was actually last said.
+   */
+  const answered = recheck.data ?? submission.data;
+
   return {
     /*
      * What the vendor last answered, and only our own record until it has answered anything. The
@@ -352,6 +386,14 @@ export function useBrokeredAccount(input: {
      */
     verified: recheck.data ? recheck.data.verified : verified,
     verifiedAt: recheck.data ? recheck.data.verifiedAt : verifiedAt,
+    /*
+     * The name off whichever answer is newest, and UNDEFINED WHERE THERE IS NONE — not null, which
+     * is a thing the server says and this deployment would be inventing. See
+     * {@link BrokeredAccount.probe}: a row that reported "nothing to check with" on every page load
+     * would tell somebody their app publishes no probe on the strength of never having asked, and
+     * would take away the button they reach for having just fixed their key.
+     */
+    probe: answered ? answered.probe : undefined,
     recheck: () => {
       report(null);
       recheck.mutate(serverId);
@@ -452,16 +494,34 @@ function accountSentence(input: {
         return `Connected with a key you provided, last checked ${formatDate(account.verifiedAt)}.`;
       }
       /*
-       * NO REASON GIVEN, BECAUSE THIS ROW HAS NOT BEEN TOLD ONE. The sentence here used to explain
-       * the missing check as a fact about the app — that it publishes nothing to try a key on —
-       * and the store writes `verified: false` on every key connection it makes, publisher or not.
-       * So the row was asserting that Perplexity publishes nothing checkable while Perplexity
-       * publishes a perfectly good probe. What is true of all three states behind that one word is
-       * only that the key was taken and nothing has tried it, so that is the whole of what is said.
+       * THE KEY WAS CHECKED AND THE VENDOR REFUSED IT, and the account it was checked in could not
+       * be withdrawn — the one state where the sentence below was not vague but FALSE. Three facts
+       * are this person's to act on and all three go in: their key is bad, an account of theirs is
+       * live at Composio, and this deployment tried to take it back and could not. Reachable only
+       * from the answer to a key just handed over; a re-check the vendor refuses is raised instead,
+       * and the banner and the dialog carry Composio's own sentence for it.
        *
-       * THE FOLLOW-UP IS THE VERIFICATION PROBE, not a bigger sentence here: three states need the
-       * server to say WHICH — never tried, tried and failed, nothing to try — and the reason
-       * arrives with the probe that lands next. See {@link BrokeredAccount.verified}.
+       * BOTH WAYS OUT ARE NAMED, because neither is obvious from a row that says "Connected": the
+       * account ends with the button beside this line, and a key corrected at the vendor is worth a
+       * second check rather than a second connection.
+       */
+      if (account.probe && !account.verified) {
+        return `Your key was checked against ${title} and rejected. The account it was checked in still stands at Composio — this deployment could not withdraw it — so disconnect it here, or fix the key at ${title} and press Re-check.`;
+      }
+      /*
+       * NOTHING TO CHECK IT WITH, WHICH IS A FACT ABOUT THE APP. The answer named no probe at all:
+       * this app publishes no action safe to spend somebody's key on, so the check was not skipped
+       * and cannot be made. Said plainly because the alternative reading — that this deployment
+       * doubts the key — is the one a person supplies for themselves when a row goes quiet.
+       */
+      if (account.probe === null) {
+        return `Connected with a key you provided. It was accepted without being checked against ${title}, which publishes nothing safe to try a key on — that is about the app, not about your key.`;
+      }
+      /*
+       * AND NO ANSWER HERE HAS SAID WHICH, which is every page load: the connections read carries
+       * the flag and the date and not the probe, so all this row knows is that the key was taken and
+       * that nothing it has been told about has tried it. The two sentences above are the two things
+       * an answer can say; this is what stands until one does, and it must not borrow either.
        */
       return `Connected with a key you provided. It was accepted without being checked against ${title}.`;
     }
@@ -609,17 +669,20 @@ export function BrokeredAccountRow({
                 <span className="text-muted-foreground text-xs">Connected</span>
                 {/*
                  * OFFERED ONLY ON A KEY APP, BECAUSE THAT IS THE ONLY KIND A RE-CHECK IS AN ACT ON.
-                 * `verified` on its own is not that question and never was — see
-                 * {@link BrokeredAccount.verified}: a consent connection is written verified by the
-                 * confirm, with no probe behind it, and migration 0030 backfilled every consent row
-                 * that came before. The flag alone therefore drew Re-check on every connected Gmail
-                 * a deployment already had, where pressing it could only fail.
+                 * A consent connection is written verified by the confirm, with no probe behind it,
+                 * and migration 0030 backfilled every consent row that came before — see
+                 * {@link BrokeredAccount.verified} — so a gate that asked only about a check would
+                 * draw Re-check on every connected Gmail a deployment already had, where pressing it
+                 * could only fail.
                  *
-                 * THE FLAG STILL COUNTS BESIDE THE KIND. A key nothing has ever checked has no check
-                 * to repeat, so there is nothing to press and the sentence above says where that
-                 * leaves it — without claiming to know why, which this row is not told.
+                 * AND THE SECOND HALF ASKS WHETHER THERE IS ANYTHING TO CHECK WITH, WHICH IS NOT
+                 * "HAS A CHECK PASSED". Gating on `verified` withheld the button in the one state
+                 * somebody reaches for it hardest: a key the vendor has just rejected, which they
+                 * have gone and corrected and now want tried again. A null probe is the only state
+                 * with nothing to press — the app publishes nothing to spend the key on, so the
+                 * button could only ask for the same answer again.
                  */}
-                {account.kind === "fields" && account.verified ? (
+                {account.kind === "fields" && account.probe !== null ? (
                   <Button
                     disabled={account.rechecking}
                     onClick={account.recheck}
