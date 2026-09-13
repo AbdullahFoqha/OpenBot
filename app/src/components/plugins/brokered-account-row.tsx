@@ -426,9 +426,16 @@ function accountSentence(input: {
      * "disconnected" and stopping would leave somebody believing they had ended access they still
      * have live, so the row names the step this deployment cannot take for them.
      */
-    return account.disconnected
-      ? `Removed from Composio. Your key still works at ${title} — rotate it there if you meant to end its access.`
-      : disconnectedDescription;
+    if (account.disconnected) {
+      return `Removed from Composio. Your key still works at ${title} — rotate it there if you meant to end its access.`;
+    }
+    /*
+     * NOT THE SCREEN'S OWN SENTENCE, which is written for the kind that leaves: one of the two says
+     * connecting takes you to Composio and then to the vendor to consent, and pressing Connect here
+     * opens a form and asks for a secret instead. A sentence that promises a trip nobody is about to
+     * take is a worse preparation for the dialog than no sentence at all.
+     */
+    return `This app is connected with a key you already hold, not a trip to ${title}'s consent screen. Connect asks for it.`;
   }
 
   /*
@@ -462,11 +469,12 @@ export function BrokeredAccountRow({
   /**
    * The app's own name, for the sentences that name it.
    *
-   * Optional, and falling back to a bare noun rather than to the word `undefined`: a screen that
-   * has not got a title yet — one drawing a row for an app the catalogue has not answered for —
-   * still reads as a sentence, and the only thing it loses is the vendor's name in it.
+   * Required, because the sentences it appears in are the ones whose whole job is to name a place:
+   * where a key still works after a disconnect, whose consent screen a connection rests on, which
+   * app needs no account at all. "Your key still works at the app" tells somebody nothing they can
+   * act on, so a screen that cannot name the app has no business drawing this row.
    */
-  title?: string;
+  title: string;
 }) {
   /*
    * Whether the form is on screen, which is the whole of what this row holds.
@@ -504,7 +512,7 @@ export function BrokeredAccountRow({
               account,
               connectedDescription,
               disconnectedDescription,
-              title: title ?? "the app",
+              title,
             })}
           </ItemDescription>
         </ItemContent>

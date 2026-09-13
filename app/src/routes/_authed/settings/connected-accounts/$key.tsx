@@ -137,6 +137,7 @@ function RouteComponent() {
                  and connecting again is a fresh consent. */
               connectedDescription={`A Bot granted its tools reads your ${server.title} as you. Disconnecting ends the account at Composio, not just here.`}
               disconnectedDescription="No Bot can read this as you. Connecting takes you to Composio and then to the vendor to consent."
+              title={server.title}
             />
           </PageRows>
         </PageSection>

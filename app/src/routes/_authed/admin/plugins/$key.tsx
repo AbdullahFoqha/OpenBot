@@ -573,6 +573,7 @@ function RouteComponent() {
                      mailbox, and connecting again is a fresh consent. */
                   connectedDescription={`Connected, so a Bot granted these tools uses your ${title} as you. Disconnecting ends the account at Composio, not just here.`}
                   disconnectedDescription="Connect your own account to try this connector. Setup is complete without it, and it reaches your documents only."
+                  title={title}
                 />
               </>
             ) : null}

@@ -530,6 +530,59 @@ test("a key app asks for what the app asked for, with its own help text", async 
   expect(view.queryByText(/starting with 'pplx-'/)).toBeTruthy();
 });
 
+test("a key app nobody has connected says it will ask for a key, not send you off", async () => {
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY],
+    recorded: false,
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  expect(
+    await view.findByText(
+      /connected with a key you already hold, not a trip to Gmail's consent screen/,
+    ),
+  ).toBeTruthy();
+  /*
+   * The screen's own not-connected sentence is written for the kind that leaves, and pressing
+   * Connect on this app opens a form instead. Promising a trip to the vendor here is not a vaguer
+   * sentence than the truth; it is a different act from the one about to happen.
+   */
+  expect(
+    view.queryByText(/takes you to Composio and then to the vendor to consent/),
+  ).toBeNull();
+});
+
+test("the row names the app rather than calling it the app", async () => {
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: true,
+    fields: [PERPLEXITY_KEY],
+    recorded: true,
+  });
+
+  const view = renderAdminScreen(queryClient());
+
+  /*
+   * The point of every sentence that names the vendor is that it names a place somebody has to go:
+   * the console where a key is rotated, the consent screen a connection rests on. A screen that
+   * drew this row without handing over the title left them all saying "the app", which names
+   * nowhere at all.
+   */
+  expect(
+    await view.findByText(
+      /Gmail publishes nothing this deployment can check it against/,
+    ),
+  ).toBeTruthy();
+  expect(
+    view.queryByText(/the app publishes nothing this deployment can check it/),
+  ).toBeNull();
+});
+
 /**
  * A `BrokeredAccount` standing on its own, for the cases that are about what the row SAYS.
  *
