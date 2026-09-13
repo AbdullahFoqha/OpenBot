@@ -1,6 +1,14 @@
 import { queryOptions } from "@tanstack/react-query";
 import { client } from "@/lib/client";
 
+/**
+ * Re-exported, not re-declared.
+ *
+ * The field list is asked for by a POST, so it lives beside its only producer in `./mutations` —
+ * a second copy here would be free to drift from the shape that write actually returns.
+ */
+export type { BrokerField } from "./mutations";
+
 /** A tool one server offers, as the Plugins page sees it. */
 export type PluginTool = {
   serverId: string;
@@ -56,6 +64,19 @@ export type PluginServer = {
    * administrator to paste one in.
    */
   dynamicClient: boolean;
+  /**
+   * How this server's authorization config was CREATED, for the brokered rows that have one.
+   *
+   * What was written down when somebody enabled the app, not what the catalogue publishes today.
+   * The catalogue is the vendor's, and an app it starts advertising under a different scheme has
+   * not moved the config this deployment already created — so a screen deciding what a live
+   * connection does reads this and never a fresh listing. The vocabulary is the vendor's own scheme
+   * literals (`OAUTH2`, `DCR_OAUTH`, `API_KEY`, `NO_AUTH`, and the rest), so it is a string rather
+   * than a union this page would have to keep level with Composio's.
+   *
+   * Null is not an older brokered row. It is a row that is not brokered at all.
+   */
+  authScheme: string | null;
   tools: PluginTool[];
   /** Empty for a healthy connector. See {@link WithdrawnGrant}. */
   withdrawn: WithdrawnGrant[];
@@ -170,12 +191,41 @@ export const pluginKeys = {
     ["plugins", "composio", "apps", query] as const,
 };
 
-/** One account this person has connected, from their own point of view. */
+/**
+ * One account this person has connected, from their own point of view.
+ *
+ * DELIBERATELY NON-UNIFORM, because `/api/plugins/connections` concatenates two reads: connections
+ * held in this deployment's own vault, and brokered ones Composio keeps on our behalf. The fields a
+ * settings row draws from — the server id, the scope, the date — line up across both, which is why
+ * one type covers both. The pair below does not, so it is optional rather than required: making it
+ * required would be a lie the compiler then enforced on every held row.
+ */
 export type PluginConnection = {
   serverId: string;
-  /** What the vendor actually granted, which is not always what was asked for. */
+  /** What the vendor actually granted, which is not always what was asked for. Empty for brokered. */
   scope: string;
   connectedAt: string;
+  /**
+   * Whether a real call was last made with this credential, present only on a BROKERED row.
+   *
+   * Only a brokered row has anything to re-check: this deployment holds no secret for it, only a
+   * note that Composio said yes, and that note can drift when somebody ends the connection in
+   * Composio's own dashboard. A held connection has no equivalent question, so its rows carry
+   * neither field, and the absence of the pair is what tells the two READS apart — nothing more.
+   *
+   * It is NOT how a reader learns how an app connects. That comes from {@link PluginServer.authScheme}
+   * on the server, and a page deriving it from a connection row instead would be a second answer to
+   * a question already carried.
+   */
+  verified?: boolean;
+  /**
+   * When {@link PluginConnection.verified} was last earned, present only on a brokered row.
+   *
+   * Null is reachable and means never checked, which is why it stays null rather than collapsing
+   * the way `connectedAt` does. For the rows an older migration backfilled it is the moment of
+   * consent rather than of a probe, so it is not read as "this connection answered then".
+   */
+  verifiedAt?: string | null;
 };
 
 export type PluginConnections = {
