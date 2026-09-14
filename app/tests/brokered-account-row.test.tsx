@@ -384,11 +384,17 @@ function installDeployment(deployment: Deployment): Server {
         state.verified = false;
         state.verifiedAt = null;
         /*
-         * The route's whole body, `probe` included. This deployment's app publishes nothing safe to
-         * spend a key on, which is what a null probe beside an unverified key says — and a stub that
-         * left the field off would answer `undefined`, a state the server has no way to send.
+         * AND THE PROBE IS WRITTEN DOWN, not merely answered. `connectBrokeredWithFields` hands
+         * `probeAction: probe` to the single writer with the verdict it derived from that same
+         * value, so the row the NEXT connections read answers out of carries the name, or the null,
+         * that this press spent. Leaving `state.probe` alone here left the later read answering the
+         * field's absence — `undefined`, which is a held connection's row and a thing this endpoint
+         * has no way to produce for an app somebody just handed a key to. Every assertion about
+         * what a row says after a connect was then reading a state off the mutation's answer that
+         * the read behind it could never have agreed with.
          */
-        return json({ connected: true, verified: false, probe: null });
+        state.probe = null;
+        return json({ connected: true, verified: false, probe: state.probe });
       }
       /*
        * THE FIRST PRESS FORKS ON THE RECORDED SCHEME, exactly as the route does: a typed scheme is
@@ -402,17 +408,38 @@ function installDeployment(deployment: Deployment): Server {
       return json({ authorizationUrl: CONSENT_URL });
     }
     if (path.endsWith("/connection/recheck") && method === "POST") {
-      state.verified = state.recheckAnswer.verified;
-      state.verifiedAt = state.recheckAnswer.verifiedAt;
+      /*
+       * A CHECK THAT SPENT SOMETHING WRITES; A CHECK THAT SPENT NOTHING WRITES NOTHING, which is
+       * the fork `recheckBrokeredConnection` makes and the reason the verdict cannot be recorded on
+       * its own. A null probe means the app published nothing safe to try, so the store returns
+       * early and the row keeps whatever it already held — its old verdict, its old date and its
+       * old record. Writing the verdict here regardless would let a press that tried nothing
+       * overwrite the answer of the last press that did.
+       *
+       * AND `probe` IS RECORDED BESIDE THEM, WHICH IS WHAT THIS BRANCH USED TO LEAVE OUT. The
+       * verdict and its date were written and the name of what was spent was not, so the row a
+       * reload read back was the one shape the server cannot hold: a `verified: false` under an app
+       * nothing had ever said anything about. That is the third of the three states this field
+       * exists to separate, standing in for the second, on the render where somebody is deciding
+       * whether their key is bad.
+       */
+      if (state.recheckAnswer.probe !== null) {
+        state.verified = state.recheckAnswer.verified;
+        state.verifiedAt = state.recheckAnswer.verifiedAt;
+        state.probe = state.recheckAnswer.probe;
+      }
       return json(state.recheckAnswer);
     }
     if (path.endsWith("/connection") && method === "DELETE") {
       server.deletes += 1;
       state.recorded = false;
       state.confirms = false;
-      // The row is gone, and so is everything that was ever checked about it.
+      // The row is gone, and so is everything that was ever checked about it — the record of what
+      // the last check spent included. `retireConnectionsFor` deletes the row rather than blanking
+      // three of its four columns, so a probe left standing here is a column no deployment can hold.
       state.verified = false;
       state.verifiedAt = null;
+      state.probe = undefined;
       return json({ ok: true });
     }
     if (path.startsWith("/api/agents")) return json({ agents: [] });
@@ -1272,6 +1299,82 @@ test("a key re-checked and then disconnected stops claiming it was checked", asy
     view.queryByText(/accepted without being checked against Gmail/),
   ).toBeTruthy();
   expect(view.queryByText(/last checked/)).toBeNull();
+});
+
+test("a re-check's verdict is still there after a reload, because the server wrote down what it spent", async () => {
+  /*
+   * THE ROUND TRIP, WHICH IS THE HALF NEITHER SIDE'S TESTS COVER ON THEIR OWN.
+   *
+   * CRITERION. A re-check that spends an action and comes back refused leaves a row that STILL
+   * reads as refused on a page mounted fresh afterwards, with nothing in hand but the connections
+   * read.
+   *
+   * REASON. Every other re-check here asserts against the mutation's own answer, which the hook
+   * holds until something resets it — so they all pass on a deployment that answers a verdict and
+   * writes nothing down. That deployment is the defect `probe` was added to close: the person
+   * presses Re-check, reads that their key was refused, reloads the page, and is told the key was
+   * "accepted without being checked", with the button that would tell them otherwise withheld. The
+   * sibling test below pins the reading of a recorded probe; this one pins that a press is what
+   * records one, which is the only part of the sequence that crosses the mutation-to-read boundary.
+   *
+   * THE ROW STARTS ON THE OTHER SIDE OF THE FIELD IT IS ABOUT, and it has to. The recorded probe
+   * below is NULL — the key was taken when this app published nothing safe to spend it on — so the
+   * only way the reload can read as refused is if the press wrote a name where a null was. Starting
+   * from a row that already named a probe would let a deployment that answers and forgets satisfy
+   * every assertion here, which is exactly what the harness used to do.
+   *
+   * AND IT IS THE STATE THE PRODUCT REALLY REACHES. `checkable` true beside a null record is an app
+   * that has begun publishing something since the key was taken — an administrator pressed Refresh
+   * — which is the one state where a person can press Re-check on a key nothing has ever tried.
+   */
+  installDeployment({
+    authScheme: "API_KEY",
+    checkable: true,
+    composioConfigured: true,
+    confirms: true,
+    fields: [PERPLEXITY_KEY],
+    recorded: true,
+    verified: false,
+    verifiedAt: null,
+    probe: null,
+    // The action the app now publishes, spent by the press below, and the vendor refuses the key.
+    // A named probe is what makes this a press the store writes rather than returns early from.
+    recheckAnswer: { verified: false, verifiedAt: null, probe: PROBE },
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  expect(
+    await view.findByText(/accepted without being checked against Gmail/),
+  ).toBeTruthy();
+
+  await userEvent.click(view.getByRole("button", { name: "Re-check" }));
+  await waitFor(() =>
+    expect(
+      view.queryByText(/was checked against Gmail and rejected/),
+    ).toBeTruthy(),
+  );
+
+  /*
+   * AND NOW THE RELOAD. A fresh mount with a fresh client keeps nothing: no mutation answer, no
+   * cached read, only whatever the deployment now holds. `installDeployment` is deliberately NOT
+   * called again — the state this screen reads is the one the press above left behind.
+   */
+  cleanup();
+  const reloaded = renderAccountScreen(queryClient());
+
+  expect(
+    await reloaded.findByText(/was checked against Gmail and rejected/),
+  ).toBeTruthy();
+  // And never either sentence that would be false about a key the vendor has just refused.
+  expect(
+    reloaded.queryByText(/accepted without being checked against Gmail/),
+  ).toBeNull();
+  expect(reloaded.queryByText(/last checked/)).toBeNull();
+  // The way back out, which is withheld on exactly the render somebody would look for it.
+  expect(
+    await reloaded.findByRole("button", { name: "Re-check" }),
+  ).toBeTruthy();
 });
 
 test("a rejected key still says so on a page that has only read, and still offers Re-check", async () => {

@@ -14,8 +14,116 @@ import {
   CustomServerRefusedError,
   PluginInvariantError,
   PluginRefusedError,
+  type PluginStore,
+  type ServerRecord,
 } from "../src/plugins/store";
 import { testEnvironment } from "./support/environment";
+
+/**
+ * The handful of reads one route makes, typed against the store that really answers them.
+ *
+ * ONE CAST, IN ONE PLACE, WITH ITS INPUT CHECKED. A route test supplies four or five methods where
+ * the real store has ninety, so something has to widen the handful into the parameter's type. Every
+ * call site here used to spell that as `store as never`, and `never` widens the METHODS along with
+ * the object: a stub whose `brokeredConnectionsFor` answered three fields where the real one
+ * answers seven typechecked in silence, and every assertion above it then passed whether or not the
+ * route carried the other four. `Partial<PluginStore>` is the same widening with the signatures
+ * kept, so a stub that answers a shape the real store cannot is a compile error here rather than a
+ * green test.
+ *
+ * AND THE FILLERS BELOW HAD TO GO WITH IT, which is the half that looks unrelated and is not.
+ * `createApp` takes twenty-six positional stores, and the spread that skipped to the fifteenth was
+ * an array of unknown LENGTH — so TypeScript had no idea which parameter the store landed on and
+ * checked it against the next one in the signature. Typing the store without fixing that only moves
+ * the silence: see {@link UP_TO_PLUGIN_STORE}.
+ */
+function pluginStore(reads: Partial<PluginStore>): PluginStore {
+  return reads as PluginStore;
+}
+
+/**
+ * `createApp`'s positions 4-14, which no test on this surface supplies.
+ *
+ * A FIXED-LENGTH TUPLE RATHER THAN `Array.from({ length: 11 }) as never[]`, which is what every
+ * call site here spread before. An array whose length TypeScript does not know tells it nothing
+ * about which parameter the argument AFTER it lands on, so the plugin store was being checked
+ * against position 5 — `credentialService` — and the `as never` on it is the only reason that was
+ * quiet. With the length written down, the store is checked against `pluginStore`, which is the
+ * whole point of typing it at all.
+ */
+const UP_TO_PLUGIN_STORE = [
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+] as const;
+
+/** `createApp`'s positions 16-25, between the plugin store and the broker. See {@link UP_TO_PLUGIN_STORE}. */
+const UP_TO_BROKER = [
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+  undefined,
+] as const;
+
+/** One row of what {@link PluginStore.connectionsFor} answers: this deployment's own vault. */
+type HeldConnection = Awaited<
+  ReturnType<PluginStore["connectionsFor"]>
+>[number];
+
+/**
+ * One row of what {@link PluginStore.brokeredConnectionsFor} answers.
+ *
+ * Spelled as the store's own return type rather than re-typed here, because the four fields this
+ * read adds over {@link HeldConnection} — `verified`, `verifiedAt`, `probe`, `checkable` — are the
+ * whole of the verification surface, and a fixture free to omit them is a fixture that cannot tell
+ * whether the route carries them.
+ */
+type BrokeredConnection = Awaited<
+  ReturnType<PluginStore["brokeredConnectionsFor"]>
+>[number];
+
+/**
+ * A server row as the store really answers one, from the two columns a test cares about.
+ *
+ * FIFTEEN FIELDS BECAUSE THE STORE ANSWERS FIFTEEN. The stubs here used to hand back `{ id, url }`,
+ * which is not a row any deployment can produce — and a route reaching for `authScheme` or `tools`
+ * on it would find `undefined` and behave in a way no real store could reproduce. The values are
+ * the empty ones on purpose: nothing on these routes reads them, and a fixture that invented
+ * interesting ones would be inviting an assertion about a fact it made up.
+ */
+function serverRecord(row: { id: string; url: string }): ServerRecord {
+  return {
+    id: row.id,
+    title: row.id,
+    vendor: "composio",
+    url: row.url,
+    summary: "",
+    docsUrl: "",
+    provenance: "custom",
+    hasCredential: false,
+    toolsRefreshedAt: null,
+    lastError: null,
+    addedBy: null,
+    dynamicClient: false,
+    authScheme: null,
+    tools: [],
+    withdrawn: [],
+  };
+}
 
 /**
  * What a refused add looks like to the administrator who made it.
@@ -38,13 +146,12 @@ function appWith(
   addServer: () => Promise<never>,
   role: "admin" | "user" = "admin",
 ) {
-  const store = {
+  const store = pluginStore({
     addServer,
     // Every read the plugins surface makes on its way to the route under test.
     listServers: async () => [],
     listSkills: async () => [],
-    listGrants: async () => [],
-  };
+  });
 
   const app = createApp(
     loadConfig(testEnvironment()),
@@ -54,8 +161,8 @@ function appWith(
     } as never,
     { rolesForUser: async () => [role] },
     // Positions 4-14 are the other stores; `store` is 15, pluginStore.
-    ...(Array.from({ length: 11 }) as never[]),
-    store as never,
+    ...UP_TO_PLUGIN_STORE,
+    store,
   );
 
   return (body: unknown) =>
@@ -154,13 +261,12 @@ function refreshApp(
   refreshTools: () => Promise<never>,
   role: "admin" | "user" = "admin",
 ) {
-  const store = {
+  const store = pluginStore({
     refreshTools,
     // Every read the plugins surface makes on its way to the route under test.
     listServers: async () => [],
     listSkills: async () => [],
-    listGrants: async () => [],
-  };
+  });
 
   const app = createApp(
     loadConfig(testEnvironment()),
@@ -170,8 +276,8 @@ function refreshApp(
     } as never,
     { rolesForUser: async () => [role] },
     // Positions 4-14 are the other stores; `store` is 15, pluginStore.
-    ...(Array.from({ length: 11 }) as never[]),
-    store as never,
+    ...UP_TO_PLUGIN_STORE,
+    store,
   );
 
   return () =>
@@ -274,10 +380,9 @@ function grantsApp(
   },
 ) {
   const calls: Array<{ verb: string; kind: string; ref: string }> = [];
-  const store = {
+  const store = pluginStore({
     listServers: async () => [],
     listSkills: async () => [],
-    listGrants: async () => [],
     grant: async (kind: string, ref: string) => {
       calls.push({ verb: "grant", kind, ref });
     },
@@ -289,7 +394,7 @@ function grantsApp(
     agentRunsHere: async (agentId: string) => runsHere(agentId),
     agentIsRegistered: async (agentId: string) =>
       agentId !== "never-registered",
-  };
+  });
 
   const app = createApp(
     loadConfig(testEnvironment()),
@@ -298,8 +403,8 @@ function grantsApp(
       api: { getSession: async () => ({ user: ADMIN }) },
     } as never,
     { rolesForUser: async () => [role] },
-    ...(Array.from({ length: 11 }) as never[]),
-    store as never,
+    ...UP_TO_PLUGIN_STORE,
+    store,
   );
 
   return { calls, app };
@@ -648,13 +753,29 @@ function directoryApp(
     by: string;
     connection: BrokerConnection;
   }> = [];
-  const store = {
+  /**
+   * Which of this store's ID-BEARING reads the route made, in order.
+   *
+   * THE FIXTURE'S IDS WERE UNREACHABLE WITHOUT THIS, AND AN UNREACHABLE ID IS AN ASSERTION THAT
+   * CANNOT FAIL. The rows below have always carried an id that names a different app than their
+   * url, to say that `enabled` is decided by the url — but the only method this store exposed was
+   * `serverUrls`, which drops the id on the way out, so the route had nothing to read wrongly and
+   * the "not by the row's id" half of that test was true of any implementation whatsoever.
+   * `listServers` is the read that DOES carry ids, so offering it here is what makes the wrong
+   * implementation expressible: a route resolving an app off `id` marks the wrong one enabled and
+   * leaves its name in this list.
+   */
+  const idReads: string[] = [];
+  const store = pluginStore({
     // Every read the plugins surface makes on its way to the route under test. The directory asks
-    // for urls and is handed urls: the rows below carry an id as well, and the route never sees it.
+    // for urls and is handed urls; `listServers` is here to be left alone. See {@link idReads}.
     serverUrls: async () =>
       failServerUrls ? failServerUrls() : servers.map((server) => server.url),
+    listServers: async () => {
+      idReads.push("listServers");
+      return servers.map(serverRecord);
+    },
     listSkills: async () => [],
-    listGrants: async () => [],
     addBrokeredApp: async (input: {
       slug: string;
       title: string;
@@ -663,9 +784,12 @@ function directoryApp(
     }) => {
       if (enable) return enable();
       added.push(input);
-      return { id: `composio-${input.slug}`, url: `composio://${input.slug}` };
+      return serverRecord({
+        id: `composio-${input.slug}`,
+        url: `composio://${input.slug}`,
+      });
     },
-  };
+  });
 
   const app = createApp(
     loadConfig(testEnvironment()),
@@ -675,14 +799,14 @@ function directoryApp(
     } as never,
     { rolesForUser: async () => [role] },
     // Positions 4-14 are the other stores; `store` is 15, pluginStore.
-    ...(Array.from({ length: 11 }) as never[]),
-    store as never,
+    ...UP_TO_PLUGIN_STORE,
+    store,
     // Positions 16-25 are the stores after it; the broker is 26, `composio`.
-    ...(Array.from({ length: 10 }) as never[]),
+    ...UP_TO_BROKER,
     listApps ? ({ broker: { listApps } } as never) : undefined,
   );
 
-  return { added, app };
+  return { added, app, idReads };
 }
 
 describe("the Composio directory", () => {
@@ -750,12 +874,25 @@ describe("the Composio directory", () => {
   });
 
   test("an app is enabled by the url of the row, not by the row's id", async () => {
-    // Which app a row is comes off its url and only off its url, because that is where the
-    // transport reads it from. An id read as an app name is a different question wearing the same
-    // answer's clothes — and the read behind this route now hands over urls alone, so the id below
-    // is one the route could not consult even if it wanted to.
-    const { app } = directoryApp(undefined, "admin", [
-      { id: "an-id-nobody-should-read", url: "composio://slack" },
+    /*
+     * Which app a row is comes off its url and only off its url, because that is where the
+     * transport reads it from. An id read as an app name is a different question wearing the same
+     * answer's clothes, and it works right up until somebody renames a row.
+     *
+     * SO THE ROW BELOW DISAGREES WITH ITSELF, AND NAMES A SECOND APP THAT IS REALLY IN THE
+     * DIRECTORY. Its id reads as Gmail and its url is Slack's — which is a renamed Slack row, and
+     * the only fixture that can tell the two readings apart. The id used to be
+     * `an-id-nobody-should-read`, a string no implementation would resolve to any app at all: under
+     * it, a route keyed on ids would have marked NOTHING enabled and the assertions below would
+     * have read exactly as they do now. The test's own name was the only place the property lived.
+     *
+     * AND THE ID-BEARING READ IS ASSERTED UNMADE, which is the structural half the route's comment
+     * claims: `serverUrls` hands over urls and nothing else, so there is no id here to read by
+     * mistake. That is a claim about which call is made, and only a store offering the other call
+     * can check it. See `directoryApp`'s `idReads`.
+     */
+    const { app, idReads } = directoryApp(undefined, "admin", [
+      { id: "composio-gmail", url: "composio://slack" },
     ]);
 
     const response = await app.request(
@@ -768,6 +905,7 @@ describe("the Composio directory", () => {
     }>;
     expect(apps.find((entry) => entry.slug === "slack")?.enabled).toBe(true);
     expect(apps.find((entry) => entry.slug === "gmail")?.enabled).toBe(false);
+    expect(idReads).toEqual([]);
   });
 
   test("a slug the directory never answered with is refused", async () => {
@@ -1099,27 +1237,28 @@ describe("the Composio directory", () => {
  *
  * SCOPING IS THE OTHER HALF, and it is a per-person read with no `requireAdmin` in front of it: a
  * union assembled from the wrong id would put somebody else's connected mailbox on this page.
+ *
+ * THE TWO ROW TYPES ARE THE STORE'S OWN, and that is what makes the verification half of this route
+ * testable at all. The brokered fixture used to be re-typed here as the three fields it shares with
+ * a held row, so `verified`, `verifiedAt`, `probe` and `checkable` never entered the harness and
+ * nothing above could notice a route that dropped them on the way out.
  */
 function connectionsApp(
   person: { id: string; email: string },
-  held: Array<{ serverId: string; scope: string; connectedAt: string }>,
-  brokered: Array<{
-    userId: string;
-    row: { serverId: string; scope: string; connectedAt: string };
-  }>,
+  held: HeldConnection[],
+  brokered: Array<{ userId: string; row: BrokeredConnection }>,
 ) {
-  const store = {
+  const store = pluginStore({
     // Every read the plugins surface makes on its way to the route under test.
     listServers: async () => [],
     listSkills: async () => [],
-    listGrants: async () => [],
     connectionsFor: async (userId: string) =>
       userId === person.id ? held : [],
     brokeredConnectionsFor: async (userId: string) =>
       brokered
         .filter((connection) => connection.userId === userId)
         .map((connection) => connection.row),
-  };
+  });
 
   const app = createApp(
     loadConfig(testEnvironment()),
@@ -1133,8 +1272,8 @@ function connectionsApp(
     } as never,
     { rolesForUser: async () => ["user"] },
     // Positions 4-14 are the other stores; `store` is 15, pluginStore.
-    ...(Array.from({ length: 11 }) as never[]),
-    store as never,
+    ...UP_TO_PLUGIN_STORE,
+    store,
   );
 
   return () => app.request("http://openbot.test/api/plugins/connections");
@@ -1143,27 +1282,39 @@ function connectionsApp(
 const ASKER = { id: "user_asker", email: "asker@openbot.test" };
 const SOMEBODY_ELSE = { id: "user_other", email: "other@openbot.test" };
 
+/** This deployment's own OAuth grant, which is what `connectionsFor` answers and all it answers. */
+const HELD_NOTION: HeldConnection = {
+  serverId: "notion",
+  scope: "read",
+  connectedAt: "2026-01-01T00:00:00.000Z",
+};
+
+/**
+ * One account Composio holds on this deployment's behalf, in the shape the store really answers.
+ *
+ * EVERY ONE OF THE FOUR EXTRA FIELDS CARRIES A VALUE THAT IS NOT ITS OWN DEFAULT, which is what
+ * makes them assertable rather than decorative. `verified` false beside a NAMED probe is the state
+ * that only this field can express — the action ran in this person's account and the vendor refused
+ * the key — and `checkable` true beside it is the other half: the app still publishes something to
+ * spend, so the page may offer Re-check. A row of `false`/`null`/`null`/`false` would be
+ * indistinguishable from a route that invented defaults for fields it had dropped.
+ */
+const BROKERED_SLACK: BrokeredConnection = {
+  serverId: "composio-slack",
+  scope: "",
+  connectedAt: "2026-02-02T00:00:00.000Z",
+  verified: false,
+  verifiedAt: null,
+  probe: "SLACK_LIST_CHANNELS",
+  checkable: true,
+};
+
 describe("a person's own connections", () => {
   test("a brokered connection is in the list beside the OAuth ones", async () => {
     const request = connectionsApp(
       ASKER,
-      [
-        {
-          serverId: "notion",
-          scope: "read",
-          connectedAt: "2026-01-01T00:00:00.000Z",
-        },
-      ],
-      [
-        {
-          userId: ASKER.id,
-          row: {
-            serverId: "composio-slack",
-            scope: "",
-            connectedAt: "2026-02-02T00:00:00.000Z",
-          },
-        },
-      ],
+      [HELD_NOTION],
+      [{ userId: ASKER.id, row: BROKERED_SLACK }],
     );
 
     const response = await request();
@@ -1180,22 +1331,54 @@ describe("a person's own connections", () => {
     ]);
   });
 
+  test("and what can be re-checked about it travels with it", async () => {
+    /*
+     * THE WHOLE VERIFICATION SURFACE, AT THE LEVEL THAT ACTUALLY SHIPS IT.
+     *
+     * CRITERION. The four fields `brokeredConnectionsFor` adds over a held row leave this route
+     * verbatim, and a held row carries none of them.
+     *
+     * REASON. The route concatenates the two reads without rewriting either, so nothing here looks
+     * like code that could drop a field — which is exactly why nothing pinned it. A `.map` added
+     * later to normalise the union, or a Zod response schema stripping unknown keys, takes all four
+     * out in one line and every other test on this route goes on passing: they assert on
+     * `serverId`, and `serverId` survives. What does not survive is the settings page, which then
+     * draws "Connected" over a key the vendor has refused, with no Re-check button to find out.
+     *
+     * THE WHOLE ROW RATHER THAN FIELD BY FIELD, because the failure to catch is a route that keeps
+     * the field name and answers something else for it — a `verified: false` defaulted in for a
+     * dropped `verified`, or a `probe` flattened to null. Comparing the row the store handed over
+     * with the row the browser is given is the one assertion that cannot be satisfied by a
+     * plausible-looking substitute.
+     *
+     * AND THE HELD ROW IS IN THE SAME COMPARISON, which is the other half and not a second thought.
+     * A held connection has nothing to re-check — no secret of ours stands behind it to have been
+     * spent — so these four fields being ABSENT from its row is what tells the two reads apart on
+     * the page, and a route defaulting them onto everything would put a Re-check button over an
+     * OAuth grant. `toEqual` on the whole list refuses an extra key as readily as a missing one, so
+     * both mistakes land on this line.
+     */
+    const request = connectionsApp(
+      ASKER,
+      [HELD_NOTION],
+      [{ userId: ASKER.id, row: BROKERED_SLACK }],
+    );
+
+    const response = await request();
+
+    expect(response.status).toBe(200);
+    const connections = ((await response.json()) as { connections: unknown[] })
+      .connections;
+    expect(connections).toEqual([BROKERED_SLACK, HELD_NOTION]);
+  });
+
   test("and is nobody else's", async () => {
     // The must-not case. This route is behind `requireUser` and nothing else: a union read for the
     // wrong person would show one person's connected account on another person's settings page.
     const request = connectionsApp(
       SOMEBODY_ELSE,
       [],
-      [
-        {
-          userId: ASKER.id,
-          row: {
-            serverId: "composio-slack",
-            scope: "",
-            connectedAt: "2026-02-02T00:00:00.000Z",
-          },
-        },
-      ],
+      [{ userId: ASKER.id, row: BROKERED_SLACK }],
     );
 
     const response = await request();
@@ -1409,7 +1592,7 @@ function brokeredApp(
     },
   ];
 
-  const store = {
+  const store = pluginStore({
     /*
      * Every read the plugins surface makes on its way to the route under test.
      *
@@ -1420,7 +1603,6 @@ function brokeredApp(
     serverAddress: async (serverId: string) =>
       rows.find((row) => row.id === serverId),
     listSkills: async () => [],
-    listGrants: async () => [],
     brokeredConnection: async (input: { toolkit: string; userId: string }) => {
       queried.push(input);
       return connection;
@@ -1485,7 +1667,7 @@ function brokeredApp(
       if (deployment.storeThrows) throw deployment.storeThrows;
       return { vendorRevocationRequested: true };
     },
-  };
+  });
 
   const app = createApp(
     loadConfig(testEnvironment(deployment.environment)),
@@ -1497,10 +1679,10 @@ function brokeredApp(
     // then everybody connects their own.
     { rolesForUser: async () => ["user"] },
     // Positions 4-14 are the other stores; `store` is 15, pluginStore.
-    ...(Array.from({ length: 11 }) as never[]),
-    store as never,
+    ...UP_TO_PLUGIN_STORE,
+    store,
     // Positions 16-25 are the stores after it; the broker is 26, `composio`.
-    ...(Array.from({ length: 10 }) as never[]),
+    ...UP_TO_BROKER,
     redirectUrl
       ? ({
           broker: {
@@ -2654,13 +2836,12 @@ function removalApp(
   removeServer: () => Promise<never>,
   role: "admin" | "user" = "admin",
 ) {
-  const store = {
+  const store = pluginStore({
     removeServer,
     // Every read the plugins surface makes on its way to the route under test.
     listServers: async () => [],
     listSkills: async () => [],
-    listGrants: async () => [],
-  };
+  });
 
   const app = createApp(
     loadConfig(testEnvironment()),
@@ -2670,8 +2851,8 @@ function removalApp(
     } as never,
     { rolesForUser: async () => [role] },
     // Positions 4-14 are the other stores; `store` is 15, pluginStore.
-    ...(Array.from({ length: 11 }) as never[]),
-    store as never,
+    ...UP_TO_PLUGIN_STORE,
+    store,
   );
 
   return () =>
