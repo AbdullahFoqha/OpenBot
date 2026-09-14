@@ -2327,8 +2327,19 @@ const DIRECTORY_TTL_MS = 10 * 60 * 1000;
  * precisely the problem with leaving it: the first caller that does will have changed a cache it
  * had no idea it was holding, and the fault will surface in the NEXT request rather than its own.
  *
- * `categories` IS COPIED TOO, because a shallow spread of the row would hand the same array on. It
- * is the one field here that is not a primitive.
+ * `categories` AND `connection` ARE BOTH COPIED, because a shallow spread of the row would hand
+ * either of them on by reference. This used to copy the array and say it was "the one field here
+ * that is not a primitive", which is what let the other one through: {@link BrokerConnection} is an
+ * object in every one of its five shapes, so the row's spread carried one object out of the cache
+ * and into every caller for the whole ten minutes — the exact sharing this function exists to end,
+ * surviving in the field it is worst in. `connection` is what the app picker hides an `unsupported`
+ * app by and what the enable route branches on to decide whether to create an authorization config
+ * at all, so a caller that edited the object it was handed would be editing what those two
+ * decisions read of every later caller's rows.
+ *
+ * SPREAD RATHER THAN NAMED PER KIND, so that adding a member to the union — or a field to one of
+ * them — cannot quietly reintroduce the sharing. The spread of a union widens to the union, which
+ * is the one shape here a `switch` on `kind` would have to be kept in step with by hand.
  *
  * COPIED RATHER THAN FROZEN, which was the other candidate. Freezing would make the sharing safe by
  * making a mutation throw, but the type says `BrokerApp[]` and a caller is entitled to sort a list
@@ -2337,7 +2348,11 @@ const DIRECTORY_TTL_MS = 10 * 60 * 1000;
  */
 function copyOf(apps: Promise<BrokerApp[]>): Promise<BrokerApp[]> {
   return apps.then((held) =>
-    held.map((app) => ({ ...app, categories: [...app.categories] })),
+    held.map((app) => ({
+      ...app,
+      categories: [...app.categories],
+      connection: { ...app.connection },
+    })),
   );
 }
 
@@ -2425,7 +2440,19 @@ export function buildComposioClient(
             vendor.connectedAccounts.list({
               userIds: [userId],
               toolkitSlugs: [toolkit],
-              statuses,
+              /*
+               * COPIED, BECAUSE WHAT THE CALLERS PASS IN IS {@link CONNECTED} OR {@link REVOCABLE}
+               * ITSELF. Every other list in this body is built here — `[userId]`, `[toolkit]`, and
+               * `asked.configs`, which is a fresh `map` — and this one was the adapter's own
+               * module-level constant handed straight over the seam to the vendor's package. A
+               * recipient that sorts, de-duplicates or appends to the array it was given would not
+               * spoil one listing; it would rewrite the constant for the life of the process, after
+               * which `isConnected` — the gate `./access` asks before running somebody's action —
+               * and the withdrawal's own filter would both be asking a question nobody wrote down,
+               * in the next request rather than this one. It is the same reasoning {@link copyOf}
+               * applies to the catalogue rows, with no expiry to bound it.
+               */
+              statuses: [...statuses],
               accountType: "ALL",
               // Spread for the reason the cursor is: an explicit `undefined` reaches the vendor's
               // `parse` as a key, and "about every config" is said by not naming any.
@@ -3094,8 +3121,27 @@ export function buildComposioClient(
          * sentence opening "the config this deployment made" would be a guess in the one place a
          * guess is what is being refused. What is said is only what was just read.
          */
+        /*
+         * AND AN UNREADABLE ROW IS ITS OWN CLAUSE HERE FOR THE REASON IT IS ONE BELOW, which is the
+         * half this refusal was missing. `readableConfigs` sorts EVERY row into one of two piles, so
+         * "legible and carrying nobody's suffix" and "not legible at all" are two facts about one
+         * listing and arrive together as readily as either arrives alone. Written as a throw that
+         * names only the first, the sentence closed by promising that taking the unclaimed config
+         * out of the dashboard leaves this app with nothing standing "after which the removal goes
+         * through" — and with a row in the other pile that is false: the next press meets the
+         * refusal at the end of this method, raised over exactly those rows. An operator sent to do
+         * one act and told it finishes the job is the one thing a refusal must not do, and the
+         * clause that would have said otherwise was suppressed by a branch about different rows.
+         */
+        const alsoUnreadable =
+          unreadable.length > 0
+            ? ` Composio also described ${unreadable.length} more of its ${toolkit} authorization configs with no id or no name, so one of those may be this deployment's own under an answer it could not read: until those are read in Composio's own dashboard too, neither reading settles what is standing and the removal does not go through on the strength of the one above alone.`
+            : "";
         throw new BrokerRefusalError(
-          `Removing ${toolkit} found none of this deployment's own authorization configs at Composio, and Composio holds ${held.length} for ${toolkit} whose name does not carry ${CONFIG_SUFFIX} — so nothing was deleted and the app has not been withdrawn, rather than a config this deployment cannot show is its own being deleted along with every account connected against it. Nothing here can tell one of ours, renamed in Composio's dashboard, from an operator's own work. If it is this deployment's, the grants made against it are still live, and renaming it to end with ${CONFIG_SUFFIX} lets removing the app again withdraw them. If it is an operator's, only taking it out of that dashboard leaves this app with nothing standing, after which the removal goes through.`,
+          `Removing ${toolkit} found none of this deployment's own authorization configs at Composio, and Composio holds ${held.length} for ${toolkit} whose name does not carry ${CONFIG_SUFFIX} — so nothing was deleted and the app has not been withdrawn, rather than a config this deployment cannot show is its own being deleted along with every account connected against it. Nothing here can tell one of ours, renamed in Composio's dashboard, from an operator's own work. If it is this deployment's, the grants made against it are still live, and renaming it to end with ${CONFIG_SUFFIX} lets removing the app again withdraw them. If it is an operator's, only taking it out of that dashboard leaves this app with nothing standing, after which the removal goes through.${alsoUnreadable}`,
+          unreadable.length > 0
+            ? { cause: everyRefusal(unreadable) }
+            : undefined,
         );
       }
 
@@ -3243,6 +3289,30 @@ export function buildComposioClient(
          * operator can search a dashboard and a changelog for.
          */
         const unreadable = ours.filter((held) => held.status !== "DISABLED");
+        /*
+         * AND THE TWO STATES ARRIVE TOGETHER, SO NEITHER ONE TAKES THE OTHER'S TURN. These were a
+         * chain — report the unsettled rows, otherwise report the disabled ones — and the paragraph
+         * above says in its own words why that cannot hold: `ours` is a SET, and more than one
+         * config of ours is the ordinary outcome of a lost enable race that this method is written
+         * around. One DISABLED config beside one carrying a word this deployment's `@composio/core`
+         * has never heard of satisfies both conditions, and the chain answered with the unsettled
+         * sentence alone — whose only remedy is a package upgrade, which is nobody's act on the page
+         * the reader is standing on. The act that would actually have got them connected is enabling
+         * the disabled config in Composio's dashboard, and it was withheld because a different row
+         * said something unreadable.
+         *
+         * TWO CLAUSES BECAUSE THEY ARE TWO REMEDIES, in the shape
+         * {@link ComposioBroker.deleteAuthConfig} and {@link ComposioBroker.revoke} both use for the
+         * same reason. The refusal itself does not move: nothing here mints a link against a config
+         * it cannot show is enabled, whichever of the two is true.
+         */
+        const left: string[] = [];
+        const disabled = ours.length - unreadable.length;
+        if (disabled > 0) {
+          left.push(
+            `Composio calls ${disabled} of this deployment's ${ours.length} authorization configs for ${toolkit} disabled, and an administrator can enable it in Composio's dashboard, or remove the app on its Plugins page and add it again.`,
+          );
+        }
         if (unreadable.length > 0) {
           /*
            * EVERY STATUS THAT WAS ACTUALLY READ, AND NONE OF THEM SPEAKING FOR THE REST. The
@@ -3264,12 +3334,12 @@ export function buildComposioClient(
             words.length > shown.length
               ? `${shown.join(", ")} and ${words.length - shown.length} other words`
               : shown.join(", ");
-          throw new BrokerRefusalError(
-            `Composio describes ${unreadable.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether a connection begun against one could complete is not something this deployment can tell. No link was made, because consent spent against a config that turns out to be disabled attaches nothing. ${VENDOR_SHAPE_REMEDY}`,
+          left.push(
+            `Composio describes ${unreadable.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether a connection begun against one could complete is not something this deployment can tell. ${VENDOR_SHAPE_REMEDY}`,
           );
         }
         throw new BrokerRefusalError(
-          `Every authorization config this deployment holds at Composio for ${toolkit} is disabled, so a connection begun against one could not complete. An administrator can enable it in Composio's dashboard, or remove the app on its Plugins page and add it again.`,
+          `No authorization config this deployment holds at Composio for ${toolkit} could be shown to be enabled, so no link was made: consent spent against a config that turns out to be disabled attaches nothing and cannot be spent again without sending this person round the loop a second time. ${left.join(" ")}`,
         );
       }
 
@@ -3439,8 +3509,26 @@ export function buildComposioClient(
        */
       const { held, ours, unreadable } = await configsFor(toolkit);
       if (ours.length === 0 && held.length > 0) {
+        /*
+         * THE UNREADABLE ROWS TRAVEL WITH THIS SENTENCE RATHER THAN WAITING FOR A PRESS THAT NEVER
+         * GETS TO THEM. The refusal below is written for `ours.length === 0 && unreadable.length >
+         * 0`, and as a second consecutive throw it is reachable only where `held.length === 0` —
+         * so a listing carrying one renamed config AND one row nothing could sort reported the
+         * rename alone, and closed by telling this person that renaming it "lets disconnecting
+         * again withdraw them". It does not: the account listing is scoped to the configs this
+         * method can name, and a row in the other pile is one it never was. The same clause is
+         * appended independently to the partial-withdrawal sentence further down, which is the
+         * shape this should always have had.
+         */
+        const alsoUnreadable =
+          unreadable.length > 0
+            ? ` Composio also described ${unreadable.length} of its ${toolkit} authorization configs in a way this deployment cannot read, so any grant of theirs on one of those is outside the question either reading settles, and renaming the config above is not on its own enough to end everything they hold: reading those rows in Composio's own dashboard is what says whether anything is left.`
+            : "";
         throw new BrokerRefusalError(
-          `Disconnecting ${toolkit} found none of this deployment's own authorization configs at Composio, and Composio holds ${held.length} for ${toolkit} whose name does not carry ${CONFIG_SUFFIX} — so nothing was withdrawn and this person's access has not ended, rather than their connection being forgotten here while their grant stands. Nothing here can tell one of ours, renamed in Composio's dashboard, from an operator's own work. If it is this deployment's, this person's grants on it are live, and renaming it to end with ${CONFIG_SUFFIX} lets disconnecting again withdraw them. If it is an operator's, this deployment granted nothing through it and only that dashboard can end what it holds.`,
+          `Disconnecting ${toolkit} found none of this deployment's own authorization configs at Composio, and Composio holds ${held.length} for ${toolkit} whose name does not carry ${CONFIG_SUFFIX} — so nothing was withdrawn and this person's access has not ended, rather than their connection being forgotten here while their grant stands. Nothing here can tell one of ours, renamed in Composio's dashboard, from an operator's own work. If it is this deployment's, this person's grants on it are live, and renaming it to end with ${CONFIG_SUFFIX} lets disconnecting again withdraw them. If it is an operator's, this deployment granted nothing through it and only that dashboard can end what it holds.${alsoUnreadable}`,
+          unreadable.length > 0
+            ? { cause: everyRefusal(unreadable) }
+            : undefined,
         );
       }
       /*
@@ -3517,6 +3605,20 @@ export function buildComposioClient(
          * account it described with no id is not: the row will be as unnameable next time, so the
          * only honest instruction is the one that does not run through this page at all.
          *
+         * WHICH IS WHY THEY ARE TWO INDEPENDENT CLAUSES AND NOT A CHAIN. They were an `if`/`else
+         * if`, so one person holding both kinds — a nameless row beside a refused one, which is one
+         * listing away from either on its own — was told only that "disconnecting again meets them
+         * unchanged". That sentence is true of the row with no id and false of the refused account
+         * sitting next to it, and it is the sentence deciding whether they press the button again:
+         * the one remedy that would actually have ended the refused grant was withheld by the
+         * presence of a row it says nothing about. Two facts about two different accounts cannot
+         * take turns. {@link ComposioBroker.deleteAuthConfig} writes the identical pair as two
+         * independent `if`s one method up, and the paragraph above already described these as two
+         * remedies — the chain was the only thing disagreeing.
+         *
+         * THE REACHABLE REMEDY GOES FIRST, matching that method's order, because it is the one the
+         * reader can act on from the page they are standing on.
+         *
          * AND THE DENOMINATOR IS THE ACCOUNTS, NOT THE ROWS. It was `accounts.length`, which is how
          * many rows the listing handed over, and a listing that named one account twice is a
          * listing with more rows than accounts — see {@link withdrawableAccounts}. "Withdrew 1 of
@@ -3526,13 +3628,14 @@ export function buildComposioClient(
          */
         const accountsHeld = ids.length + nameless.length;
         const left: string[] = [];
+        if (refused.length > 0) {
+          left.push(
+            "Disconnecting again asks only for the accounts that are left.",
+          );
+        }
         if (nameless.length > 0) {
           left.push(
             `Composio described ${nameless.length} of them with no id at all, so this deployment has no way to name those in a withdrawal and disconnecting again meets them unchanged: removing them in Composio's own dashboard is what ends them.`,
-          );
-        } else if (refused.length > 0) {
-          left.push(
-            "Disconnecting again asks only for the accounts that are left.",
           );
         }
         /*
@@ -3917,7 +4020,23 @@ export function buildComposioClient(
          * `@composio/core` has never heard of both fall through here, and telling an operator those
          * are disabled sends them to enable something that may already be enabled.
          */
+        /*
+         * AND TWO INDEPENDENT CLAUSES FOR THE REASON {@link ComposioBroker.authorize} GIVES AT
+         * LENGTH, which is worth repeating here only because this block is a COPY of that one rather
+         * than a call to it: the chain lived in both methods, so the suppression did too. A person
+         * typing their key into an app holding one DISABLED config beside one unsettled row was told
+         * to upgrade a package — while the act that would have got the key accepted, enabling the
+         * disabled config in Composio's dashboard, went unsaid. It is not even that person's act,
+         * which is exactly why the sentence has to carry it rather than choose.
+         */
         const unsettled = ours.filter((held) => held.status !== "DISABLED");
+        const left: string[] = [];
+        const disabled = ours.length - unsettled.length;
+        if (disabled > 0) {
+          left.push(
+            `Composio calls ${disabled} of this deployment's ${ours.length} authorization configs for ${toolkit} disabled, and an administrator can enable it in Composio's dashboard, or remove the app on its Plugins page and add it again.`,
+          );
+        }
         if (unsettled.length > 0) {
           const words = [
             ...new Set(unsettled.map((held) => named(held.status))),
@@ -3927,12 +4046,12 @@ export function buildComposioClient(
             words.length > shown.length
               ? `${shown.join(", ")} and ${words.length - shown.length} other words`
               : shown.join(", ");
-          throw new BrokerRefusalError(
-            `Composio describes ${unsettled.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether an account connected against one could work is not something this deployment can tell. Nothing was sent, and what was typed into the form did not leave this deployment. ${VENDOR_SHAPE_REMEDY}`,
+          left.push(
+            `Composio describes ${unsettled.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether an account connected against one could work is not something this deployment can tell. ${VENDOR_SHAPE_REMEDY}`,
           );
         }
         throw new BrokerRefusalError(
-          `Every authorization config this deployment holds at Composio for ${toolkit} is disabled, so an account connected against one could not work and nothing was sent. An administrator can enable it in Composio's dashboard, or remove the app on its Plugins page and add it again.`,
+          `No authorization config this deployment holds at Composio for ${toolkit} could be shown to be enabled, so nothing was sent and what was typed into the form did not leave this deployment. ${left.join(" ")}`,
         );
       }
 

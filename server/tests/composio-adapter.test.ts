@@ -1083,6 +1083,49 @@ describe("telling this deployment's auth configs from anybody else's", () => {
   });
 
   /**
+   * AND THAT REFUSAL PROMISES THE REMOVAL WILL GO THROUGH, WHICH AN UNREADABLE ROW MAKES FALSE.
+   *
+   * `readableConfigs` sorts every row into one of two piles, so "configs that are legible and carry
+   * nobody's suffix" and "rows this deployment could not read at all" are facts about the same
+   * listing and arrive together as readily as either arrives alone. The refusal above fired first
+   * and closed with "only taking it out of that dashboard leaves this app with nothing standing,
+   * after which the removal goes through" — a promise the unreadable row makes untrue, since the
+   * next press meets the refusal this method raises for exactly that pile. The operator is sent to
+   * do one act and told it finishes the job, and the clause saying otherwise was suppressed by a
+   * branch about different rows.
+   */
+  test("an unreadable row is still reported beside configs that carry nobody's name", async () => {
+    const deleted: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_theirs", name: "Linear", status: "ENABLED" },
+              { id: "ac_nameless", status: "ENABLED" },
+            ],
+          }),
+          delete: async (...call: unknown[]) => {
+            deleted.push(call);
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(broker.deleteAuthConfig("linear"));
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    // The renamed-config reading, which is the one this refusal already carried.
+    expect(refusal.message).toMatch(/Composio holds 1 for linear/);
+    expect(refusal.message).toMatch(/\(OpenBot\)/);
+    // And the row that was never sorted, whose remedy is the same dashboard and whose existence is
+    // what stops the sentence promising a removal that would go through.
+    expect(refusal.message).toMatch(/no id or no name/);
+    // Nothing is deleted either way: the whole refusal is about not guessing which row is whose.
+    expect(deleted).toEqual([]);
+  });
+
+  /**
    * A CONFIG ROW THE LISTING NAMED TWICE IS ONE CONFIG, NOT TWO — the twin of the account dedupe
    * that landed a wave earlier, one function away, and was not brought here.
    *
@@ -1351,6 +1394,57 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
     expect(refusal.message).toMatch(DISABLED_REMEDY);
     expect(refusal.message).not.toMatch(NO_CONFIG_REMEDY);
+    expect(linked).toEqual([]);
+  });
+
+  /**
+   * AND HOLDING A DISABLED CONFIG BESIDE AN UNSETTLED ONE IS NOT A REASON TO BE TOLD ABOUT ONE.
+   *
+   * More than one config of ours is an ordinary outcome of a lost enable race, which this file says
+   * for itself — so the two states the `ENABLED` test falls through into can and do arrive on one
+   * listing. They were chained: the unsettled rows were reported and the disabled ones were not,
+   * which leaves a reader with the one remedy nobody on that page can act on ("upgrade
+   * `@composio/core`") while the act that WOULD have got them connected — enabling the disabled
+   * config in Composio's dashboard — was withheld by the presence of a row it says nothing about.
+   * The same chain, and the same suppression, that `revoke`'s clause list was corrected for.
+   */
+  test("a disabled config beside an unsettled one is told both remedies", async () => {
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_a", name: "Linear (OpenBot)", status: "DISABLED" },
+              { id: "ac_b", name: "Linear (OpenBot)", status: "PENDING" },
+            ],
+          }),
+        },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(
+      broker.authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: RETURN_URL,
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    // The row whose state Composio would not name, whose only remedy is a package upgrade.
+    expect(refusal.message).toMatch(/neither ENABLED nor DISABLED/);
+    // And the one an administrator can act on today, which the chain was withholding.
+    expect(refusal.message).toMatch(DISABLED_REMEDY);
+    // Still a refusal either way: consent spent against a config that is not enabled attaches
+    // nothing and cannot be spent again without sending the person round a second time.
     expect(linked).toEqual([]);
   });
 
@@ -1740,6 +1834,41 @@ describe("withdrawing one person's grants", () => {
     expect(
       await broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
     ).toBe(false);
+  });
+
+  /**
+   * AND THE STATUS FILTER IS A MODULE'S OWN ARRAY, WHICH IS NOT SOMETHING TO HAND ACROSS A SEAM.
+   *
+   * `CONNECTED` and `REVOCABLE` are written once at the top of the adapter and were passed straight
+   * into the vendor's listing body, so the array the vendor was handed WAS the constant. A vendor
+   * that sorted, normalised or appended to what it was given would not corrupt one call: it would
+   * corrupt the constant, for the life of the process, and the next question asked with it would be
+   * filtered by something nobody wrote down. It is the same sharing the catalogue's copy exists to
+   * end, one seam over and with no ten-minute expiry to bound it — `isConnected` is the gate
+   * `./access` asks before running somebody's action, and `REVOCABLE` decides what a disconnect can
+   * even see.
+   */
+  test("the statuses a listing is filtered by are not the adapter's own array", async () => {
+    const asked: string[][] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async (query: unknown) => {
+            const statuses = (query as { statuses: string[] }).statuses;
+            asked.push([...statuses]);
+            // All it takes is a recipient that tidies up what it was handed.
+            statuses.push("DELETED");
+            return { items: [] };
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    await broker.isConnected({ userId: "user_1", toolkit: "gmail" });
+    await broker.isConnected({ userId: "user_1", toolkit: "gmail" });
+
+    expect(asked).toEqual([["ACTIVE"], ["ACTIVE"]]);
   });
 
   test("a refusal partway through still asks about the accounts behind it", async () => {
@@ -2152,6 +2281,94 @@ describe("withdrawing one person's grants", () => {
     expect(failure.message).toMatch(/withdrew 1 of this person's 2 accounts/);
     expect(failure.message).not.toMatch(A_CRASH);
   });
+
+  /**
+   * AND HOLDING BOTH KINDS OF SURVIVING GRANT IS NOT A REASON TO BE TOLD ABOUT ONE OF THEM.
+   *
+   * The two clauses were an `if`/`else if`, so a person holding a nameless account AND a refused one
+   * read only the dashboard sentence: "disconnecting again meets them unchanged". That is true of
+   * the nameless row and false of the refused one, and it is the sentence that decides whether they
+   * press the button again — so the advice that would actually have ended the refused grant was
+   * suppressed by the presence of a row it says nothing about. `deleteAuthConfig` writes the
+   * identical pair as two independent `if`s, and the comment over this chain already described both
+   * remedies as two remedies.
+   */
+  test("a person holding a nameless account and a refused one is told both remedies", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: ourGmailConfig },
+        connectedAccounts: {
+          list: async () => ({ items: [{}, { id: "ca_refused" }] }),
+          delete: refuse("this account's withdrawal"),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const failure = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    expect(failure).toBeInstanceOf(BrokerRefusalError);
+    expect(failure.message).toMatch(/withdrew 0 of this person's 2 accounts/);
+    // The row Composio named nothing for, whose only remedy is the dashboard.
+    expect(failure.message).toMatch(/no id at all/);
+    // And the one a second press genuinely reaches, which the `else if` was withholding.
+    expect(failure.message).toMatch(
+      /Disconnecting again asks only for the accounts that are left\./,
+    );
+    expect(failure.message).not.toMatch(A_CRASH);
+  });
+
+  /**
+   * AND THE SAME SUPPRESSION ONE CONDITION EARLIER, BEFORE A SINGLE ACCOUNT IS LOOKED AT.
+   *
+   * The two refusals over the config listing are `ours.length === 0 && held.length > 0` and
+   * `ours.length === 0 && unreadable.length > 0`, and `held` counts the READABLE rows while
+   * `unreadable` counts the rest — so both are ordinary facts about one listing and both can be
+   * true at once. Written as consecutive throws the second is reachable only when the first is
+   * false, so a person whose app holds one renamed config beside one unreadable row is told that
+   * "renaming it to end with (OpenBot) lets disconnecting again withdraw them" — which is not true
+   * while a row nothing could scope the account listing to is still sitting there. The method's own
+   * partial-withdrawal sentence appends that fact as its own clause; the refusal ahead of it did
+   * not.
+   */
+  test("a renamed config beside an unreadable one does not promise a disconnect that would finish", async () => {
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_theirs", name: "Gmail", status: "ENABLED" },
+              { id: "ac_nameless", status: "ENABLED" },
+            ],
+          }),
+        },
+        connectedAccounts: {
+          delete: async (id: string) => {
+            deleted.push(id);
+            return WITHDRAWN;
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const failure = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    expect(failure).toBeInstanceOf(BrokerRefusalError);
+    expect(failure.message).not.toMatch(A_CRASH);
+    // The renamed-config reading, which this refusal already carried.
+    expect(failure.message).toMatch(/Composio holds 1 for gmail/);
+    expect(failure.message).toMatch(/\(OpenBot\)/);
+    // And the row that was never sorted, which is what makes the rename alone insufficient.
+    expect(failure.message).toMatch(/cannot read/);
+    // Nothing was withdrawn either way — the listing was never scoped, so no delete was composed.
+    expect(deleted).toEqual([]);
+  });
 });
 
 /**
@@ -2318,6 +2535,42 @@ describe("a catalogue that might be a fragment", () => {
         connection: NO_SCHEME,
       },
     ]);
+  });
+
+  /**
+   * AND THE CONNECTION IS A ROW'S SECOND NON-PRIMITIVE, WHICH THE COPY ABOVE WAS NOT MAKING.
+   *
+   * The copy spread the row and rebuilt `categories`, on a comment claiming that array was the one
+   * field here that is not a primitive. `connection` is an object too — see {@link BrokerConnection}
+   * — so it travelled by reference out of the cache and into every caller for ten minutes, which is
+   * the exact sharing the copy exists to end. It is also the worst field to share: the app picker
+   * hides `unsupported` and the enable route branches on `kind` to decide whether to create an auth
+   * config at all, so a caller that edited the object it was handed would be editing what those two
+   * decisions read next.
+   */
+  test("each caller gets its own connection, so one of them cannot edit what the picker branches on", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: ourGmailConfig },
+        toolkits: {
+          list: async () => ({
+            items: [{ slug: "gmail", name: "Gmail", meta: {} }],
+          }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const first = await broker.listApps();
+    const held = first[0].connection;
+    if (held.kind !== "unsupported") {
+      throw new Error(`The fixture resolved to ${held.kind}, not unsupported.`);
+    }
+    held.reason = "Invented";
+
+    const second = await broker.listApps();
+    expect(second[0].connection).toEqual(NO_SCHEME);
+    expect(second[0].connection).not.toBe(first[0].connection);
   });
 });
 
@@ -6147,6 +6400,53 @@ describe("connecting one person with the secret they typed", () => {
     expect(refusal.message).not.toContain(TYPED_SECRET);
     // The point of the test: the refusal arrived before the credential did, not after Composio had
     // been handed it and answered.
+    expect(created).toEqual([]);
+  });
+
+  /**
+   * AND THE SAME PAIR HERE, BECAUSE THIS METHOD WRITES THE SAME CHAIN AS `authorize`.
+   *
+   * The unsettled-status block is duplicated between the two methods rather than shared, so the
+   * suppression is duplicated with it: a person typing their key into an app whose configs are one
+   * DISABLED and one PENDING was told only to upgrade a package. Enabling the disabled config in
+   * Composio's dashboard is what gets their key accepted, and it is not this person's act — which
+   * is precisely why the sentence has to carry it rather than choose between the two.
+   */
+  test("a disabled config beside an unsettled one is told both remedies here too", async () => {
+    const created: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_a", name: "Linear (OpenBot)", status: "DISABLED" },
+              { id: "ac_b", name: "Linear (OpenBot)", status: "PENDING" },
+            ],
+          }),
+        },
+        connectedAccounts: {
+          create: async (body: unknown) => {
+            created.push(body);
+            return { id: "ca_new", status: "ACTIVE" };
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectWithFields({
+        userId: "user_1",
+        toolkit: "linear",
+        authScheme: "API_KEY",
+        values: { generic_api_key: TYPED_SECRET },
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).toMatch(/neither ENABLED nor DISABLED/);
+    expect(refusal.message).toMatch(DISABLED_REMEDY);
+    // And neither clause is worth what it would cost to send the key first.
+    expect(refusal.message).not.toContain(TYPED_SECRET);
     expect(created).toEqual([]);
   });
 
