@@ -1232,9 +1232,28 @@ export function createPluginRoutes(
          * A VALUE THAT IS NOT TEXT IS THE SAME REFUSAL. The store's signature promises strings, and
          * a number or an object under a published name is a lie told to that signature that reaches
          * Composio as whatever JSON makes of it.
+         *
+         * AND THE BAG HOLDS ONLY WHAT WAS PUT IN IT, WHICH `{}` DOES NOT. Every name here is the
+         * VENDOR's — chosen by whoever publishes the app at Composio and never by this deployment —
+         * and a plain object literal answers for names nobody submitted: `values.constructor` and
+         * `values.toString` come back as functions off `Object.prototype`, so the required guard
+         * below calls `.trim()` on a function and answers a person who typed nothing wrong with a
+         * 500. A prototype value that happened to be TEXT would be worse still, because that guard
+         * would count a credential nobody supplied and connect the account anyway. The other
+         * direction fails silently: `values["__proto__"] = "acme"` on a literal reaches the
+         * prototype setter, which ignores a string, so a value somebody typed is dropped between
+         * the check that admitted it and the store that was meant to receive it — an account made
+         * at Composio without one of the values the app publishes, marked `ACTIVE` because Composio
+         * does not grade what it is handed, and drawn as connected on every screen here.
+         *
+         * A NULL-PROTOTYPE BAG IS THE WHOLE FIX AND IT IS THE SAME ONE THE FORM USES. Nothing is
+         * inherited, so a read answers `undefined` exactly when nobody submitted that name and a
+         * write stores what it was given under whatever name it was given. `Object.keys` — which is
+         * what the audit row is built from one layer down — reads the same either way, and the
+         * names are all this object's contents may ever appear as.
          */
         const names = new Set(published.map((field) => field.name));
-        const values: Record<string, string> = {};
+        const values: Record<string, string> = Object.create(null);
         for (const [name, value] of Object.entries(submitted)) {
           if (!names.has(name) || typeof value !== "string") {
             /*

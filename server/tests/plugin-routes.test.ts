@@ -2462,6 +2462,104 @@ describe("connecting an app whose secret a person types", () => {
     expect(submitted).toEqual([]);
   });
 
+  test("a box named after something every object already has is still an empty box", async () => {
+    /*
+     * THE NAME IS THE VENDOR'S AND THE BAG IT IS PUT IN IS THIS DEPLOYMENT'S, which is the whole of
+     * why this case exists. The submitted values are collected into a plain `{}` and each published
+     * name is then read back off it — so a field Composio names `constructor` or `toString` is a
+     * name JavaScript answers for before the submission does: the read finds a function hanging off
+     * `Object.prototype` rather than the `undefined` that means "nobody filled this in". What the
+     * required guard then does with it is call `.trim()` on a function, which is a 500 in front of
+     * somebody who typed nothing wrong — and a prototype value that HAD been text would have been
+     * worse, because the guard would have counted a credential nobody supplied.
+     *
+     * BOTH NAMES, because the two are not one case: `constructor` is the one an attacker reaches
+     * for and `toString` is the one an app could plausibly publish, and a bag that answers for
+     * either answers for every other name on that prototype too.
+     *
+     * THE ANSWER IS THE ORDINARY REFUSAL. Nothing about this submission is exotic from the person's
+     * side — they left two required boxes empty — so what they get is the sentence that names the
+     * boxes, and nothing reaches the store.
+     */
+    const { submitted, connectFields } = brokeredApp(null, AUTHORIZATION_URL, {
+      published: [
+        {
+          name: "constructor",
+          label: "Instance",
+          help: "Which instance this account lives on.",
+          required: true,
+          secret: false,
+        },
+        {
+          name: "toString",
+          label: "Rendering",
+          help: "How this account names itself.",
+          required: true,
+          secret: false,
+        },
+      ],
+    });
+
+    const response = await connectFields({ values: {} });
+
+    expect(response.status).toBe(400);
+    const refusal = (await response.json()).error as string;
+    expect(refusal).toContain("Firecrawl");
+    // The vendor's own names, which is what this branch may quote and all it quotes.
+    expect(refusal).toContain("constructor");
+    expect(refusal).toContain("toString");
+    expect(submitted).toEqual([]);
+  });
+
+  test("a box named __proto__ carries what was typed rather than vanishing on the way", async () => {
+    /*
+     * THE OTHER HALF OF THE SAME BAG, AND IT FAILS SILENTLY RATHER THAN LOUDLY. Assigning
+     * `values["__proto__"] = "acme"` on a plain object does not store anything under that name — it
+     * reaches the prototype setter, which ignores a string — so the value a person typed is dropped
+     * between the check that admitted it and the store that was supposed to receive it. Composio
+     * then makes an account missing one of the values the app publishes, answers `ACTIVE` for it
+     * because it does not grade what it is handed, and every screen here draws the row as connected.
+     *
+     * OPTIONAL, SO THE DROP IS THE ONLY THING UNDER TEST. A required `__proto__` would be caught by
+     * the guard above for a different reason; leaving it optional means this submission is complete,
+     * the request succeeds, and the only question left is whether what was typed arrived.
+     */
+    const { submitted, connectFields } = brokeredApp(null, AUTHORIZATION_URL, {
+      published: [
+        {
+          name: "api_key",
+          label: "API key",
+          help: "Your Firecrawl API key, a token starting with fc-",
+          required: true,
+          secret: true,
+        },
+        {
+          name: "__proto__",
+          label: "Tenant",
+          help: "The tenant this key belongs to.",
+          required: false,
+          secret: false,
+        },
+      ],
+    });
+
+    const response = await connectFields({
+      values: { api_key: "fc-live-a-secret", ["__proto__"]: "acme" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(submitted).toHaveLength(1);
+    // Read as own names rather than by lookup, because a lookup is the very thing that went wrong.
+    expect(Object.keys(submitted[0].values).sort()).toEqual([
+      "__proto__",
+      "api_key",
+    ]);
+    expect(submitted[0].values).toEqual({
+      api_key: "fc-live-a-secret",
+      ["__proto__"]: "acme",
+    });
+  });
+
   test("an account already connected is refused before the form is drawn", async () => {
     /*
      * THE ONE-ACCOUNT GUARD STILL RUNS FIRST, which is the ordering both branches were put after on

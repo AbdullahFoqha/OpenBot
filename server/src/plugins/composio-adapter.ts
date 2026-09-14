@@ -3917,12 +3917,16 @@ export function buildComposioClient(
         }
         return asRows;
       };
+      /*
+       * REQUIRED FIRST, WHICH IS AN ORDER RATHER THAN A CONVENIENCE — see the deduplication below,
+       * where it is what decides which of two rows sharing a name survives.
+       */
       const rows = [
         ...rowsOf(published.required, "required"),
         ...rowsOf(published.optional, "optional"),
       ];
 
-      return rows
+      const drawn = rows
         .filter((row, index) => {
           /*
            * THE ROW IS AN OBJECT BEFORE A FIELD IS READ OFF IT, WHICH IS THE ONE CONTAINER IN THIS
@@ -3950,6 +3954,7 @@ export function buildComposioClient(
               `field ${index + 1} of what ${toolkit}'s ${authScheme} connection asks a person to fill in`,
             );
           }
+
           /*
            * A FIELD COMPOSIO HIDES IS ONE COMPOSIO FILLS IN, AND `!== false` HID THE WRONG STATE.
            * An absent `user_visible` means show it, which is most of the catalogue and stays. A
@@ -3984,6 +3989,30 @@ export function buildComposioClient(
           if (row?.type !== "string" || name === null) {
             throw new BrokerRefusalError(
               `${toolkit} asks for ${textOf(row?.displayName) ?? "a value"} as ${sent(row?.type)} under the name ${sent(row?.name)}, which cannot be filled in here: a box this deployment can draw is a string, and a box whose answer can be sent back has a name. Connecting this app is not something this deployment can offer yet.`,
+            );
+          }
+
+          /*
+           * AND ONE NAME IS THE PROTOCOL'S RATHER THAN THE APP'S, WHICH IS THE SAME GUARD ONE STEP
+           * FURTHER ON: a box whose answer cannot be sent must not be drawn.
+           *
+           * {@link ComposioBroker.connectWithFields} puts what somebody types into the `val` of the
+           * connection state, beside the `status` that says what is being created — the shape the
+           * vendor's own `AuthScheme` builder assembles (`@composio/core` 0.18.1,
+           * `src/models/AuthScheme.ts:84-94`). `status` is therefore a word the call itself owns,
+           * and BOTH answers to a field published under that name are wrong. Sent, it replaces the
+           * state this deployment is asking Composio to create, from a request that looks like an
+           * ordinary connection. Withheld — which is what that call now does, writing its own word
+           * last — it is a box somebody filled in whose value no app will ever read, the very
+           * failure the name guard directly above exists to prevent.
+           *
+           * SO THE APP IS REFUSED RATHER THAN PART OF ITS FORM, and the sentence names the field,
+           * which is the vendor's own text read off the list just fetched and the only thing an
+           * administrator can act on.
+           */
+          if (name === "status") {
+            throw new BrokerRefusalError(
+              `${toolkit} publishes a field called ${name}, which is the word this deployment uses to tell Composio what state a connection is being created in, so a value typed into it either overwrites that word or is never sent at all. Neither is a box worth drawing. ${VENDOR_SHAPE_REMEDY}`,
             );
           }
           /*
@@ -4036,6 +4065,34 @@ export function buildComposioClient(
             ...(suggested === null ? {} : { default: suggested }),
           };
         });
+
+      /*
+       * ONE NAME IS ONE BOX, HOWEVER MANY OF COMPOSIO'S LISTS PUBLISHED IT — the half
+       * {@link readableConfigs} and {@link withdrawableAccounts} already carry, arriving here a
+       * wave late and for a sharper reason than either.
+       *
+       * THE NAME IS A KEY AND NOT A LABEL. `required` and `optional` are published separately, so
+       * nothing at Composio stops one field appearing in both, and concatenated as they arrive that
+       * app draws TWO boxes carrying the same name — with different labels, different help and
+       * different defaults, because the two rows are different rows. A person fills both in; the
+       * form collects what they typed under the field's name; the second box silently overwrites
+       * the first, and which of the two values reached the vendor is not recorded anywhere. The
+       * same name twice also passes straight through the connect route's published-names check, so
+       * nothing downstream is in a position to notice.
+       *
+       * THE FIRST SIGHTING KEEPS ITS PLACE, as it does for configs and accounts — and here that is
+       * a decision as well as a convention, because required is spread first: a name published in
+       * both lists is drawn as the REQUIRED one. That is the safe direction. Read as optional, a
+       * credential the app cannot do without becomes a box the connect route lets somebody leave
+       * blank, and what that makes is the credential-less account that route's required guard
+       * exists to refuse.
+       */
+      const named = new Set<string>();
+      return drawn.filter((field) => {
+        if (named.has(field.name)) return false;
+        named.add(field.name);
+        return true;
+      });
     },
 
     /**
@@ -4197,10 +4254,23 @@ export function buildComposioClient(
              * and the field NAMES are Composio's own — published per app by
              * {@link ComposioBroker.connectionFields} and sent back verbatim, because a name this
              * file renamed on the way through is a box somebody filled in that no app ever reads.
+             *
+             * AND `status` IS THE PROTOCOL'S WORD, SO IT IS WRITTEN LAST. The vendor's builder
+             * spreads the fields OVER it, which is safe only while no field is called `status` —
+             * and the names in `values` are the vendor's own, so that is a fact about somebody
+             * else's catalogue rather than an invariant of this call. Spread first and set after,
+             * the one word saying what this request is asking Composio to create cannot be
+             * displaced by a value arriving under the same name, whatever published it.
+             *
+             * WHICH IS THE SECOND OF TWO GUARDS AND NOT THE ONLY ONE. {@link
+             * ComposioBroker.connectionFields} refuses to draw a box named `status` at all, so a
+             * value under that name cannot come from a form, and the connect route sends only names
+             * that list published. This method is callable without either, and what it protects is
+             * the one field here that cannot be recovered from anything else in the request.
              */
             state: {
               authScheme,
-              val: { status: "ACTIVE", ...values },
+              val: { ...values, status: "ACTIVE" },
             },
           },
         });

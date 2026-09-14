@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -32,6 +32,16 @@ import type { BrokerField } from "@/lib/plugins/mutations";
  * today's rows over yesterday's values: a newly published field with its default missing, and a
  * retired field's name still in the values and still going up with the submission, which is the 400
  * that tells somebody their current form is not the current form.
+ *
+ * THE NAMES IN IT ARE THE VENDOR'S, AND THEY ARE KEYS HERE. Every name below was chosen by whoever
+ * publishes the app at Composio, and this form uses each one three ways: as a key into the object
+ * holding what somebody has typed, as the id tying a label to its box, and as React's key for the
+ * row. None of the three may assume the name is safe or unique, which is the same care the connect
+ * route takes with the submission it receives. The values live in a bag with no prototype, so a
+ * field called `toString` is a name nobody has typed into rather than a function inherited from
+ * `Object.prototype`; the ids are namespaced per mounted form rather than used as document-wide
+ * ones; and the key is a name the server has already deduplicated — `ComposioBroker.connectionFields`
+ * draws one box per name, so two rows here cannot share one.
  *
  * THE VALUES ARE HELD HERE AND IN THE REQUEST THAT CARRIES THEM, AND NOWHERE ELSE: no query cache,
  * no router state, no local storage. They are somebody's own key. This copy is the component's, so
@@ -68,6 +78,16 @@ export function ConnectionFields({
     setValues((held) => reconcile(fields, published, held));
   }
 
+  /*
+   * The prefix that makes each box's id this form's own rather than the document's.
+   *
+   * The id is what ties a label to its input, and it was the field's name — which is Composio's
+   * text and not this deployment's, so it is free to be `title`, `description`, or the id of
+   * something else on the page entirely. Two elements sharing an id make the label point at
+   * whichever came first, which is somebody typing their key into the wrong box.
+   */
+  const form = useId();
+
   return (
     <form
       className="flex flex-col gap-3"
@@ -82,7 +102,7 @@ export function ConnectionFields({
         <Item key={field.name} variant="muted">
           <ItemContent>
             <ItemTitle>
-              <label htmlFor={field.name}>{field.label}</label>
+              <label htmlFor={`${form}-${field.name}`}>{field.label}</label>
             </ItemTitle>
             {/* Unclamped: the app's own instructions are the point of the row, not a hint under it. */}
             {field.help ? (
@@ -92,12 +112,9 @@ export function ConnectionFields({
             ) : null}
             <Input
               autoComplete="off"
-              id={field.name}
+              id={`${form}-${field.name}`}
               onChange={(event) =>
-                setValues((held) => ({
-                  ...held,
-                  [field.name]: event.target.value,
-                }))
+                setValues((held) => typed(held, field.name, event.target.value))
               }
               required={field.required}
               /* The app said which value is the secret; nothing here guesses from its name. */
@@ -114,11 +131,37 @@ export function ConnectionFields({
   );
 }
 
+/**
+ * A bag of typed values holding exactly what was put in it, under the names it was given.
+ *
+ * THE NAMES ARE THE VENDOR'S, SO THE BAG HAS NO PROTOTYPE. A plain object answers for names nobody
+ * ever typed into — `held.toString` and `held.constructor` come back as functions off
+ * `Object.prototype` — and the read in {@link reconcile} cannot tell that from somebody's typing:
+ * a field an app has only just started publishing would be carried into the values as a function,
+ * drawn into its box, and submitted under a name the app really does read. `__proto__` fails the
+ * other way, silently: assigning to it on a plain object reaches the prototype setter, which
+ * ignores a string, so the value would be dropped between the keystroke and the request.
+ *
+ * The same bag the connect route builds its side of this submission in, for the same reason.
+ */
+function bagOf(entries: [string, string][]): Record<string, string> {
+  const values: Record<string, string> = Object.create(null);
+  for (const [name, value] of entries) values[name] = value;
+  return values;
+}
+
+/** One keystroke, as the whole bag again, so the object React holds is replaced rather than edited. */
+function typed(
+  held: Record<string, string>,
+  name: string,
+  value: string,
+): Record<string, string> {
+  return bagOf([...Object.entries(held), [name, value]]);
+}
+
 /** What a freshly published list of fields is worth before anybody has typed: its own defaults. */
 function seed(fields: BrokerField[]): Record<string, string> {
-  return Object.fromEntries(
-    fields.map((field) => [field.name, field.default ?? ""]),
-  );
+  return bagOf(fields.map((field) => [field.name, field.default ?? ""]));
 }
 
 /**
@@ -132,6 +175,12 @@ function seed(fields: BrokerField[]): Record<string, string> {
  * value equal to what the previous list seeded is one this form put there, so the new list's answer
  * replaces it, and anything else is somebody's own typing and survives. That is what keeps this from
  * being a choice between losing a half-typed key and pinning a default the vendor has changed.
+ *
+ * AND "NOBODY TYPED THIS" IS READ OFF WHAT WAS TYPED RATHER THAN OFF ANY PROTOTYPE. This is the one
+ * read in this file that asks for a name the values may never have held — a field is new here
+ * precisely when the app has just started publishing it — so both lookups go through maps: `held`
+ * through one built from its own entries, and the previous defaults through the one they were
+ * already in. See {@link bagOf} for what the plain-object version of this read answered instead.
  */
 function reconcile(
   next: BrokerField[],
@@ -141,9 +190,10 @@ function reconcile(
   const seeded = new Map(
     previous.map((field) => [field.name, field.default ?? ""]),
   );
-  return Object.fromEntries(
+  const typedIn = new Map(Object.entries(held));
+  return bagOf(
     next.map((field) => {
-      const value = held[field.name];
+      const value = typedIn.get(field.name);
       const untouched = value === undefined || value === seeded.get(field.name);
       return [field.name, untouched ? (field.default ?? "") : value];
     }),

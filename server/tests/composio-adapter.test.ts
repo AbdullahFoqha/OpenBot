@@ -6030,6 +6030,128 @@ describe("the fields an app asks a person to fill in", () => {
     expect(refusal.message).toMatch(/cannot be filled in here/);
   });
 
+  test("a field named for the word the connection state uses is refused, not drawn", async () => {
+    /*
+     * A BOX WHOSE ANSWER CANNOT BE SENT MUST NOT BE DRAWN, which is the same rule the nameless field
+     * above is refused under. `connectWithFields` sends `{ status: "ACTIVE", ...values }` — the
+     * shape the vendor's own `AuthScheme` builder assembles (`@composio/core` 0.18.1,
+     * `src/models/AuthScheme.ts:84-94`) — so `status` is the protocol's word inside that object and
+     * not a name a value may travel under. Either answer to a box named that is wrong: sent, it
+     * replaces the state this deployment is asking Composio to create, and withheld, it is a box
+     * somebody filled in whose value no app ever reads.
+     *
+     * SO THE APP IS REFUSED RATHER THAN PART OF ITS FORM, and the sentence names the field, which is
+     * the vendor's own text and the only thing an administrator can act on.
+     */
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [
+                      {
+                        name: "status",
+                        displayName: "Account status",
+                        type: "string",
+                        required: true,
+                        is_secret: false,
+                        user_visible: true,
+                      },
+                    ],
+                    optional: [],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectionFields({ toolkit: "drifted", authScheme: "API_KEY" }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/status/);
+    expect(refusal.message).toMatch(/drifted/);
+  });
+
+  test("a name published in both lists is one box, and the required one", async () => {
+    /*
+     * THE TWO LISTS ARE JOINED AND A NAME IS NOT A SEAT. `required` and `optional` are published
+     * separately and were concatenated as they arrived, so an app naming one field in both drew TWO
+     * boxes labelled the same thing — and whichever the person typed in second is the one that won
+     * in the submitted values, because a later key overwrites an earlier one in the object the form
+     * builds. Nothing anywhere says which of the two they filled in.
+     *
+     * FIRST SIGHTING KEEPS ITS PLACE, which is the rule `readableConfigs` and `withdrawableAccounts`
+     * already dedupe identifiers under, and required is read FIRST — so a name in both lists is
+     * treated as the required one. That is the safe direction: read as optional, a credential the
+     * app cannot do without becomes a box the connect route lets somebody leave blank.
+     */
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [
+                      {
+                        name: "generic_api_key",
+                        displayName: "API Key",
+                        description: "Your secret key.",
+                        type: "string",
+                        required: true,
+                        is_secret: true,
+                        user_visible: true,
+                      },
+                    ],
+                    optional: [
+                      {
+                        name: "generic_api_key",
+                        displayName: "API Key (optional)",
+                        description: "Leave this alone.",
+                        type: "string",
+                        required: false,
+                        is_secret: false,
+                        user_visible: true,
+                        default: "pplx-",
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    expect(
+      await broker.connectionFields({
+        toolkit: "perplexityai",
+        authScheme: "API_KEY",
+      }),
+    ).toEqual([
+      {
+        name: "generic_api_key",
+        label: "API Key",
+        help: "Your secret key.",
+        required: true,
+        secret: true,
+      },
+    ]);
+  });
+
   /**
    * A ROW THAT IS NOT A ROW IS A VENDOR SHAPE, AND IT WAS WEARING THE SENTENCE FOR AN APP.
    *
@@ -6829,6 +6951,55 @@ describe("connecting one person with the secret they typed", () => {
               generic_api_key: TYPED_SECRET,
               subdomain: "acme",
             },
+          },
+        },
+      },
+    ]);
+  });
+
+  test("a value named status cannot displace the state this call is making", async () => {
+    /*
+     * `status` IS THE PROTOCOL'S WORD AND THE VALUES ARE THE VENDOR'S, IN ONE OBJECT. The state this
+     * call sends is `{ status: "ACTIVE", ...values }` — the shape `AuthScheme.APIKey` builds
+     * (`@composio/core` 0.18.1, `src/models/AuthScheme.ts:84-94`) — so a value arriving under the
+     * name `status` is spread OVER the one word in that object that says what is being created. What
+     * Composio is then told is whatever that value says: an account asked for in a state nobody
+     * chose, from a request that looks exactly like an ordinary connection.
+     *
+     * WHICH IS A GUARD AT THIS SEAM RATHER THAN ONLY AT THE ROUTE ABOVE IT. `connectionFields`
+     * refuses to draw a box named `status` and the connect route sends only names that list
+     * published, so nothing reaching here through a form can carry one. This method is callable
+     * without either, and the word it protects is the one that cannot be re-derived afterwards.
+     */
+    const asked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: {
+          create: async (body: unknown) => {
+            asked.push(body);
+            return { id: "ca_new", status: "ACTIVE" };
+          },
+        },
+      }),
+    );
+
+    await broker.connectWithFields({
+      userId: "user_1",
+      toolkit: "linear",
+      authScheme: "API_KEY",
+      values: { generic_api_key: TYPED_SECRET, status: "INITIALIZING" },
+    });
+
+    expect(asked).toEqual([
+      {
+        auth_config: { id: OURS.id },
+        connection: {
+          user_id: "user_1",
+          state: {
+            authScheme: "API_KEY",
+            // The word this deployment sets, whatever arrived beside it under the same name.
+            val: { generic_api_key: TYPED_SECRET, status: "ACTIVE" },
           },
         },
       },
