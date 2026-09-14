@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { BrokerRefusalError } from "../src/plugins/broker";
 import {
+  askAction,
   type ComposioAction,
   type ComposioActions,
   type ComposioResult,
@@ -47,6 +48,8 @@ type Recorded = {
   slug: string;
   userId: string;
   version: string;
+  /** Absent unless the caller named one account of the person's in particular. */
+  connectedAccountId?: string;
   args: Record<string, unknown>;
 };
 
@@ -3144,5 +3147,167 @@ describe("calling one action", () => {
     expect(result.text).not.toMatch(
       /is not an object|undefined is not|TypeError/i,
     );
+  });
+});
+
+/**
+ * WHICH FAILURES ARE THE VENDOR'S VERDICT AND WHICH ARE THIS DEPLOYMENT NOT FINDING OUT.
+ *
+ * `isError` is one flag over three kinds of failure — this transport refusing before it dialled,
+ * Composio reporting a failure of a call it made, and an answer nothing here can read — and for a
+ * model reading a result that is the right amount of detail: the call did not work, and the sentence
+ * says why. For a caller writing the answer down as a verdict on somebody's credential it is not:
+ * `probeBrokeredConnection` spends one call to find out whether a key works, and reading `isError`
+ * as that verdict made a Composio OUTAGE into a rejected key — which deleted the account somebody
+ * had just made and told them their key was refused, and, at the other caller, cleared a working
+ * connection's verification.
+ *
+ * SO THE SEAM ANSWERS IT, and this is where the classification itself is pinned. Each case below is
+ * one branch of `askAction`, asserted on the `answered` flag rather than on the sentence, because a
+ * sentence is prose and this is a contract: `answered: true` means Composio ran the action in the
+ * account and said how it went, and nothing else in the module may claim it.
+ */
+describe("what a failed call is evidence of", () => {
+  test("a call this transport never sent is not a verdict on anything", async () => {
+    const { client, calls } = recording();
+    useComposioClient(client);
+
+    // No recorded version, which this module refuses before dialling. Nothing went out, so nothing
+    // about anybody's credential was established.
+    const answer = await askAction(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      {},
+    );
+
+    expect(answer.result.isError).toBe(true);
+    expect(answer.answered).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  test("a vendor that threw is not a vendor that answered", async () => {
+    useComposioClient(
+      recording({
+        execute: async () => {
+          throw new Error("connect ETIMEDOUT 104.18.0.1:443");
+        },
+      }).client,
+    );
+
+    const answer = await askAction(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    // The sentence is still the vendor's, because it is the useful thing for whoever reads it. What
+    // it is NOT is evidence: an outage, a socket that closed and a gateway all arrive here.
+    expect(answer.result.isError).toBe(true);
+    expect(answer.result.text).toMatch(/ETIMEDOUT/);
+    expect(answer.answered).toBe(false);
+  });
+
+  test("an answer this deployment cannot read is not a verdict either", async () => {
+    useComposioClient(
+      recording({
+        // The envelope's own fields missing, which this module refuses as not being the envelope.
+        execute: async () => ({}) as unknown as ComposioResult,
+      }).client,
+    );
+
+    const answer = await askAction(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(answer.result.isError).toBe(true);
+    expect(answer.answered).toBe(false);
+  });
+
+  test("a flag neither true nor false is the vendor speaking unreadably, not refusing", async () => {
+    useComposioClient(
+      recording({
+        execute: async () =>
+          ({
+            data: {},
+            error: null,
+            successful: "false",
+          }) as unknown as ComposioResult,
+      }).client,
+    );
+
+    const answer = await askAction(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    // Its own sentence says nothing here can tell whether the action ran, and the flag beside it
+    // has to agree: a refusal that cannot say the call happened cannot be read as a verdict on it.
+    expect(answer.result.isError).toBe(true);
+    expect(answer.answered).toBe(false);
+  });
+
+  test("a failure Composio reported IS a verdict on the call it ran", async () => {
+    useComposioClient(
+      recording({
+        execute: async () =>
+          answered({}, { successful: false, error: "Invalid API key." }),
+      }).client,
+    );
+
+    const answer = await askAction(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(answer.result.isError).toBe(true);
+    expect(answer.result.text).toMatch(/Invalid API key/);
+    // The one shape that is: Composio ran the action in the account and said how it went.
+    expect(answer.answered).toBe(true);
+  });
+
+  test("a call that worked is the plainest answer there is", async () => {
+    useComposioClient(
+      recording({ execute: async () => answered({ ok: true }) }).client,
+    );
+
+    const answer = await askAction(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(answer.result.isError).toBe(false);
+    expect(answer.answered).toBe(true);
+  });
+
+  test("the account a caller names travels with the call", async () => {
+    const { client, calls } = recording();
+    useComposioClient(client);
+
+    await askAction(
+      {
+        url: "composio://gmail",
+        actorId: "user_asker",
+        accountId: "ca_the_one_just_made",
+      },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+    // And a call that names none sends none, which is what a Bot's ordinary tool call is: any
+    // account this person holds for the app will do.
+    await askAction(
+      { url: "composio://gmail", actorId: "user_asker" },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(calls.map((call) => call.connectedAccountId)).toEqual([
+      "ca_the_one_just_made",
+      undefined,
+    ]);
   });
 });

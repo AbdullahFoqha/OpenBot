@@ -1864,6 +1864,16 @@ export type ComposioVendor = {
         arguments: Record<string, unknown>;
         userId: string;
         version: string;
+        /**
+         * WHICH ACCOUNT OF THE PERSON'S TO RUN IN, absent where any of theirs will do.
+         *
+         * `ToolExecuteParams` carries it and `Tools.execute` forwards it to the client
+         * (`@composio/core` 0.18.1), so this is the wire's own field rather than one this
+         * deployment composes. Why a verification cannot go without it is written at
+         * {@link ComposioActions.execute}: a person and an app do not name an account, and one
+         * person may hold several for one app.
+         */
+        connectedAccountId?: string;
       },
     ): Promise<ComposioResult>;
   };
@@ -2883,6 +2893,16 @@ export function buildComposioClient(
             arguments: args,
             userId: call.userId,
             version: call.version,
+            /*
+             * SPREAD RATHER THAN PASSED AS `undefined`, which is the same care every other optional
+             * on this wire gets here — see the cursor on the listings above. What the vendor is
+             * handed for "any account of theirs" is a body with no such key, not a key holding
+             * nothing, so a client that distinguishes the two cannot read an absent pin as a
+             * request for an account called undefined.
+             */
+            ...(call.connectedAccountId === undefined
+              ? {}
+              : { connectedAccountId: call.connectedAccountId }),
           }),
       );
     },

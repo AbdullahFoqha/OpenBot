@@ -22,6 +22,7 @@ import type { Database } from "../db/client";
 import {
   databaseComplaint,
   isQueryFailure,
+  reasonWithoutStatement,
   withoutStatement,
 } from "../db/query-failure";
 import {
@@ -59,7 +60,7 @@ import {
   serverCredentialKind,
 } from "./catalogue";
 import {
-  callTool as composioCallTool,
+  askAction as composioAskAction,
   toolkitOf,
   VERSION_ARG,
 } from "./composio";
@@ -272,6 +273,44 @@ export type GrantedPlugins = {
 export type PluginDecision =
   | { allowed: true }
   | { allowed: false; reason: string };
+
+/**
+ * What one check of somebody's brokered account spent, and what came of it.
+ *
+ * FOUR OUTCOMES AND NOT A PAIR OF NULLABLE FIELDS, because the fourth one is what the pair could
+ * not say and its absence was destructive. `verified: false` used to cover both "the app published
+ * nothing safe to try" and "it ran and the vendor refused the key", which is why the action's name
+ * travels beside the verdict at all — and a THIRD thing was quietly landing in the second of those:
+ * a vendor nobody could reach. `callTool` never throws, so a Composio outage, a socket that closed
+ * and a package that cannot parse an answer all arrived as `isError: true` and were read as the
+ * vendor rejecting the key. See {@link ActionAnswer} in `./composio` for the reading that settles
+ * it, and {@link composioConnections.probeAction} for what each of these may be written down as.
+ *
+ * `probe` IS THE ACTION A CHECK CAN BE SHOWN TO HAVE SPENT, and it is null on both outcomes where
+ * nothing can be shown — which is the whole structural point of this shape rather than a nicety.
+ * That field is what the writer records in `probe_action`, and a name beside `verified: false` is
+ * the accusation "it ran and the vendor refused your key". An unreachable vendor therefore has no
+ * name to give the writer, and cannot make that claim even by mistake; what was attempted is
+ * carried separately, for the trail and for the sentence somebody reads.
+ */
+export type BrokeredProbe =
+  /** The app published nothing safe to call, or no row for it is left. Nothing was tried. */
+  | { outcome: "nothing"; probe: null }
+  /** It ran in this person's account and the vendor took the key. */
+  | { outcome: "answered"; probe: string }
+  /** It ran and the vendor refused the key. `sentence` is Composio's own account of why. */
+  | { outcome: "refused"; probe: string; sentence: string }
+  /**
+   * The vendor was not reached, or answered something nothing here can read, so NOTHING WAS
+   * LEARNED — about the key, and about whether the action ran at all. `attempted` is what would
+   * have been spent, which is a fact about this deployment's intent rather than about the account.
+   */
+  | {
+      outcome: "unreachable";
+      probe: null;
+      attempted: string;
+      sentence: string;
+    };
 
 export class PluginRefusedError extends Error {
   constructor(
@@ -4642,15 +4681,21 @@ export function createPluginStore(options: PluginStoreOptions) {
      * and it is all either of them keeps for itself: one withdraws the account it just made, the
      * other leaves an account it did not make alone.
      *
-     * THREE ANSWERS AND NOT A BOOLEAN, because `verified: false` means two different things about
-     * somebody's key and only the action's name separates them:
+     * FOUR ANSWERS AND NOT A BOOLEAN, because `verified: false` means several different things
+     * about somebody's key and the flag separates none of them. They are enumerated on
+     * {@link BrokeredProbe}, which is where a reader should go; the one worth repeating at the call
+     * this method makes is the fourth.
      *
-     *   `probe: null`                — the app published nothing safe to call, nothing at a version
-     *                                  this deployment recorded, or there is no row for the app at
-     *                                  all any more. NOTHING WAS TRIED.
-     *   `probe: <name>, failure null` — it ran in this person's account and answered.
-     *   `probe: <name>, failure set`  — it ran and the vendor refused, and `failure` is Composio's
-     *                                  own sentence about why.
+     * A VENDOR THAT WAS NOT REACHED IS NOT A VENDOR THAT SAID NO, and this is the one place that
+     * can tell. `callTool` answers with a result rather than throwing, and `isError` is true for all
+     * three of the failures it documents — so read as a verdict here, a Composio outage, a socket
+     * that closed, a `@composio/core` that cannot parse what came back and a run attributed to
+     * nobody were every one of them "the vendor refused this key". What that cost is at the callers
+     * and it was the worst thing this feature did: on connect the account somebody had just made
+     * was deleted at the vendor and they were told what they entered did not work; on re-check a
+     * live, working connection was stripped of its verification and marked as holding a bad key.
+     * {@link ActionAnswer} is what the transport now answers beside the result, and this method
+     * asks for it by calling `askAction` rather than `callTool`.
      *
      * A FAILURE IS RETURNED RATHER THAN THROWN, which is the one thing this function does not
      * decide. Its two callers end a bad key differently — one undoes an account and refuses, the
@@ -4663,9 +4708,23 @@ export function createPluginStore(options: PluginStoreOptions) {
     async probeBrokeredConnection(input: {
       toolkit: string;
       userId: string;
-    }): Promise<
-      { probe: null; failure: null } | { probe: string; failure: string | null }
-    > {
+      /**
+       * THE ACCOUNT TO SPEND IT IN, where the caller has one in mind.
+       *
+       * {@link connectBrokeredWithFields} has just made an account and is asking about THAT key; a
+       * person and an app do not name it, because one person may hold several accounts for one app
+       * and the vendor picks which a call runs in. Unpinned, a bad key was verified by the person's
+       * other, working account — and the same defect the other way round condemned a good key, and
+       * deleted the account it made, on the strength of some other account of theirs being broken.
+       *
+       * ABSENT FOR A RE-CHECK, AND THAT IS A GAP RATHER THAN A CHOICE. `composio_connections`
+       * records no account id — the row is keyed on the person and the app — so a press of Re-check
+       * has nothing to pin to and asks the vendor the same app-level question it always did. It is
+       * the milder half: a re-check writes a verdict but takes nothing away, and its refusal tells
+       * the person their key is wrong rather than removing anything they hold.
+       */
+      accountId?: string;
+    }): Promise<BrokeredProbe> {
       /*
        * THE ONE ACTION THIS DEPLOYMENT WILL SPEND THE KEY ON, chosen from what the app published.
        *
@@ -4716,7 +4775,7 @@ export function createPluginStore(options: PluginStoreOptions) {
 
       const candidate = app ? await this.probeActionFor(app.id) : null;
       if (candidate === null) {
-        return { probe: null, failure: null };
+        return { outcome: "nothing", probe: null };
       }
 
       /*
@@ -4733,16 +4792,40 @@ export function createPluginStore(options: PluginStoreOptions) {
        * Composio transport strips before anything reaches the vendor and asserts that it did, so
        * what Composio is handed is the action and an empty argument object.
        */
-      const answer = await composioCallTool(
-        { url: `composio://${input.toolkit}`, actorId: input.userId },
+      const { result, answered } = await composioAskAction(
+        {
+          url: `composio://${input.toolkit}`,
+          actorId: input.userId,
+          // Spread rather than passed as `undefined`, so "any account of theirs" reaches the wire
+          // as a body with no such key. See {@link ComposioActions.execute}.
+          ...(input.accountId === undefined
+            ? {}
+            : { accountId: input.accountId }),
+        },
         candidate.name,
         { [VERSION_ARG]: candidate.version },
       );
 
-      return {
-        probe: candidate.name,
-        failure: answer.isError ? answer.text : null,
-      };
+      /*
+       * THE READING, AND IT IS THE WHOLE OF WHAT THIS METHOD DECIDES. `answered` is the transport's
+       * own statement that Composio ran the action in the account and said how it went; `isError`
+       * then says what it said. Anything else is an outage or an answer this deployment could not
+       * read, and neither is evidence about a key — so the action's NAME is withheld from those,
+       * because the name beside `verified: false` is the accusation and only a call that can be
+       * shown to have run may make it.
+       */
+      if (!answered) {
+        return {
+          outcome: "unreachable",
+          probe: null,
+          attempted: candidate.name,
+          sentence: result.text,
+        };
+      }
+
+      return result.isError
+        ? { outcome: "refused", probe: candidate.name, sentence: result.text }
+        : { outcome: "answered", probe: candidate.name };
     },
 
     /**
@@ -4981,8 +5064,14 @@ export function createPluginStore(options: PluginStoreOptions) {
      * the flag alone. With a probe that can fail there are three states, and two of them share the
      * flag:
      *
-     *   null probe, `verified: false`   — this app publishes nothing safe to call, so nothing was
-     *                                     tried. "It was accepted without being checked" is true.
+     *   null probe, `verified: false`   — nothing was tried, so nothing is known about the key.
+     *                                     Either this app publishes nothing safe to call, or the
+     *                                     check could not be made — Composio unreachable, or an
+     *                                     answer this deployment could not read. "It was accepted
+     *                                     without being checked" is true of both, which is why
+     *                                     they share the state; `checkable` on the listing is what
+     *                                     tells the person whether pressing Re-check can ever help,
+     *                                     and the trail carries the outage under `unreachable`.
      *   named probe, `verified: true`   — the action ran in this person's account and answered.
      *   named probe, `verified: false`  — it ran, the vendor said no, and the account could not be
      *                                     withdrawn. The key is BAD and the row exists anyway.
@@ -5037,12 +5126,23 @@ export function createPluginStore(options: PluginStoreOptions) {
        * nothing safe to call, or nothing at a version this deployment recorded, so the key was
        * never tried. It is an ordinary answer and not a failure; see that method.
        */
-      const { probe, failure } = await this.probeBrokeredConnection({
+      const probed = await this.probeBrokeredConnection({
         toolkit: input.toolkit,
         userId: input.userId,
+        /*
+         * THE ACCOUNT THIS CALL JUST MADE, which is the only account this check is about. A person
+         * and an app do not name one: Composio takes an account per key, somebody may hold several
+         * for one app, and the vendor picks which a call runs in. So an unpinned probe verified a
+         * key that does not work against the person's OTHER account — writing `verified` on the
+         * strength of a call the new key never touched — and, the same defect pointing the other
+         * way, condemned a perfectly good key and deleted the account it had just made because
+         * some older account of theirs was broken. The undo below has always been keyed on this id;
+         * this is what makes the check about the same account as the withdrawal.
+         */
+        accountId,
       });
 
-      if (failure !== null) {
+      if (probed.outcome === "refused") {
         /*
          * NOTHING IS LEFT BEHIND ON A KEY THAT DOES NOT WORK. The account is deleted at Composio
          * before the refusal is raised, so a mistyped key does not leave a live connection that
@@ -5055,12 +5155,26 @@ export function createPluginStore(options: PluginStoreOptions) {
          * done — and the two differ exactly when the local row and Composio have drifted apart,
          * which is the case where a sweep would delete a connection that was working.
          */
-        const removed = await broker
+        /*
+         * AND THE REASON IT WOULD NOT, KEPT RATHER THAN COLLAPSED TO A BOOLEAN. This was
+         * `.catch(() => false)`, which discarded the vendor's own account of the worst state this
+         * feature has — a live account holding a key that has just been refused, which nothing here
+         * can withdraw. What is left behind outlives the one sentence one person read, and the
+         * reader of it is an operator working out what to do: "Composio is unavailable" is a retry
+         * and "that account is attached to a config that no longer exists" is a ticket, and a bare
+         * `false` is neither. Read through {@link reasonWithoutStatement} rather than off
+         * `.message`, for the reason that door exists — a `catch` binds `unknown`, and that helper
+         * is the `instanceof Error` question already asked — and capped where every other quoted
+         * failure here is capped.
+         */
+        const undone = await broker
           .revokeAccount(accountId)
-          .then(() => true)
-          .catch(() => false);
+          .then(() => null)
+          .catch((error: unknown) =>
+            reasonWithoutStatement(error).slice(0, 400),
+          );
 
-        if (!removed) {
+        if (undone !== null) {
           /*
            * AND WHERE THE UNDO ITSELF FAILS, THE ROW IS WRITTEN ANYWAY. That reverses this
            * method's own rule, and it reverses it in the one case where the rule is no longer
@@ -5086,7 +5200,7 @@ export function createPluginStore(options: PluginStoreOptions) {
             // has just refused — and the name beside the `false` is the whole of what separates it
             // on a later page load from a key nobody ever tried. It is the same name the audit row
             // below carries under `action`, for a reader of the trail rather than of a screen.
-            probeAction: probe,
+            probeAction: probed.probe,
           });
 
           /*
@@ -5121,32 +5235,63 @@ export function createPluginStore(options: PluginStoreOptions) {
             targetId: input.toolkit,
             payload: {
               actor: input.userId,
-              action: probe,
+              action: probed.probe,
               verified: false,
+              /*
+               * AND WHY THE ACCOUNT IS STILL THERE, which is the field an operator acts on. The
+               * row already says the state — a named probe beside `verified: false` — and this
+               * says what stands between that state and the one act that would end it. It is on
+               * this row alone: the trail's other `mcp.connection_verified` rows are about checks
+               * that reached a verdict, and only this one is written about a withdrawal that did
+               * not happen.
+               */
+              undo: undone,
             },
           });
 
           throw new PluginRefusedError(
-            `What you entered for ${input.toolkit} did not work — ${failure} — and Composio would not take the account back either, so it is recorded here as unchecked rather than left somewhere nothing could name it. Disconnect it on the Plugins page and try again.`,
+            `What you entered for ${input.toolkit} did not work — ${probed.sentence} — and Composio would not take the account back either (${undone}), so it is recorded here as unchecked rather than left somewhere nothing could name it. Disconnect it on the Plugins page and try again.`,
             null,
           );
         }
 
         throw new PluginRefusedError(
-          `${input.toolkit} would not answer with what was entered: ${failure} Nothing was saved, so entering it again is the whole of the retry.`,
+          `${input.toolkit} would not answer with what was entered: ${probed.sentence} Nothing was saved, so entering it again is the whole of the retry.`,
           null,
         );
       }
 
       /*
-       * THE SECOND STATE, AND THE ONLY ONE THAT EARNS THE FLAG. A probe that ran and answered is
-       * evidence the key works, exactly as the vendor's yes at the end of a consent screen is
-       * evidence for {@link confirmBrokeredConnection}; a null probe is the honest unchecked state
-       * {@link composioConnections.verified} documents. Written through the single writer below
-       * rather than spelled here, so this path and the confirm path cannot drift into two row
-       * shapes — `verified_at` follows from the flag there and is not passed in.
+       * ONE OUTCOME EARNS THE FLAG AND THE OTHER TWO REACHING HERE DO NOT, which is the whole of
+       * what is decided below. A probe that ran and answered is evidence the key works, exactly as
+       * the vendor's yes at the end of a consent screen is evidence for {@link
+       * confirmBrokeredConnection}. An app that published nothing safe to call is the honest
+       * unchecked state {@link composioConnections.verified} documents. And a vendor that could
+       * not be reached is the SAME unchecked state, arrived at a different way — which is the one
+       * thing a reader of this branch has to take away, so it is written out rather than left to
+       * the union.
+       *
+       * AN OUTAGE IS AN ABSENCE OF EVIDENCE AND THE ROW HAS A STATE FOR THAT. It is not a fourth
+       * thing to store: `probe_action` records the action a check SPENT, and a call that reached
+       * nobody spent none, so null beside `verified: false` says exactly what is true — this key
+       * has not been checked. What it must never become is the other `verified: false`, the one
+       * with a name beside it, because that pair is the accusation "it ran and the vendor refused
+       * your key" and the settings page draws it as such. {@link BrokeredProbe} withholds the name
+       * from this outcome so the writer below cannot record it even by accident.
+       *
+       * AND THE ACCOUNT STAYS, which is the half the person would not get back. The undo above is
+       * for a key the vendor REFUSED; a key nobody could ask about is very probably fine, and
+       * deleting somebody's account because Composio was down destroys the thing they just made to
+       * tell them something that was never established. The Re-check button is what settles it
+       * afterwards — the app publishes an action, so the settings page offers one — and this is why
+       * the connect answers rather than refusing: nothing went wrong with what they typed.
+       *
+       * Written through the single writer below rather than spelled here, so this path and the
+       * confirm path cannot drift into two row shapes — `verified_at` follows from the flag there
+       * and is not passed in.
        */
-      const verified = probe !== null;
+      const probe = probed.probe;
+      const verified = probed.outcome === "answered";
 
       // Read before the write, for `confirmBrokeredConnection`'s reason: the record below is an
       // upsert, so it leaves nothing behind that tells a first key from a replacement, and whether
@@ -5214,6 +5359,14 @@ export function createPluginStore(options: PluginStoreOptions) {
        * rather than about access; that is true and it cost the reader the only question anybody
        * asks this trail, which was answered half by one id and half by the other. Nothing goes with
        * the change: the server id is `composio-` and the slug, and the action is in the payload.
+       *
+       * AND THE OUTAGE IS NAMED HERE BECAUSE THE ROW CANNOT NAME IT. Two different things leave
+       * this method with a null `action` — an app that publishes nothing safe to call, and a check
+       * that could not be made — and on `composio_connections` they are one state, correctly: both
+       * mean the key is unchecked, and neither says anything about the key. A reader of the TRAIL
+       * is asking a different question, "was a check attempted and what became of it", and
+       * `unreachable` is the whole of the difference, in Composio's own words. Present only on the
+       * outage, so its absence is as informative as its value.
        */
       await recordAuditEvent(auditStore, {
         eventType: "mcp.connection_verified",
@@ -5223,6 +5376,9 @@ export function createPluginStore(options: PluginStoreOptions) {
           actor: input.userId,
           action: probe,
           verified,
+          ...(probed.outcome === "unreachable"
+            ? { unreachable: probed.sentence }
+            : {}),
         },
       });
 
@@ -5336,7 +5492,36 @@ export function createPluginStore(options: PluginStoreOptions) {
         );
       }
 
-      const { probe, failure } = await this.probeBrokeredConnection(input);
+      const probed = await this.probeBrokeredConnection(input);
+
+      /*
+       * THE VENDOR WAS NOT REACHED, SO THE RECORD OF THE LAST CHECK IS LEFT EXACTLY WHERE IT IS.
+       *
+       * This is the branch the whole four-state reading exists for on this path. A failed probe
+       * used to mean one thing here — "the vendor rejected the key it is holding" — so an outage,
+       * a socket that closed, or a `@composio/core` that could not parse an answer cleared
+       * `verified`, dropped `verified_at` (the only record anywhere that this connection was ever
+       * checked, and the date the page prints) and wrote the named probe beside the `false`, which
+       * is the accusation. Every person who pressed the button while Composio was down was told
+       * their key had been refused, over a row that had been verified minutes earlier.
+       *
+       * NOTHING IS WRITTEN, WHICH IS STRONGER THAN WRITING SOMETHING HONEST. A press that learned
+       * nothing may not move a record: there is no state for "we could not ask" on the row, and
+       * there should not be — the row says what is known about the key, and an outage changes
+       * nothing about that. It is the same restraint as the nothing-to-probe branch below, and
+       * nothing is filed on the trail for the same reason it gives.
+       *
+       * AND IT RAISES RATHER THAN ANSWERING, which is where it parts from that branch. Somebody
+       * pressed a button and is owed the truth about what happened to their press: the check did
+       * not happen, and here is Composio's own sentence about why. Answering with the held row
+       * instead would report the state as though the press had confirmed it.
+       */
+      if (probed.outcome === "unreachable") {
+        throw new PluginRefusedError(
+          `${input.toolkit} could not be checked just now: ${probed.sentence} Nothing here changed — your connection is still recorded exactly as the last check left it — so pressing Re-check again when Composio is answering is the whole of the retry.`,
+          null,
+        );
+      }
 
       /*
        * NOTHING WAS TRIED, SO NOTHING IS WRITTEN AND NOTHING IS FILED. The row keeps whatever it
@@ -5345,13 +5530,17 @@ export function createPluginStore(options: PluginStoreOptions) {
        * `mcp.connection_verified` records an account exercised with a REAL CALL; a row filed here
        * would make the one event that means "a key was tried" also mean "somebody pressed a button".
        */
-      if (probe === null) {
+      if (probed.outcome === "nothing") {
         return {
           verified: held.verified,
           verifiedAt: iso(held.verifiedAt),
           probe: null,
         };
       }
+
+      // What the press spent, which from here on is a name: both outcomes left are a call that ran
+      // and a vendor that answered about it.
+      const probe = probed.probe;
 
       /*
        * THE ANSWER IS WRITTEN FOR BOTH OUTCOMES, and through the single writer for its reason: the
@@ -5360,7 +5549,7 @@ export function createPluginStore(options: PluginStoreOptions) {
        * just rejected stops being verified HERE — that is the state this button exists to correct,
        * in the direction nothing else in the product can move it.
        */
-      const verified = failure === null;
+      const verified = probed.outcome === "answered";
       const verifiedAt = await this.recordBrokeredConnection({
         toolkit: input.toolkit,
         userId: input.userId,
@@ -5396,15 +5585,20 @@ export function createPluginStore(options: PluginStoreOptions) {
         },
       });
 
-      if (failure !== null) {
+      if (probed.outcome === "refused") {
         /*
          * THE VENDOR'S OWN SENTENCE, AND THE TWO FACTS AROUND IT: the row here now says unchecked,
          * and their account was left exactly as it was. The second half is what makes the retry one
          * step rather than three — there is nothing to disconnect and nothing to reconnect, only a
          * key to fix at the app and this button to press again.
+         *
+         * AND IT IS REACHED ONLY WHERE COMPOSIO ANSWERED ABOUT THE CALL, which is what makes the
+         * first clause true. A vendor that could not be reached leaves by the branch above with
+         * this row untouched; only a refusal the vendor actually reported gets to tell somebody
+         * their key is wrong.
          */
         throw new PluginRefusedError(
-          `${input.toolkit} would not answer with the key it is holding: ${failure} Your connection here is recorded as unchecked until it does; nothing was disconnected, so fixing the key at ${input.toolkit} and pressing Re-check again is the whole of the retry.`,
+          `${input.toolkit} would not answer with the key it is holding: ${probed.sentence} Your connection here is recorded as unchecked until it does; nothing was disconnected, so fixing the key at ${input.toolkit} and pressing Re-check again is the whole of the retry.`,
           null,
         );
       }

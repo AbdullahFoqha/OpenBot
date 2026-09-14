@@ -199,6 +199,29 @@ export type ComposioActions = {
       /** Never from `args`. See the module comment. */
       userId: string;
       version: string;
+      /**
+       * WHICH ACCOUNT OF THIS PERSON'S THE ACTION RUNS IN, where the caller means one in
+       * particular, and absent where any of them will do.
+       *
+       * A PERSON AND AN APP ARE NOT A NAME FOR AN ACCOUNT. Composio takes one account per set of
+       * credentials and one person may hold several for one app — two mailboxes, a stale account
+       * beside a fresh one, a key typed again after the first was rotated — so a call naming only
+       * the pair runs in WHICHEVER OF THEM THE VENDOR PICKS. For a Bot's ordinary tool call that is
+       * the right thing and this stays absent: the person asked for something to be done in their
+       * account at the app, and any account they hold is an account they hold.
+       *
+       * IT IS THE VERIFICATION THAT NEEDS IT, and it needs it absolutely. `probeBrokeredConnection`
+       * spends one call to find out whether ONE key works, and the answer is written down as a
+       * verdict on the account that key just made: unpinned, a key that does not work is verified
+       * by the person's other account, and — the same defect pointing the other way — a good key is
+       * condemned, and the account it made deleted, because some other account of theirs is broken.
+       * The undo on that path has always been keyed on the account id; this is what makes the CHECK
+       * about the same account as the withdrawal.
+       *
+       * `ToolExecuteParams` carries `connectedAccountId` (`@composio/core` 0.18.1) and the SDK
+       * forwards it, so an implementation passes it through rather than resolving anything.
+       */
+      connectedAccountId?: string;
     },
     args: Record<string, unknown>,
   ): Promise<ComposioResult>;
@@ -1279,11 +1302,19 @@ function resultOf(data: ComposioResult["data"] | undefined): McpCallResult {
  * {@link callTool} names, ours rather than the vendor's, and so worded in our own words.
  *
  * Null when there is nothing to report, so the caller can tell "succeeded" from "failed silently".
+ *
+ * AND EVERY BRANCH SAYS WHETHER COMPOSIO ANSWERED ABOUT THE CALL, which is the second thing this
+ * function has always decided and never said out loud. Read the sentences below: three of them end
+ * "so nothing here can tell whether the action ran", and the other two are the vendor reporting a
+ * failure of a call it made. That is exactly the {@link ActionAnswer} split — a failure OUT THERE
+ * against a failure to find out — and returning it beside the sentence is what keeps the two from
+ * being re-derived by matching on prose. See {@link ActionAnswer} for who needs the distinction and
+ * what it destroyed while nothing carried it.
  */
 function reportedFailure(
   answer: ComposioResult,
   toolName: string,
-): string | null {
+): { sentence: string; answered: boolean } | null {
   // Both fields are read as `unknown` because the types are this module's projection and the values
   // are the vendor's: `ToolExecuteResponseSchema` spells `error` a nullable string and `successful`
   // a boolean, and a field that is neither is exactly what the two shape checks below are for.
@@ -1293,8 +1324,11 @@ function reportedFailure(
 
   if (reported !== null && typeof reported !== "string") {
     return outcome === false
-      ? unexplained(toolName)
-      : `${toolName} was sent to Composio and Composio answered, but this deployment could not read what it said about the call: the answer's error was neither a sentence nor null, which is all Composio's own schema permits it to be, so nothing here can tell whether the action ran.`;
+      ? { sentence: unexplained(toolName), answered: true }
+      : {
+          sentence: `${toolName} was sent to Composio and Composio answered, but this deployment could not read what it said about the call: the answer's error was neither a sentence nor null, which is all Composio's own schema permits it to be, so nothing here can tell whether the action ran.`,
+          answered: false,
+        };
   }
 
   /*
@@ -1314,14 +1348,22 @@ function reportedFailure(
    */
   const sentence = reported === null ? "" : reported.trim();
   if (sentence !== "") {
-    return passableSentence(sentence) ?? unexplained(toolName);
+    return {
+      sentence: passableSentence(sentence) ?? unexplained(toolName),
+      answered: true,
+    };
   }
 
   if (typeof outcome !== "boolean") {
-    return `${toolName} was sent to Composio and Composio answered, but this deployment could not read whether the call worked: the answer's successful was neither true nor false, which is all Composio's own schema permits it to be, so nothing here can tell whether the action ran.`;
+    return {
+      sentence: `${toolName} was sent to Composio and Composio answered, but this deployment could not read whether the call worked: the answer's successful was neither true nor false, which is all Composio's own schema permits it to be, so nothing here can tell whether the action ran.`,
+      answered: false,
+    };
   }
 
-  return outcome === false ? unexplained(toolName) : null;
+  return outcome === false
+    ? { sentence: unexplained(toolName), answered: true }
+    : null;
 }
 
 /**
@@ -1346,25 +1388,93 @@ function reportedFailure(
  * vendor reported a failure — by throwing, or in the `successful` field of a 200 answer — or the
  * vendor answered and this deployment could not read what it said. Only the last of those is ours,
  * and it must not arrive wearing the vendor's words.
+ *
+ * AND THE FLAG DOES NOT SAY WHICH OF THE THREE THIS IS, which is fine for a model reading a result
+ * and is not fine for a caller writing down what the vendor made of a credential. {@link askAction}
+ * is this same call answering that as well; this function is it with the answer dropped, so nothing
+ * classifies a failure twice. See {@link ActionAnswer} for what reading `isError` as a verdict cost.
  */
 export async function callTool(
-  connection: { url: string; actorId?: string },
+  connection: { url: string; actorId?: string; accountId?: string },
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<McpCallResult> {
+  return (await askAction(connection, toolName, args)).result;
+}
+
+/**
+ * What a call did, with the one fact `McpCallResult` has no room for: whether Composio ANSWERED.
+ *
+ * `isError` says a call did not work and cannot say what that is evidence OF, because the three
+ * kinds of failure {@link callTool} documents all wear it. Two of them are failures to find out —
+ * this transport refusing before it dialled, and an answer this deployment could not read — and
+ * only the third is Composio running the action in somebody's account and reporting what came back.
+ * For a model reading a result that difference does not change anything: the call did not work and
+ * the sentence says why, which is why {@link callTool} still answers the flat shape and every
+ * ordinary caller goes on using it.
+ *
+ * FOR A CALL THAT IS A VERIFICATION IT IS THE WHOLE MEANING. `probeBrokeredConnection` spends one
+ * call to find out whether a key works and writes the answer down as a verdict on somebody's
+ * account — so reading `isError` as that verdict made a COMPOSIO OUTAGE into a rejected key, and
+ * the consequences were destructive at both callers: on connect the account the person had just
+ * made was deleted at the vendor and they were told what they entered did not work; on re-check a
+ * working connection's verification was cleared and its row marked as holding a bad key. A vendor
+ * nobody could reach is a fourth thing beside connected, checked and works, and it has no state on
+ * the row because it is not a fact about the connection at all — it is the absence of one.
+ *
+ * `answered: true` IS NARROW ON PURPOSE, and it is exactly one thing: Composio resolved with its
+ * envelope, this deployment could read it, and what it said — a result, or the app's own error — is
+ * a statement about the call that ran. Everything else is `false`, INCLUDING the failures that are
+ * this deployment's own fault, because a caller asking "may I treat this as a verdict" is owed the
+ * same no for a package that cannot parse an answer as for a socket that closed. The direction to
+ * be wrong in is settled by what each mistake costs: a reachable vendor misread as unreachable
+ * leaves a key unchecked, which the Re-check button fixes, and an unreachable vendor misread as a
+ * refusal destroys an account somebody had just made.
+ */
+export type ActionAnswer = {
+  /** What a model reads, and what {@link callTool} hands back unchanged. */
+  result: McpCallResult;
+  /** Whether Composio ran the action in the account and said how it went. See above. */
+  answered: boolean;
+};
+
+/**
+ * The same call as {@link callTool}, answering whether the vendor was reached as well as how it went.
+ *
+ * ONE IMPLEMENTATION AND NOT TWO, which is the point of the shape rather than a convenience.
+ * `callTool` is this function with the reachability dropped, so the verification path and every
+ * ordinary tool call dial identically, classify identically, and cannot come apart — and a new
+ * refusal added below is forced to say which kind it is at the moment it is written, rather than
+ * being sorted into a kind afterwards by matching on the sentence it happens to carry.
+ */
+export async function askAction(
+  connection: { url: string; actorId?: string; accountId?: string },
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<ActionAnswer> {
+  /**
+   * Everything that is not the vendor answering. See {@link ActionAnswer}: a transport refusing
+   * before it dials and an answer nothing here can read are both "no verdict", however different
+   * their remedies are for the person reading the sentence.
+   */
+  const unreached = (message: string): ActionAnswer => ({
+    result: failure(message),
+    answered: false,
+  });
+
   const userId = connection.actorId?.trim();
   if (!userId) {
-    return failure(
+    return unreached(
       "This action runs in the account of the person asking, and this run is not attributed to anybody.",
     );
   }
 
   const toolkit = toolkitOf(connection.url);
   if (!toolkit) {
-    return failure(`${connection.url} does not name a Composio app.`);
+    return unreached(`${connection.url} does not name a Composio app.`);
   }
   if (!installed) {
-    return failure(
+    return unreached(
       "Composio is not configured for this deployment, so this action cannot be called.",
     );
   }
@@ -1386,7 +1496,7 @@ export async function callTool(
      * nothing changed, and presses it again. So the sentence names the refresh and names the
      * condition under which it helps, which is the part nobody in this deployment controls.
      */
-    return failure(
+    return unreached(
       `${toolName} has no recorded version, so it cannot be called: Composio requires a specific one and rejects "latest", so there is nothing to fall back on. Refreshing this app's tools on its Plugins page recovers it only if Composio publishes a version for this action. Where Composio publishes none, no refresh will make it callable.`,
     );
   }
@@ -1403,7 +1513,21 @@ export async function callTool(
   let answer: ComposioResult;
   try {
     answer = await installed.execute(
-      { toolkit, slug: toolName, userId, version },
+      {
+        toolkit,
+        slug: toolName,
+        userId,
+        version,
+        /*
+         * FORWARDED AND NEVER RESOLVED, and absent where the caller named none. A Bot's tool call
+         * means "in this person's account at this app" and any account they hold satisfies it; a
+         * verification means one account in particular, and the difference is the caller's to
+         * state. See {@link ComposioActions.execute}.
+         */
+        ...(connection.accountId === undefined
+          ? {}
+          : { connectedAccountId: connection.accountId }),
+      },
       rest,
     );
   } catch (error) {
@@ -1434,7 +1558,7 @@ export async function callTool(
      * vendor's own words below, exactly as before.
      */
     const authored = brokerSentence(error);
-    if (authored !== null) return failure(authored);
+    if (authored !== null) return unreached(authored);
 
     /*
      * THE SDK'S OWN PARSE THROWS THROUGH HERE, and its message is not a sentence.
@@ -1458,12 +1582,22 @@ export async function callTool(
      * this deployment cannot read, and a refusal must not settle it by guessing.
      */
     if (isSchemaMismatch(error)) {
-      return failure(
+      return unreached(
         `Composio was asked about ${toolName} and this deployment's @composio/core would not accept what came back: it did not match the shape that package parses with, so nothing here can say whether the action ran. That is a vendor change rather than a setting on this connection — upgrading the package is the fix.`,
       );
     }
-    // The vendor's own sentence when there is one, because a generic message costs a diagnosis.
-    return failure(
+    /*
+     * The vendor's own sentence when there is one, because a generic message costs a diagnosis.
+     *
+     * AND A THROW IS NEVER A VERDICT, whosever words it arrives in. This is where an outage lands —
+     * a socket that closed, a gateway, Composio down, the SDK refusing before the request — and it
+     * is also where a broker refusal about this deployment's own state lands. NONE of them show
+     * that the action ran in anybody's account: what the sentence is for is the person reading it,
+     * and what {@link ActionAnswer} answers is whether a caller may write a verdict down. A vendor
+     * that genuinely refused a call reports it in the envelope below, which is the one branch that
+     * says it did.
+     */
+    return unreached(
       vendorSentence(error) ?? thrownSentence(error) ?? unexplained(toolName),
     );
   }
@@ -1487,16 +1621,24 @@ export async function callTool(
    */
   const gap = envelopeGap(answer);
   if (gap !== null) {
-    return failure(
+    return unreached(
       `${toolName} was sent to Composio and its client resolved, but this deployment could not read what it resolved with: Composio's own schema requires a { data, error, successful } envelope and ${gap}, so nothing here can tell whether the action ran. That is a change in what the vendor or this deployment's @composio/core answers with rather than a setting on this connection — upgrading the package is the fix.`,
     );
   }
 
+  /*
+   * THE ONE BRANCH THAT CAN BE A VERDICT, and it carries its own answer to that rather than being
+   * judged here — see {@link reportedFailure}, where three of the five outcomes are this deployment
+   * failing to read what arrived and two are Composio reporting a call it made.
+   */
   const reported = reportedFailure(answer, toolName);
-  if (reported !== null) return failure(reported);
+  if (reported !== null) {
+    return { result: failure(reported.sentence), answered: reported.answered };
+  }
 
   try {
-    return resultOf(answer.data);
+    // The action ran and Composio answered, which is the plainest `answered` there is.
+    return { result: resultOf(answer.data), answered: true };
   } catch (error) {
     /*
      * THE LAST PATH THAT REACHED A MODEL WITHOUT PASSING THE DOOR. This quoted a raw `error.message`
@@ -1522,7 +1664,15 @@ export async function callTool(
       passableSentence(
         error instanceof Error ? error.message : String(error),
       ) ?? "the reason it failed with is not one this deployment will pass on";
-    return failure(
+    /*
+     * AND NOT A VERDICT EITHER, THOUGH THE VENDOR ANSWERED — which is the one classification here
+     * that is worth a sentence, because the answer really did arrive and really did say the call
+     * worked. What did not arrive is a reading of it: this is the third kind of failure, ours, and
+     * {@link ActionAnswer} is asked by a caller deciding whether to write down what the vendor made
+     * of somebody's credential. A refusal whose own sentence says this deployment could not read
+     * the answer is not a thing to record a verdict from, in either direction.
+     */
+    return unreached(
       `${toolName} ran and Composio answered, but this deployment could not turn that answer into text: ${why}`,
     );
   }

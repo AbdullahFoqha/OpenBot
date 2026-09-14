@@ -790,6 +790,71 @@ describe("executing an action", () => {
       successful: true,
     });
   });
+
+  /**
+   * AND THE ACCOUNT, WHERE THE CALLER MEANT ONE IN PARTICULAR.
+   *
+   * CRITERION. A call carrying `connectedAccountId` sends it to Composio under that name, beside
+   * the three fields the test above pins. A call carrying none sends no such key at all, which is
+   * what the whole-body assertion above already holds this to.
+   *
+   * REASON. A person and an app are not a name for an account. Composio takes one account per set
+   * of credentials, one person may hold several for one app — a second mailbox, a stale account
+   * beside a fresh one — and the vendor picks which of them an unpinned call runs in. For a Bot's
+   * tool call that is right, and nothing here names an account. For a VERIFICATION it is the whole
+   * meaning of the answer: `connectBrokeredWithFields` spends one call to find out whether the key
+   * it has just attached works, and unpinned that call was answered by the person's OTHER account —
+   * verifying a key nothing had tried, or condemning a good one, and deleting the account it had
+   * just made, because some older account of theirs was broken.
+   *
+   * ASSERTED AT THE WIRE because this is the only place it can be. The field is the vendor's own —
+   * `ToolExecuteParams` carries it — and every layer above this one can pass it perfectly while
+   * this adapter drops it, which is exactly what it did: the seam had no such field, so the store
+   * could not have sent one.
+   */
+  test("a call that names an account sends it as the connected account", async () => {
+    const ran: unknown[] = [];
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          getRawComposioToolBySlug: async () => ({
+            slug: "GMAIL_FETCH_EMAILS",
+            name: "Fetch emails",
+            toolkit: { slug: "gmail" },
+          }),
+          execute: async (...call: unknown[]) => {
+            ran.push(call);
+            return { data: {}, error: null, successful: true };
+          },
+        },
+      }),
+    );
+
+    await actions.execute(
+      {
+        toolkit: "gmail",
+        slug: "GMAIL_FETCH_EMAILS",
+        userId: "user_whose_mailbox_this_is",
+        version: "20260903_00",
+        connectedAccountId: "ca_the_one_just_made",
+      },
+      {},
+    );
+
+    // The whole body again, for that test's reason: an extra field on this request is as much a
+    // finding as a missing one.
+    expect(ran).toEqual([
+      [
+        "GMAIL_FETCH_EMAILS",
+        {
+          arguments: {},
+          userId: "user_whose_mailbox_this_is",
+          version: "20260903_00",
+          connectedAccountId: "ca_the_one_just_made",
+        },
+      ],
+    ]);
+  });
 });
 
 /**

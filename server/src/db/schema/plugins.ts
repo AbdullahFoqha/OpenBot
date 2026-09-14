@@ -255,6 +255,15 @@ export const composioConnections = pgTable(
      * and moved this timestamp to the page load, so the page's own sentence named a day on which
      * nothing was checked.
      *
+     * AND A CHECK THAT COULD NOT BE MADE LEAVES THIS COLUMN ALONE, which is the one thing a writer
+     * of it must not improvise. `false` here means "no evidence that this connection answers", and
+     * a Composio outage produces no evidence in EITHER direction — so on a connect, whose row has
+     * to exist whatever happens, the outage is written as the unchecked pair, and on a re-check,
+     * which finds a row already standing, NOTHING IS WRITTEN AT ALL. Clearing a verification
+     * because the vendor could not be reached destroys the only record anywhere that this
+     * connection was ever checked, and the date beside it, on the word of an event that says
+     * nothing about the key. See {@link composioConnections.probeAction}.
+     *
      * WHAT THE PAIR SEPARATES IS A CHECKED CONNECTION FROM AN UNCHECKED ONE, and never one KIND of
      * connection from another. Which kind a row is comes from the app's own `auth_scheme`, which
      * the settings page branches on first; this column says only that somebody established the
@@ -288,8 +297,25 @@ export const composioConnections = pgTable(
      * NULL MEANS NO ACTION WAS SPENT, WHICH IS NOT THE SAME AS UNCHECKED. Read beside `verified` it
      * says which:
      *
-     *   null, not verified   — nothing was tried. The app published nothing safe to spend a key on
-     *                          at the moment of the check. A fact about the app, not about the key.
+     *   null, not verified   — nothing was tried, so nothing is known about the key. EITHER the app
+     *                          published nothing safe to spend one on at the moment of the check,
+     *                          OR a check was attempted and could not be made — Composio
+     *                          unreachable, a socket closed, an answer `@composio/core` could not
+     *                          parse. A fact about the app or about the vendor's availability, and
+     *                          in neither case about the key.
+     *
+     *                          THE OUTAGE WAS NOT ALWAYS HERE, and where it used to land is the
+     *                          reason this clause is spelled out. `callTool` answers with a result
+     *                          rather than throwing, so every failure it has wears `isError`, and
+     *                          the probe read that as the vendor's verdict: an outage was written
+     *                          down as the FOURTH state below — the accusation — while the connect
+     *                          path deleted the account somebody had just made and told them their
+     *                          key was refused. An unreachable vendor is not a fifth state and has
+     *                          no column of its own, because the row records what is KNOWN about a
+     *                          connection and an outage establishes nothing: the honest record is
+     *                          the mildest pair, and the trail carries the attempt. See
+     *                          {@link BrokeredProbe} in `plugins/store.ts` for the four answers a
+     *                          check can reach and which of them may be written here.
      *   null, verified       — a CONSENT connection. The vendor's own yes at the end of its own
      *                          screen is the evidence, and no call was ever made against the
      *                          account, so there is no action to name and there never will be.
@@ -299,6 +325,14 @@ export const composioConnections = pgTable(
      *   a name, verified     — it ran in this person's account and the vendor took the key.
      *   a name, not verified — it ran and the vendor refused the key, and the account it ran in is
      *                          still standing. A live account with a bad key behind it.
+     *
+     *                          AND ONLY A CALL THE VENDOR ANSWERED MAY WRITE IT. This pair is an
+     *                          accusation — the settings page draws it as "your key was checked and
+     *                          rejected, disconnect it" — so the name is withheld from every
+     *                          outcome that cannot be shown to have run in the account. That is
+     *                          structural rather than a rule anybody has to remember:
+     *                          {@link BrokeredProbe} carries no action name on the unreachable
+     *                          outcome, so the writer has none to record.
      *
      * AND NULL ON A ROW WRITTEN BEFORE THIS COLUMN EXISTED, which is the same null and deliberately
      * so. No backfill is possible or wanted: what a check spent in March is not recoverable, and
