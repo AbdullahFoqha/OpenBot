@@ -91,8 +91,52 @@ export type RecordedScheme = FieldScheme | ConsentScheme;
  * where the vendor's yes IS a verification — so a column nobody could read was writing a verdict
  * about evidence nobody had, on every page load. A caller that cannot tell the third answer from
  * the second has no way to fail closed, because it never learns that there was nothing to read.
+ *
+ * WRITTEN AS A ROSTER FOR {@link FIELD_SCHEME_NAMES}' REASON, AND FOR A SECOND ONE. The first is
+ * that file's: one list, read by the type and by everything that has to enumerate the members, so
+ * the two cannot come apart. The second is what {@link Decides} is for — a hand-written union is
+ * something a fourth member can be added to in one line, and NOTHING anywhere then fails, because
+ * every consumer of this vocabulary reads it with an `if` chain and an `if` chain has no opinion
+ * about the answers it was not written for. The roster is what the witnesses at those consumers are
+ * checked against.
  */
-export type SchemeKind = "key" | "consent" | "unreadable";
+export const SCHEME_KINDS = ["key", "consent", "unreadable"] as const;
+
+export type SchemeKind = (typeof SCHEME_KINDS)[number];
+
+/**
+ * A CONSUMER'S ANSWER FOR EVERY MEMBER OF A CLOSED VOCABULARY, CHECKED WHERE IT IS WRITTEN DOWN.
+ *
+ * Type-only and erased entirely: `Answers` is returned unchanged, so an alias declared through this
+ * is the object type it was given and nothing reaches the emitted JavaScript. What it buys is the
+ * constraint — `Answers extends Record<Vocabulary, string>` is checked at the point the alias names
+ * its members, so a vocabulary that gains a member fails at TS2344 on every declaration that does
+ * not name the new one, and the error names the missing member.
+ *
+ * THE PROBLEM IT SOLVES IS THAT `if` CHAINS CANNOT BE EXHAUSTIVE HERE. The usual witness is a
+ * `never`-typed binding in a final `else`, and it needs the chain to narrow the value down to
+ * nothing — which none of these consumers does: they branch on ONE member (`kind === "consent"`,
+ * `kind !== "key"`) and then on something else entirely, so there is no position where the compiler
+ * has the vocabulary narrowed away. Three rounds of review have now each taught one consumer about
+ * one member and left an adjacent one standing. A declaration that must name every member is the
+ * check that an `if` chain cannot be made to carry: it sits beside the branch, it says in words
+ * what that branch answers for each member, and it is the thing that reddens when a fourth arrives.
+ *
+ * THE VALUE OF EACH KEY IS A SENTENCE AND IS READ BY A PERSON, not by the compiler — what is
+ * enforced by default is that a key EXISTS for every member. The sentence is what tells the next
+ * reader whether the branch beside it still does what the roster claims, and what the table in
+ * `tests/composio-connection-kinds.test.ts` enumerates cell by cell.
+ *
+ * `Value` NARROWS THAT WHERE THE ANSWERS ARE THEMSELVES A CLOSED SET, which is what a roster
+ * spanning two vocabularies needs: the keys are one vocabulary and the values are the other, and
+ * free text on either side would let the seam drift in the direction the roster exists to pin.
+ * Defaulted to `string`, so a roster whose answers are prose says nothing about them.
+ */
+export type Decides<
+  Vocabulary extends string,
+  Answers extends Record<Vocabulary, Value>,
+  Value extends string = string,
+> = Answers;
 
 /** {@link SchemeKind} for a value read out of the column. */
 export function schemeKind(scheme: string | null): SchemeKind {

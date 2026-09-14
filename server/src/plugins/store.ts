@@ -49,6 +49,7 @@ import {
   BrokerRefusalError,
   BrokerUnconfiguredError,
   type ComposioBroker,
+  type Decides,
   isFieldScheme,
   type RecordedScheme,
   type SchemeKind,
@@ -314,6 +315,83 @@ export type BrokeredProbe =
       attempted: string;
       sentence: string;
     };
+
+/**
+ * The four outcomes as a ROSTER, which is what anything enumerating them is checked against.
+ *
+ * A union is a thing a fifth member can be added to in one line with nothing anywhere failing:
+ * every reader of this vocabulary asks `probed.outcome === "refused"` or `=== "unreachable"`, and a
+ * chain of equality tests has no opinion about the answer it was not written for. `unreachable` is
+ * itself the proof — it was added in round two and the screen that draws these outcomes went on
+ * rendering it with the sentence written for a different case. See {@link Decides}.
+ *
+ * PINNED TO THE UNION IN BOTH DIRECTIONS. `satisfies` holds this list inside the union, so a name
+ * misspelled here fails; {@link _ProbeRosterNamesTheWholeUnion} holds the union inside this list, so
+ * a member added to the union and not to this roster fails. Neither direction is worth having on its
+ * own: the pair is what makes the roster a restatement that cannot drift.
+ *
+ * SO A FIFTH OUTCOME COSTS TWO STEPS AND CANNOT SKIP EITHER. Adding it to the union fails `tsc`
+ * here and at every consumer's `Decides<…>` roster; adding it here to satisfy that then fails the
+ * table in `tests/composio-connection-kinds.test.ts`, which reads its rows off this list and has no
+ * cell for the new name. The compiler settles what must decide and the table settles what it does.
+ */
+export const BROKERED_PROBE_OUTCOMES = [
+  "nothing",
+  "answered",
+  "refused",
+  "unreachable",
+] as const satisfies readonly BrokeredProbe["outcome"][];
+
+/** The other direction of {@link BROKERED_PROBE_OUTCOMES}' pin. Type-only; erased entirely. */
+type _ProbeRosterNamesTheWholeUnion = Decides<
+  BrokeredProbe["outcome"],
+  Record<(typeof BROKERED_PROBE_OUTCOMES)[number], string>
+>;
+
+/**
+ * THE FOUR STATES A CONNECTION ROW MAY BE LEFT IN, named so the pair can be enumerated.
+ *
+ * `verified` and `probe_action` are one fact recorded in two columns, and
+ * {@link composioConnections.probeAction} enumerates the four readings of that pair in prose. Prose
+ * is what the client then modelled as three — the outage and the never-checked case share the
+ * mildest pair, and the screen drew one of them with the other's sentence. This is the same four
+ * with names, so a consumer that has to decide on them can be held to naming all four.
+ *
+ * NOT A COLUMN, NEVER WRITTEN ANYWHERE, AND NOT EXPORTED. The row carries the pair; this is the
+ * reading of it, and its one job is to be the value type {@link _ProbeOutcomeLeaves} is checked
+ * against.
+ *
+ *   `unchecked` — null probe, not verified. Nothing was tried, so nothing is known about the key.
+ *   `consented` — null probe, verified. A consent connection; the vendor's own yes is the evidence.
+ *   `checked`   — a named probe, verified. It ran in this account and the vendor took the key.
+ *   `refuted`   — a named probe, not verified. It ran, the vendor refused the key, the account
+ *                 still stands. The accusation, and the one state an operator has to act on.
+ */
+type RecordedCheck = "unchecked" | "consented" | "checked" | "refuted";
+
+/**
+ * WHICH OF THE FOUR A PROBE OUTCOME MAY EVER LEAVE BEHIND, the seam the two vocabularies meet at.
+ *
+ * Type-only and erased. It is a statement about {@link BrokeredProbe} rather than about any one
+ * writer, and it is here because `refuted` is the state the whole shape of that type exists to
+ * withhold: an outcome carrying no probe name has no name to record, so it cannot reach that pair
+ * even by mistake. A fifth outcome has to say which of the four it may leave behind before anything
+ * compiles, which is precisely the question that went unasked when `unreachable` was added.
+ *
+ * THE ANSWERS ARE NARROWED TO {@link RecordedCheck} rather than left as free text, which is what
+ * makes this a contract and not a comment: a state invented here that the schema's four do not
+ * include fails, and so does one of the four renamed on one side of the seam only.
+ */
+type _ProbeOutcomeLeaves = Decides<
+  BrokeredProbe["outcome"],
+  {
+    nothing: "untouched";
+    answered: "checked";
+    refused: "refuted";
+    unreachable: "untouched";
+  },
+  RecordedCheck | "untouched"
+>;
 
 export class PluginRefusedError extends Error {
   constructor(
@@ -1363,6 +1441,24 @@ export function createPluginStore(options: PluginStoreOptions) {
        * vendor.
        */
       if ((await brokeredAppScheme(access.toolkit)) === "NO_AUTH") return {};
+
+      /**
+       * WHAT THAT GATE ANSWERS FOR EACH KIND OF APP, WRITTEN DOWN BECAUSE THE LINE ABOVE DOES NOT.
+       *
+       * Type-only and erased; see {@link Decides}. This is the ONE scheme read in the file that
+       * compares a raw literal instead of asking {@link schemeKind}, so the vocabulary it decides on
+       * is not the vocabulary it reads — a fourth {@link SchemeKind} changes nothing here, and that
+       * is exactly what makes the omission invisible. The roster is what a fourth member fails
+       * against, and the sentences are what say which arm each kind really lands in today.
+       */
+      type _NoAuthGateDecides = Decides<
+        SchemeKind,
+        {
+          key: "demands a connection row, because a key app has an account to hold one";
+          consent: "demands a connection row for every consent scheme EXCEPT the NO_AUTH literal, which the line above exempts without asking the classifier";
+          unreadable: "demands a connection row, which is the closed direction and the right one";
+        }
+      >;
 
       /*
        * Keyed on the app the call will run in, which is the one the url names.
@@ -5121,6 +5217,31 @@ export function createPluginStore(options: PluginStoreOptions) {
        */
       const kind = await brokeredAppKind(input.toolkit);
 
+      /**
+       * WHAT THIS CONFIRM ANSWERS FOR EACH KIND OF APP, WRITTEN DOWN BECAUSE THE CHAIN CANNOT BE.
+       *
+       * Type-only and erased; see {@link Decides}. The chain below tests ONE member and then tests
+       * something else — `kind === "consent"`, then `!existing` — so there is no position where the
+       * compiler has this vocabulary narrowed away and nothing here would fail for a fourth member.
+       * This is the caller that WRITES, and it is the one that could not survive being wrong: it
+       * runs from an effect on mount, so whatever it decides for a member nobody named is decided
+       * again on every page load.
+       *
+       * `consent` IS THE CONTESTED CELL and is written as what the code does rather than as what it
+       * should do — the re-stamp of `verified_at` on an already-consented row is a live finding, and
+       * a roster that described the intended behaviour would be the prose contract this mechanism
+       * exists to replace. See the table in `tests/composio-connection-kinds.test.ts`, which
+       * declares that cell by name instead of asserting it.
+       */
+      type _ConfirmDecides = Decides<
+        SchemeKind,
+        {
+          key: "leaves an existing row exactly as it is; records a new one as unchecked";
+          consent: "records the vendor's yes as a verification, re-stamping verified_at on every mount";
+          unreadable: "treated as a key app is — nothing already recorded is overwritten";
+        }
+      >;
+
       if (kind === "consent") {
         // VERIFIED, BECAUSE A CONSENT SCREEN IS A VERIFICATION AND NOT A LESSER KIND OF ONE. The
         // vendor has just answered that this person's account is attached, which is the same
@@ -5290,6 +5411,32 @@ export function createPluginStore(options: PluginStoreOptions) {
       // the same reasoning the connection gate in `connectionTokenFor` is keyed on, and for the
       // sharper version of the same stake: a row called `gmail` at `composio://slack` would have
       // somebody's Slack key attached to a scheme read off Gmail's row.
+      /**
+       * WHAT THIS CONNECT ANSWERS FOR EACH KIND OF APP, AND FOR EACH OUTCOME OF ITS OWN CHECK.
+       *
+       * Type-only and erased; see {@link Decides}. Two vocabularies meet in this one method — the
+       * scheme decides whether it will run at all, and {@link BrokeredProbe} decides what the run
+       * leaves behind — and each is read here by an equality test that a new member would sail
+       * past. `isFieldScheme` is asked rather than {@link schemeKind}, so the two answers that are
+       * not `key` reach one refusal by elimination; the roster is what says so out loud.
+       */
+      type _ConnectWithFieldsDecides = Decides<
+        SchemeKind,
+        {
+          key: "connects, then checks the key it was just handed";
+          consent: "refuses — not an app this deployment connects with values somebody types";
+          unreadable: "the same refusal, reached by elimination rather than by decision";
+        }
+      >;
+      type _ConnectWithFieldsRecords = Decides<
+        BrokeredProbe["outcome"],
+        {
+          nothing: "the account stands, recorded unchecked with a null probe";
+          answered: "the account stands, recorded verified under the probe's name";
+          refused: "the account it just made is withdrawn, and the press refused";
+          unreachable: "the account stands, recorded unchecked, with the attempt on the trail";
+        }
+      >;
       const authScheme = await brokeredAppScheme(input.toolkit);
       if (!isFieldScheme(authScheme)) {
         throw new BrokerRefusalError(
@@ -5659,6 +5806,32 @@ export function createPluginStore(options: PluginStoreOptions) {
       // re-check on Gmail's scheme. Anything but a key refuses, a scheme nothing here can read
       // included — there is no key recorded to re-check, and the sentence below is the same one
       // either way.
+      /**
+       * WHAT THIS RE-CHECK ANSWERS FOR EACH KIND OF APP, AND FOR EACH OUTCOME OF THE CHECK.
+       *
+       * Type-only and erased; see {@link Decides}. `!== "key"` is a boolean read of a three-member
+       * vocabulary: it happens to fail closed for both of the other two today, which is why nothing
+       * has gone wrong here yet and also why a fourth member would inherit that answer without
+       * anybody choosing it. The probe roster below is the vocabulary this method reads FOUR ways,
+       * and it is the one that has already been added to once.
+       */
+      type _RecheckDecides = Decides<
+        SchemeKind,
+        {
+          key: "spends a call against the key this deployment holds";
+          consent: "refuses — there is no key here to re-check";
+          unreadable: "the same refusal, which is the closed direction";
+        }
+      >;
+      type _RecheckRecords = Decides<
+        BrokeredProbe["outcome"],
+        {
+          nothing: "writes nothing and files nothing; answers the held row beside a null probe";
+          answered: "records verified under the probe's name, and files the check";
+          refused: "records unchecked under the probe's name, files the check, then refuses";
+          unreachable: "writes nothing and files nothing; refuses with Composio's own sentence";
+        }
+      >;
       if ((await brokeredAppKind(input.toolkit)) !== "key") {
         throw new PluginRefusedError(
           `${input.toolkit} is not an app this deployment holds a key for, so there is nothing here to re-check. It was connected at ${input.toolkit}'s own sign-in screen, and if it has stopped working, disconnecting it on the Plugins page and connecting it again is what fixes it.`,
@@ -5912,6 +6085,23 @@ export function createPluginStore(options: PluginStoreOptions) {
        * to: the field below is a claim that this deployment asked the vendor to withdraw something,
        * and an app it cannot say holds a key is one whose withdrawal it has to report as asked.
        */
+      /**
+       * WHAT THIS DISCONNECT CLAIMS ON THE TRAIL FOR EACH KIND OF APP.
+       *
+       * Type-only and erased; see {@link Decides}. `=== "key"` collapses three answers into two,
+       * and the collapse is deliberate here rather than accidental: the field below is a claim that
+       * this deployment asked the VENDOR to withdraw something, and an app it cannot say holds a key
+       * is one whose withdrawal it has to report as asked. That is a decision about `unreadable`,
+       * and this roster is where it is written down as one.
+       */
+      type _DisconnectDecides = Decides<
+        SchemeKind,
+        {
+          key: "claims no vendor revocation — nothing at the vendor holds this key";
+          consent: "reports the vendor's own withdrawal as asked for";
+          unreadable: "reports it as asked for too, which is the claim that cannot be too weak";
+        }
+      >;
       const fieldScheme = (await brokeredAppKind(input.toolkit)) === "key";
 
       // Whether there was an account to end at all, which is what decides if anybody was

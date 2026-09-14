@@ -10,7 +10,9 @@ import {
   brokerReturnUrl,
   brokerSentence,
   type ComposioBroker,
+  type Decides,
   isFieldScheme,
+  type SchemeKind,
 } from "./broker";
 import { CATALOGUE, catalogueEntry } from "./catalogue";
 import { toolkitOf, vendorSentence } from "./composio";
@@ -1015,6 +1017,32 @@ export function createPluginRoutes(
        * carries somebody's own credential.
        */
       const authScheme = row.authScheme;
+
+      /**
+       * WHAT THIS FORK ANSWERS FOR EACH KIND OF APP, WRITTEN DOWN BECAUSE THE FORK DOES NOT.
+       *
+       * Type-only and erased; see {@link Decides} in `./broker`. This file imports
+       * {@link isFieldScheme} and NOT `schemeKind`, and it compares one raw literal beside it — so
+       * the fork below is two tests and a fall-through, and the fall-through is the consent arm.
+       * That arm mints a link at Composio, which is a real act performed on behalf of an answer
+       * nobody decided. A fourth {@link SchemeKind} would inherit it in silence, which is what this
+       * roster is here to stop: it has to name every member, and the compiler says which one is
+       * missing.
+       *
+       * `unreadable` IS THE CONTESTED CELL and is written as what the code does rather than as what
+       * it should do: the store below it already fails closed on a scheme nothing can read, and this
+       * route above it still reaches consent by elimination. That is a live finding, and a roster
+       * describing the intended behaviour would be the prose contract this mechanism replaces. See
+       * the table in `tests/composio-connection-kinds.test.ts`, which declares the cell by name.
+       */
+      type _ConnectForkDecides = Decides<
+        SchemeKind,
+        {
+          key: "answers with the form the app publishes, and connects what is typed into it";
+          consent: "mints a link at Composio, except for the NO_AUTH literal, which is refused above with the fact about it";
+          unreadable: "mints a link at Composio too, reached by elimination rather than by decision";
+        }
+      >;
 
       /*
        * AN APP THAT NEEDS NO CREDENTIAL IS ANSWERED WITH WHAT IS TRUE OF IT, AND ASKS COMPOSIO
