@@ -112,6 +112,76 @@ const twinId = `duplicate-${suite}`;
  */
 const schemeTwinId = `zz-twin-${suite}`;
 /**
+ * THE APP WHOSE TWO ROWS THE DATABASE AND JAVASCRIPT ORDER DIFFERENTLY, which is the only fixture
+ * here that can tell one rule from the other.
+ *
+ * Every other pair above is spelled in ASCII, and for ASCII the two orderings agree: PostgreSQL's
+ * `C` collation compares the UTF-8 BYTES and JavaScript's `<` compares UTF-16 CODE UNITS, and below
+ * U+0080 those are the same numbers in the same order. So a pair like `duplicate-`/`revocable-`
+ * proves a rule was applied and cannot say WHICH of the two rules it was — a reading that picks the
+ * lower id in SQL and a reading that picks it in JavaScript both answer `duplicate-`.
+ *
+ * The two disagree the moment a character above the BMP is involved. `U+FFFD` encodes as the bytes
+ * `EF BF BD` and as the single code unit `FFFD`; `U+1F600` encodes as the bytes `F0 9F 98 80` and
+ * as the surrogate pair `D83D DE00`. By bytes the first is smaller — `EF` precedes `F0` — and by
+ * code units the second is, because `D83D` precedes `FFFD`. So these two ids are ordered one way by
+ * the database and the other way by the language, and a listing that answers with either one of
+ * them is saying which rule it used.
+ *
+ * WHICH IS THE DEFECT, AND NOT A CURIOSITY ABOUT EMOJI. A deployment is free to run a collation
+ * that is not `C` — a linguistic one reorders case and punctuation against code-point order for
+ * perfectly ordinary ASCII ids — and the same disagreement follows. The pair below is simply one
+ * that is guaranteed to expose it on the collation this suite actually runs against, so the
+ * assertion does not quietly become vacuous on a development machine. The test asserts the
+ * disagreement itself before asserting the answer, so a database that ordered this pair the way
+ * JavaScript does says so out loud rather than passing on a fixture that has stopped distinguishing.
+ */
+const orderedToolkit = `ordered-${suite}`;
+/** The row the DATABASE orders first at that app's url: fewer bytes, and a larger first code unit. */
+const byteFirstId = `a\uFFFD-${suite}`;
+/** The row JAVASCRIPT orders first at the same url: a surrogate pair, and larger bytes. */
+const unitFirstId = `a\u{1F600}-${suite}`;
+/**
+ * THE APP ENABLED OVER A ROW THAT ALREADY ANSWERS FOR IT, which is what a write has to find.
+ *
+ * `addBrokeredApp` names the row it writes `composio-<slug>`, and every reader finds the app's row
+ * by its URL instead. Where a second row at that url sorts first, the readers are reading a
+ * different row from the one the enable wrote its `auth_scheme` onto — so the app is enabled with a
+ * key and reads back as a consent app. Its own name rather than {@link enabledToolkit}'s for the
+ * reason {@link rekeyedToolkit} has one: this test enables an app and the tests that own that slug
+ * count the trail rows under it.
+ */
+const answeringToolkit = `answering-${suite}`;
+/** What `addBrokeredApp` spells that app's row, which is NOT the row that answers for the app. */
+const answeringId = `composio-${answeringToolkit}`;
+/** The row that does answer for it: at the same url, and sorting before `composio-`. */
+const answeringTwinId = `aa-answering-${suite}`;
+/**
+ * THE APP WHOSE ROW RECORDS NO SCHEME AT ALL, which is neither a key app nor a consent one.
+ *
+ * A brokered row with a null `auth_scheme` is an ordinary state rather than a corrupt one: nothing
+ * backfills a row somebody inserted by hand, a restored row carries what it was restored with, and
+ * a second row standing at an app's url — the shape every fixture above is about — was very likely
+ * never the row an enable wrote a scheme onto. The column's own documentation says a null is a row
+ * that is not brokered, and that is true of every row this deployment WRITES; it is not true of
+ * every row this deployment READS.
+ *
+ * Inserted by hand for that reason, with `provenance` composio and nothing beside it.
+ */
+const unschemedToolkit = `unschemed-${suite}`;
+/** Its row's id, spelled the way Add spells one, so nothing here turns on the id being unusual. */
+const unschemedId = `composio-${unschemedToolkit}`;
+/** The action a check spent on that app before its scheme stopped being readable. */
+const unschemedProbeAction = "UNSCHEMED_GET_ME";
+/**
+ * THE SECOND ROW AT {@link toolkit}'S URL THAT CLAIMS THE APP NEEDS NO ACCOUNT.
+ *
+ * `NO_AUTH` is the one scheme that takes the per-person gate off a brokered call, and the row it is
+ * read off decides for every call dialled through it. Named to sort AFTER the app's own row, so the
+ * row that answers for the app is not this one and the two readings differ.
+ */
+const noAuthTwinId = `zz-noauth-${suite}`;
+/**
  * A SECOND app the same person connected, which is what makes an offboarding's answer per-app.
  *
  * Spelled as an extension of {@link toolkit} rather than as an independent name, so that `toolkit`
@@ -282,6 +352,9 @@ const ownedToolkits = [
   pinnedToolkit,
   undoneToolkit,
   recheckedToolkit,
+  orderedToolkit,
+  answeringToolkit,
+  unschemedToolkit,
 ];
 /**
  * An app this file does NOT own, standing in for another run's fixture — or another file's.
@@ -687,6 +760,12 @@ async function clean() {
         pinnedId,
         undoneId,
         recheckedId,
+        byteFirstId,
+        unitFirstId,
+        answeringId,
+        answeringTwinId,
+        unschemedId,
+        noAuthTwinId,
       ]),
     );
   await database
@@ -710,6 +789,12 @@ async function clean() {
         pinnedId,
         undoneId,
         recheckedId,
+        byteFirstId,
+        unitFirstId,
+        answeringId,
+        answeringTwinId,
+        unschemedId,
+        noAuthTwinId,
       ]),
     );
   await database
@@ -743,7 +828,16 @@ async function appsHeld(): Promise<string[]> {
   return rows.map((row) => row.id);
 }
 
-/** The app's row and its one granted action. Separated from the Bot, so a re-add can reuse the Bot. */
+/**
+ * The app's row and its one granted action. Separated from the Bot, so a re-add can reuse the Bot.
+ *
+ * `authScheme` IS SPELLED OUT, as `addBrokeredApp` spells it for a consent app, because this app IS
+ * a consent app in every test that uses it — the confirm test below asserts the verdict a consent
+ * connection earns. A hand-inserted row left the column null, and a null is a scheme this
+ * deployment cannot read rather than a consent one: see {@link unschemedToolkit} for what the
+ * confirm now does with one, and `mcp_servers.auth_scheme` for why a brokered row is allowed to
+ * carry it. A fixture that says nothing cannot assert what is done about apps that say `OAUTH2`.
+ */
 async function addApp() {
   await database.insert(mcpServers).values({
     id: toolkit,
@@ -751,6 +845,7 @@ async function addApp() {
     vendor: "Composio",
     url: `composio://${toolkit}`,
     provenance: "composio",
+    authScheme: "OAUTH2",
   });
   await database.insert(mcpTools).values({
     serverId: toolkit,
@@ -2753,6 +2848,333 @@ test("a key typed at a consent app is refused before the vendor is handed anythi
   expect(schemesSent).toEqual([]);
   // And no row was written, so nothing on any screen claims this person has an account here.
   expect(await connectedToolkitsFor(askerId)).toEqual([]);
+});
+
+/**
+ * AND THE ROW THE LISTING NAMES IS THE ONE THE DATABASE ORDERS FIRST, NOT THE ONE THIS LANGUAGE DOES.
+ *
+ * CRITERION. With two `mcp_servers` rows at one app's url whose ids the database and JavaScript
+ * order differently, the connection is listed under the database's answer — the same answer every
+ * other read of the app takes, because every other read of the app takes it from SQL.
+ *
+ * REASON. "The lower id answers" is one sentence and was two implementations. `brokeredAppRow` —
+ * which the probe, the re-check, the connect, the confirm and the disconnect all resolve the app
+ * through — asks the database for it, `order by id`, under whatever collation that database is
+ * running. The listing picked its own with a JavaScript `<` over the rows it had fetched, which is
+ * UTF-16 code unit order and nothing else. Two orderings of one rule agree until they do not, and
+ * where they part the page draws an app under one server id while the Re-check button beside it,
+ * the probe behind that button and the scheme that decides whether the button appears at all are
+ * every one of them about the OTHER row — which is the precise defect the single read was
+ * introduced to end, arrived at through the collation instead of through the query.
+ *
+ * THE FIXTURE IS A PAIR THE TWO REALLY DISAGREE ABOUT, and the disagreement is asserted before the
+ * answer is. See {@link byteFirstId}: an ASCII pair cannot fail this test under either rule, so a
+ * test written with one would have passed before the fix and after it.
+ */
+test("a connection is listed under the row the database orders first", async () => {
+  // Inserted in the order that puts JavaScript's answer physically first as well, so neither the
+  // scan order nor the language's order is the one the assertion expects.
+  await database.insert(mcpServers).values([
+    {
+      id: unitFirstId,
+      title: "Ordered App, as one row spells it",
+      vendor: "Composio",
+      url: `composio://${orderedToolkit}`,
+      provenance: "composio",
+    },
+    {
+      id: byteFirstId,
+      title: "Ordered App, as the other spells it",
+      vendor: "Composio",
+      url: `composio://${orderedToolkit}`,
+      provenance: "composio",
+    },
+  ]);
+  await database
+    .insert(composioConnections)
+    .values({ toolkit: orderedToolkit, userId: askerId });
+
+  // THE DATABASE'S OWN ANSWER, asked the way `brokeredAppRow` asks it. Read rather than written
+  // down, so this expectation is the rule under the collation actually running and not a guess
+  // about one.
+  const [answering] = await database
+    .select({ id: mcpServers.id })
+    .from(mcpServers)
+    .where(eq(mcpServers.url, `composio://${orderedToolkit}`))
+    .orderBy(asc(mcpServers.id))
+    .limit(1);
+  // And the two rules disagree about this pair, which is what gives the assertion below its teeth.
+  // `sort` with no comparator is the JavaScript ordering the listing used to apply.
+  const [unitFirst] = [byteFirstId, unitFirstId].sort();
+  expect(answering?.id).not.toBe(unitFirst);
+
+  const listed = await store.brokeredConnectionsFor(askerId);
+  expect(listed.map((row) => row.serverId)).toEqual([answering?.id]);
+});
+
+/**
+ * ENABLING AN APP RECORDS ITS SCHEME ON THE ROW THAT ANSWERS FOR THE APP.
+ *
+ * CRITERION. With a row already standing at an app's url that sorts before the one Add mints,
+ * enabling that app as a KEY app leaves the deployment reading it as a key app: the scheme lands on
+ * the row every reader resolves the app to, and the re-check that gates on it runs.
+ *
+ * REASON. `addBrokeredApp` writes `composio-<slug>` and then wrote the scheme back onto that same
+ * composed id, while `connectBrokeredWithFields`, `recheckBrokeredConnection`,
+ * `disconnectBrokered` and `confirmBrokeredConnection` all find the app by its URL and read the
+ * scheme off the row that answers there. Where those differ — which is the ordinary
+ * two-rows-at-one-url state, not an exotic one — the write and the reads are about different rows:
+ * the app was enabled with a key, every reader says consent, and the person who types their key is
+ * refused in words about a sign-in screen that does not exist for this app. A writer that does not
+ * write where the readers read has not recorded anything.
+ *
+ * ASSERTED THROUGH A READER AS WELL AS OFF THE COLUMN, because the column alone would pass for a
+ * write that landed on the right row by coincidence of ordering, and what this is about is the two
+ * agreeing.
+ */
+test("enabling an app records its scheme where the readers read it", async () => {
+  useAnsweringClient();
+  // The row that already answers for the app: at its url, sorting before the `composio-` id Add is
+  // about to mint, and recorded as the consent app this deployment used to create for everything.
+  await database.insert(mcpServers).values({
+    id: answeringTwinId,
+    title: "Answering App, as it was recorded before",
+    vendor: "Composio",
+    url: `composio://${answeringToolkit}`,
+    provenance: "composio",
+    authScheme: "OAUTH2",
+  });
+
+  await store.addBrokeredApp({
+    slug: answeringToolkit,
+    title: "Answering App",
+    by: admin,
+    connection: { kind: "fields", authScheme: "API_KEY" },
+  });
+
+  const [answering] = await database
+    .select({ authScheme: mcpServers.authScheme })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, answeringTwinId));
+  expect(answering.authScheme).toBe("API_KEY");
+
+  // AND THE READER AGREES, which is the whole point of the column landing there. A person holding a
+  // key for this app may re-check it; the pre-fix reading refuses that press in a sentence about a
+  // sign-in screen nobody used.
+  await database.insert(composioConnections).values({
+    toolkit: answeringToolkit,
+    userId: askerId,
+    verified: false,
+  });
+  const answer = await store.recheckBrokeredConnection({
+    toolkit: answeringToolkit,
+    userId: askerId,
+  });
+  // Null because the app publishes nothing safe to spend a key on, which is the honest answer and
+  // not a refusal: what is being asserted is that the press was admitted at all.
+  expect(answer.probe).toBeNull();
+  expect(answer.verified).toBe(false);
+});
+
+/**
+ * A CONFIRM WRITES NO VERDICT FOR AN APP WHOSE SCHEME IT CANNOT READ.
+ *
+ * CRITERION. Against an app whose row records no scheme, a confirm leaves a connection that is
+ * already here exactly as it is — the action a check spent, the verdict it reached, the date it
+ * reached it — and gives a person with no row the UNCHECKED row that is the gate, rather than a
+ * verified one.
+ *
+ * REASON. The confirm asked one question of the scheme — is this a key app — and read every other
+ * answer, a null included, as consent. Consent is the one scheme where the vendor's own yes IS the
+ * check, so that reading wrote `verified: true` with a fresh `verified_at` and a null probe, from
+ * an effect that runs on every page load. For a row whose scheme is simply not readable that is a
+ * claim about evidence nobody has: a null says the deployment does not know how this app connects,
+ * and "I do not know" is not "the vendor verified them today". The two other readers of the same
+ * column already treat a null as not-a-key — `recheckBrokeredConnection` refuses the press and
+ * `disconnectBrokered` claims no revocation — so the null was failing closed in both of those and
+ * open in the one place that WRITES, which is the one place it could do damage.
+ *
+ * AND THE NULL IS REACHABLE, which is why this is a test and not a hypothetical. See
+ * {@link unschemedToolkit}: a hand-inserted row, a restored one, or the second row standing at an
+ * app's url that no enable ever wrote a scheme onto — the last of which is the same duplicate state
+ * every fixture above is about.
+ *
+ * BOTH HALVES IN ONE TEST, because failing closed has to leave the gate standing. Writing nothing
+ * at all would be the other way to pass the first half, and it would take away the row a brokered
+ * call is permitted by and Disconnect works off.
+ */
+test("a confirm writes no verdict for an app whose scheme it cannot read", async () => {
+  useAnsweringClient();
+  // A brokered row with nothing in its scheme column, which is what this deployment reads rather
+  // than what it writes. See {@link unschemedToolkit}.
+  await database.insert(mcpServers).values({
+    id: unschemedId,
+    title: "Unschemed App",
+    vendor: "Composio",
+    url: `composio://${unschemedToolkit}`,
+    provenance: "composio",
+  });
+  // The worst of the four states, and the one a mount-time write destroys most expensively: a
+  // named probe beside `verified: false` is "it ran, the vendor refused the key, and the account is
+  // still standing".
+  await database.insert(composioConnections).values({
+    toolkit: unschemedToolkit,
+    userId: askerId,
+    verified: false,
+    probeAction: unschemedProbeAction,
+  });
+
+  // THE PAGE LOAD. Nothing a person did.
+  expect(
+    await store.confirmBrokeredConnection({
+      toolkit: unschemedToolkit,
+      userId: askerId,
+    }),
+  ).toEqual({ connected: true });
+
+  const [after] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, unschemedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(after.probeAction).toBe(unschemedProbeAction);
+  expect(after.verified).toBe(false);
+  expect(after.verifiedAt).toBeNull();
+
+  // AND THE GATE IS STILL WRITTEN FOR SOMEBODY WHO HAS NO ROW. The vendor holds their account, so
+  // there has to be a row here — `composio_connections` is the whole of the permission for a
+  // brokered call — and it says what is true of it: nothing was checked.
+  expect(
+    await store.confirmBrokeredConnection({
+      toolkit: unschemedToolkit,
+      userId: leaverId,
+    }),
+  ).toEqual({ connected: true });
+
+  const [made] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, unschemedToolkit),
+        eq(composioConnections.userId, leaverId),
+      ),
+    );
+  expect(made.verified).toBe(false);
+  expect(made.verifiedAt).toBeNull();
+  expect(made.probeAction).toBeNull();
+
+  // Neither confirm spent anything of the app's: a confirm asks the vendor and makes no call.
+  expect(reached).toEqual([]);
+});
+
+/**
+ * AND EVERY SURFACE THAT SAYS HOW AN APP CONNECTS SAYS THE SAME THING ABOUT IT.
+ *
+ * CRITERION. With two rows at one app's url recorded under different schemes, the narrow read the
+ * connect route makes and the listing the admin and settings pages draw both answer with the
+ * scheme of the row that ANSWERS for the app — for either row's id.
+ *
+ * REASON. Both of those fields end at a fork about this person's next press.
+ * `brokered-account-row.tsx` draws a consent button, a form, or "nothing to connect" out of the
+ * listing's `authScheme`, and the connect route forks the same three ways on `serverAddress`'s. The
+ * press then lands in {@link connectBrokeredWithFields}, which resolves the app by its URL and
+ * reads the scheme off the row that answers there. Reported off each row's own column those were
+ * two readings of one fact: a form drawn from the row a page was opened on and a submission refused
+ * by the other row's scheme, in a sentence telling somebody to connect the app the way it asks for
+ * — over an app they were asked exactly that way. The id and the title stay the row's own; how the
+ * APP connects has one answer.
+ */
+test("how an app connects is answered the same way for either of its rows", async () => {
+  // The row that answers: at the app's url, sorting first, recorded as a key app.
+  await database.insert(mcpServers).values({
+    id: answeringTwinId,
+    title: "Answering App",
+    vendor: "Composio",
+    url: `composio://${answeringToolkit}`,
+    provenance: "composio",
+    authScheme: "API_KEY",
+  });
+  // And the row an enable minted later, under the scheme this deployment used to create for
+  // everything. It is the row a page is opened on, and it is not the row that answers.
+  await database.insert(mcpServers).values({
+    id: answeringId,
+    title: "Answering App",
+    vendor: "Composio",
+    url: `composio://${answeringToolkit}`,
+    provenance: "composio",
+    authScheme: "OAUTH2",
+  });
+
+  expect((await store.serverAddress(answeringId))?.authScheme).toBe("API_KEY");
+  expect((await store.serverAddress(answeringTwinId))?.authScheme).toBe(
+    "API_KEY",
+  );
+
+  const listed = await store.listServers();
+  expect(listed.find((server) => server.id === answeringId)?.authScheme).toBe(
+    "API_KEY",
+  );
+  expect(
+    listed.find((server) => server.id === answeringTwinId)?.authScheme,
+  ).toBe("API_KEY");
+});
+
+/**
+ * AND WHETHER A CALL NEEDS A CONNECTION AT ALL IS THE APP'S QUESTION, NOT THE DIALLED ROW'S.
+ *
+ * CRITERION. A call through a row recorded `NO_AUTH` at the url of an app whose answering row is
+ * not `NO_AUTH` is refused for want of a connection, and nothing reaches the vendor.
+ *
+ * REASON. `connectionTokenFor` exempts a no-auth app from the per-person gate, because such an app
+ * has no account and no consent and so can never have a `composio_connections` row. It read that
+ * exemption off the row being dialled while the gate two lines under it looks the connection up by
+ * TOOLKIT — two halves of one decision, keyed on different things, and this half fails OPEN. A
+ * second row at a key app's url recorded `NO_AUTH` takes the gate off for every call dialled
+ * through it: the deployment's own Composio key runs the action, in the account of somebody who
+ * connected nothing, which is the single property the brokered connector exists to keep.
+ *
+ * NOTHING REACHED THE VENDOR IS HALF THE CRITERION. The refusal is only worth having if it happens
+ * before the call, which is where this gate sits and why it is not left to Composio to notice.
+ */
+test("a duplicate row recording no-auth does not take the gate off an app", async () => {
+  // The app as Add leaves it — consent, and nobody connected — plus the Bot that holds its action.
+  await seedApp({ connect: false });
+  useAnsweringClient();
+
+  // The other row at the same url, recorded as needing no account at all, with an action of its own
+  // for a Bot to be granted. Named to sort after the app's own row, so the row that answers is not
+  // this one.
+  await database.insert(mcpServers).values({
+    id: noAuthTwinId,
+    title: "Revocable App, as another row records it",
+    vendor: "Composio",
+    url: `composio://${toolkit}`,
+    provenance: "composio",
+    authScheme: "NO_AUTH",
+  });
+  await database.insert(mcpTools).values({
+    serverId: noAuthTwinId,
+    name: actionName,
+    description: "Fetch some items.",
+    effect: "read",
+    version: "20260903_00",
+  });
+  await store.grant("mcp", `${noAuthTwinId}/${actionName}`, botId, admin);
+
+  await expect(
+    store.callTool({
+      ref: `${noAuthTwinId}/${actionName}`,
+      args: {},
+      botId,
+      actorId: askerId,
+    }),
+  ).rejects.toThrow(/have not connected/i);
+  expect(reached).toEqual([]);
 });
 
 /**

@@ -50,6 +50,9 @@ import {
   BrokerUnconfiguredError,
   type ComposioBroker,
   isFieldScheme,
+  type RecordedScheme,
+  type SchemeKind,
+  schemeKind,
 } from "./broker";
 import {
   type CatalogueEntry,
@@ -1034,8 +1037,15 @@ export type PluginStoreOptions = {
   redirectUri?: string;
 };
 
-/** The literal recorded on the row, which is the scheme a later call must keep using. */
-function schemeFor(connection: BrokerConnection): string | null {
+/**
+ * The literal recorded on the row, which is the scheme a later call must keep using.
+ *
+ * TYPED AS {@link RecordedScheme} RATHER THAN `string`, so that what this writes and what
+ * {@link schemeKind} recognises are held to one set by the compiler. A literal spelled here that
+ * the reader does not know would be read as `unreadable` — a key app that connects nobody, or a
+ * consent app no confirm can verify — and nothing but this annotation would say so.
+ */
+function schemeFor(connection: BrokerConnection): RecordedScheme | null {
   switch (connection.kind) {
     case "consent":
       return "OAUTH2";
@@ -1256,11 +1266,12 @@ export function createPluginStore(options: PluginStoreOptions) {
       id: string;
       title: string;
       credentialId: string | null;
-      /**
-       * The scheme recorded when the app was enabled, which decides whether a brokered call needs a
-       * connection row at all. The vendor's own literal, never a {@link BrokerConnection} kind.
+      /*
+       * NO `authScheme` HERE, DELIBERATELY. The scheme that decides whether a brokered call needs a
+       * connection row is the APP'S, read through `brokeredAppScheme` below — and this row's own
+       * column is the near-miss that reading replaced. A field kept here for convenience would be
+       * the wrong answer sitting in the parameter list of the function that must not use it.
        */
-      authScheme: string | null;
     },
     entry: CatalogueEntry | null,
     actorId: string,
@@ -1332,8 +1343,26 @@ export function createPluginStore(options: PluginStoreOptions) {
        * The scheme is the one RECORDED when the app was enabled rather than a fresh read of the
        * catalogue: a vendor that re-labels an app must not turn a gate off underneath a deployment
        * that is already running.
+       *
+       * AND IT IS THE APP'S RECORDED SCHEME, NOT THIS ROW'S, WHICH IS THE SAME KEYING THE GATE
+       * BELOW ALREADY USES.
+       *
+       * CRITERION. Whether a brokered call needs a connection row is decided by the app the url
+       * names, out of the one row that answers for it — see {@link brokeredAppRow}.
+       *
+       * REASON. This read `row.authScheme`, the column on whichever row the call was dialled
+       * through, while the gate two lines down looks the connection up by TOOLKIT. Two rows may
+       * name one app, so the two halves of one decision were about different rows — and this half
+       * fails open: a duplicate row recording `NO_AUTH` at a key app's url skips the per-person gate
+       * entirely, and the deployment's own Composio key runs a call for somebody who connected
+       * nothing. The other direction merely refuses a call that could have gone through. A gate and
+       * its exemption have to be keyed on the same thing, and the gate's key is the app.
+       *
+       * ONE SMALL READ PER BROKERED CALL, which is the price of that. `mcp_servers` holds one row
+       * per connector on any deployment, and the call it guards is a network round trip to the
+       * vendor.
        */
-      if (row.authScheme === "NO_AUTH") return {};
+      if ((await brokeredAppScheme(access.toolkit)) === "NO_AUTH") return {};
 
       /*
        * Keyed on the app the call will run in, which is the one the url names.
@@ -2253,6 +2282,9 @@ export function createPluginStore(options: PluginStoreOptions) {
     return { row, entry, access: accessFor(row, entry) };
   }
 
+  /** What a row that answers for an app is asked for: which row it is, and how the app connects. */
+  type BrokeredAppRow = { id: string; authScheme: string | null };
+
   /**
    * The one `mcp_servers` row that answers for the app a url names: its id, and its scheme.
    *
@@ -2286,19 +2318,73 @@ export function createPluginStore(options: PluginStoreOptions) {
    */
   async function brokeredAppRow(
     toolkit: string,
-  ): Promise<{ id: string; authScheme: string | null } | null> {
-    const [app] = await database
-      .select({ id: mcpServers.id, authScheme: mcpServers.authScheme })
-      .from(mcpServers)
-      .where(eq(mcpServers.url, `composio://${toolkit}`))
-      .orderBy(asc(mcpServers.id))
-      .limit(1);
-    return app ?? null;
+  ): Promise<BrokeredAppRow | null> {
+    const url = `composio://${toolkit}`;
+    return (await brokeredAppRowsAt([url])).get(url) ?? null;
   }
 
-  /** {@link brokeredAppRow}'s scheme, for the four callers that ask only what the app is connected with. */
+  /**
+   * The same answer for several urls at once, and the ONE PLACE the ordering rule is written.
+   *
+   * THE RULE IS SQL'S `order by id` AND THE FIRST ROW SEEN PER URL, which is what
+   * {@link brokeredAppRow} asks for one app and what {@link brokeredConnectionsFor} and
+   * {@link listServers} ask for many. Those three had their own spellings of it, and one of them —
+   * the listing — spelled it as a JavaScript `<` over rows it had already fetched. That is UTF-16
+   * code unit order; this is the deployment's collation. They agree for ASCII on a `C` database and
+   * are free to disagree anywhere else, and where they disagreed the settings page named an app
+   * under one row while every read behind its buttons was about another. So the rule is a function
+   * and the callers have nothing left to re-derive.
+   *
+   * A URL WITH NO ROW IS SIMPLY ABSENT from the map, which is the null {@link brokeredAppRow}
+   * answers and the connection {@link brokeredConnectionsFor} drops: a person can hold an account
+   * at an app this deployment has since removed, and there is no row to name it by.
+   *
+   * EMPTY IN, EMPTY OUT AND NO QUERY, because `inArray` with no values is a statement no database
+   * needs to be asked.
+   */
+  async function brokeredAppRowsAt(
+    urls: string[],
+  ): Promise<Map<string, BrokeredAppRow>> {
+    const answering = new Map<string, BrokeredAppRow>();
+    if (urls.length === 0) return answering;
+    const rows = await database
+      .select({
+        id: mcpServers.id,
+        url: mcpServers.url,
+        authScheme: mcpServers.authScheme,
+      })
+      .from(mcpServers)
+      .where(inArray(mcpServers.url, urls))
+      .orderBy(asc(mcpServers.id));
+    for (const row of rows) {
+      if (!answering.has(row.url)) {
+        answering.set(row.url, { id: row.id, authScheme: row.authScheme });
+      }
+    }
+    return answering;
+  }
+
+  /** {@link brokeredAppRow}'s scheme, for the callers that ask only what the app is connected with. */
   async function brokeredAppScheme(toolkit: string): Promise<string | null> {
     return (await brokeredAppRow(toolkit))?.authScheme ?? null;
+  }
+
+  /**
+   * What that scheme decides, which is what every caller actually branches on.
+   *
+   * ONE CLASSIFICATION OVER ONE ROW, and the second half of what {@link brokeredAppRow} is for.
+   * That function ends the disagreement about WHICH ROW answers for an app; this one ends the
+   * disagreement about what its column MEANS. They were separate questions and were answered
+   * separately: four callers each asked {@link isFieldScheme} and treated everything else — a
+   * consent scheme, a literal from another deployment, a null — as one answer, and only three of
+   * them could survive being wrong about it. The confirm is the fourth, and it WRITES.
+   *
+   * SO THE THIRD ANSWER TRAVELS, rather than being flattened at the call site. See
+   * {@link SchemeKind}: `unreadable` is what a caller needs in order to fail closed, and a boolean
+   * cannot carry it.
+   */
+  async function brokeredAppKind(toolkit: string): Promise<SchemeKind> {
+    return schemeKind(await brokeredAppScheme(toolkit));
   }
 
   return {
@@ -2812,6 +2898,27 @@ export function createPluginStore(options: PluginStoreOptions) {
        *
        * With no connections there is no such dependence, so the rewrite is safe and useful — it is
        * how an operator picks up a vendor's change without removing and re-adding the app.
+       *
+       * AND IT IS WRITTEN ON THE ROW THAT ANSWERS FOR THE APP, WHICH IS NOT ALWAYS THE ONE THIS
+       * METHOD NAMED.
+       *
+       * CRITERION. After this call, the scheme {@link brokeredAppScheme} answers with for the app is
+       * the scheme this enable created its config as.
+       *
+       * REASON. The statement keyed on `id` — the `composio-<slug>` composed two dozen lines above —
+       * while every reader of this column finds the app by its URL and takes the row
+       * {@link brokeredAppRow} names. `mcp_servers.url` has no unique index, deliberately, so those
+       * two are allowed to be different rows, and where they are the write and the reads were about
+       * different rows: an app enabled with a key that every reader calls a consent app. What the
+       * person then meets is the connect form refusing them in a sentence about a sign-in screen
+       * that does not exist for this app, and a Re-check button that will not press. A writer keyed
+       * on a composed id has not recorded the fact; it has recorded it somewhere nothing looks.
+       *
+       * THE ROW IS RE-READ RATHER THAN ASSUMED, because the upsert above may have created it, found
+       * it, or landed beside an older row that sorts first — and which of those happened is exactly
+       * what decides the answer. `id` is the fallback for the unreachable case of a row this method
+       * has just written not being found at its own url, which would mean the insert above and the
+       * read here disagree about what was stored.
        */
       const connections = await database
         .select({ userId: composioConnections.userId })
@@ -2820,13 +2927,14 @@ export function createPluginStore(options: PluginStoreOptions) {
         .limit(1);
 
       if (connections.length === 0) {
+        const answering = await brokeredAppRow(input.slug);
         await database
           .update(mcpServers)
           .set({
             authScheme: schemeFor(input.connection),
             updatedAt: new Date(),
           })
-          .where(eq(mcpServers.id, id));
+          .where(eq(mcpServers.id, answering?.id ?? id));
       }
 
       await recordAuditEvent(auditStore, {
@@ -3574,6 +3682,27 @@ export function createPluginStore(options: PluginStoreOptions) {
         tools.map((tool) => `${tool.serverId}/${tool.name}`),
       );
 
+      /*
+       * HOW EACH APP CONNECTS, WHICH IS A FACT ABOUT THE APP AND NOT ABOUT THE ROW BESIDE IT.
+       *
+       * CRITERION. Every row here whose url names a Composio app reports the scheme
+       * {@link brokeredAppScheme} answers for that app — so two rows at one url report one answer,
+       * and it is the answer {@link connectBrokeredWithFields} will act on.
+       *
+       * REASON. The browser forks on this field: `brokered-account-row.tsx` draws a consent button,
+       * a form or a "nothing to connect" sentence out of it, and the press then lands in a store
+       * method that resolves the app by its URL. Reported off each row's own column those were two
+       * readings of one fact — a form drawn from this row and a submission refused by the other
+       * row's scheme, telling somebody to connect the app the way it asks for over an app they were
+       * asked exactly that way. {@link serverAddress} answers the same field the same way, so the
+       * page that lists an app and the route that connects it cannot come apart either.
+       *
+       * ONE EXTRA READ FOR THE WHOLE LIST, and none where the deployment has enabled no apps.
+       */
+      const brokeredApps = await brokeredAppRowsAt(
+        rows.filter((row) => toolkitOf(row.url) !== null).map((row) => row.url),
+      );
+
       return rows.map((row) => {
         const entry = catalogueEntry(row.id);
         return {
@@ -3591,7 +3720,11 @@ export function createPluginStore(options: PluginStoreOptions) {
           dynamicClient:
             entry?.auth.kind === "user-oauth" &&
             entry.auth.clientRegistration === "dynamic",
-          authScheme: row.authScheme,
+          // The app's, for a row whose url names one; this row's own column for everything else,
+          // which is a null on every server that is not brokered. See the read above.
+          authScheme: toolkitOf(row.url)
+            ? (brokeredApps.get(row.url)?.authScheme ?? null)
+            : row.authScheme,
           tools: tools
             .filter((tool) => tool.serverId === row.id)
             .map((tool) => {
@@ -3647,6 +3780,24 @@ export function createPluginStore(options: PluginStoreOptions) {
      *
      * `undefined` for an id naming no row, which is what the `.find` over the whole list answered
      * before — so a route that refused an unknown id still refuses it, in the same words.
+     *
+     * AND THE SCHEME IS THE APP'S, NOT THIS ROW'S, WHICH IS THE ONE FIELD HERE THAT IS NOT ABOUT A
+     * ROW AT ALL.
+     *
+     * CRITERION. For a row whose url names a Composio app, `authScheme` is what
+     * {@link brokeredAppScheme} answers for that app.
+     *
+     * REASON. The connect route forks on this field — a form for a key app, a consent link for a
+     * consent one, a refusal for a no-auth one — and the store method that fork leads to,
+     * {@link connectBrokeredWithFields}, reads the scheme off the row that answers for the APP. Two
+     * rows may name one app, so those were two different reads of one fact: the page draws a form
+     * off this row and the submission is refused by the other row's scheme, in a sentence telling
+     * somebody to connect an app the way it asks for — over an app they were just asked exactly
+     * that way. The id and the title stay this row's own, because those name the row the page
+     * opened; the scheme is a fact about the app, and the app has one answer.
+     *
+     * ONE EXTRA READ, AND ONLY FOR A BROKERED URL. A row that names no app takes the read it always
+     * took.
      */
     async serverAddress(serverId: string): Promise<ServerAddress | undefined> {
       const [row] = await database
@@ -3659,7 +3810,10 @@ export function createPluginStore(options: PluginStoreOptions) {
         .from(mcpServers)
         .where(eq(mcpServers.id, serverId))
         .limit(1);
-      return row;
+      if (!row) return undefined;
+      const toolkit = toolkitOf(row.url);
+      if (!toolkit) return row;
+      return { ...row, authScheme: await brokeredAppScheme(toolkit) };
     },
 
     /**
@@ -4398,32 +4552,31 @@ export function createPluginStore(options: PluginStoreOptions) {
        * {@link brokeredAppScheme} — so nothing in this file can name one row for an app while
        * something else names another.
        *
+       * AND "LOWER" IS THE DATABASE'S OWN WORD FOR IT, WHICH IS WHY THE ORDER IS IN THE QUERY. This
+       * read took its rows unordered and picked the smallest with a JavaScript `<`, which compares
+       * UTF-16 code units and nothing else, while {@link brokeredAppRow} asks for `order by id`
+       * under whatever collation the deployment's database runs. Those two agree for ASCII on a `C`
+       * database and are free to disagree everywhere else — a linguistic collation reorders case and
+       * punctuation, and byte order and code-unit order part company above the BMP. One rule spelled
+       * in two languages is two rules, and where they parted the page drew an app under one server
+       * id while the Re-check button beside it, the probe behind that button and the scheme that
+       * decides whether the button appears at all were about the other row: the same defect the
+       * single read was written to end, reached through the collation instead of through the query.
+       * So the resolution is {@link brokeredAppRowsAt} and not a rule spelled again here: it is the
+       * same function {@link brokeredAppRow} answers one app out of, which is what makes the row
+       * this page draws an app under the row every read behind its buttons is about.
+       *
        * A CONNECTION WITH NO ROW AT ITS URL IS STILL LISTED BY NOTHING, which is what the inner
-       * join answered and what the empty `serverId` below drops. A person can hold an account at an
-       * app this deployment has since removed, and the settings page has no row to draw for it.
+       * join answered and what the missing `serverId` below drops. A person can hold an account at
+       * an app this deployment has since removed, and the settings page has no row to draw for it.
        */
-      const named = new Map<string, string>();
-      if (connections.length > 0) {
-        const servers = await database
-          .select({ id: mcpServers.id, url: mcpServers.url })
-          .from(mcpServers)
-          .where(
-            inArray(
-              mcpServers.url,
-              connections.map((row) => `composio://${row.toolkit}`),
-            ),
-          );
-        for (const server of servers) {
-          const held = named.get(server.url);
-          if (held === undefined || server.id < held) {
-            named.set(server.url, server.id);
-          }
-        }
-      }
+      const named = await brokeredAppRowsAt(
+        connections.map((row) => `composio://${row.toolkit}`),
+      );
 
       const rows = connections
         .flatMap((row) => {
-          const serverId = named.get(`composio://${row.toolkit}`);
+          const serverId = named.get(`composio://${row.toolkit}`)?.id;
           return serverId === undefined ? [] : [{ ...row, serverId }];
         })
         // By server id, as the join's own `order by` was, so this read and `connectionsFor` hand the
@@ -4870,12 +5023,18 @@ export function createPluginStore(options: PluginStoreOptions) {
      * day nothing was checked. The yes itself does not bear on a key: {@link
      * ComposioBroker.isConnected} says an account is attached, Composio takes a key when it is
      * typed and never tests it again, so for a key app that answer is what the row's existence
-     * already said. The branch is on the scheme recorded on the app's row, read through {@link
-     * isFieldScheme} as {@link connectBrokeredWithFields} and {@link recheckBrokeredConnection}
-     * read theirs, and a key row already here is left untouched — the evidence about a key is a
+     * already said. The branch is on the scheme recorded on the app's row, classified through {@link
+     * brokeredAppKind} as {@link connectBrokeredWithFields} and {@link recheckBrokeredConnection}
+     * classify theirs, and a key row already here is left untouched — the evidence about a key is a
      * call, and those two are the only writers of this row's verdict. A key app the vendor holds an
      * account for with no row here still gets one, written UNCHECKED, because the row is the gate
      * every later brokered call passes through and the only thing Disconnect works off.
+     *
+     * AND THE FLAG IS WRITTEN FOR A CONSENT APP RATHER THAN FOR ANYTHING THAT IS NOT A KEY APP. A
+     * scheme this deployment cannot read — a null, or a literal nothing here writes — is neither
+     * kind, and it takes the key app's treatment: nothing recorded is overwritten, and a person the
+     * vendor holds an account for still gets the row that is their permission. See {@link
+     * SchemeKind} for why that third answer has to travel rather than be flattened into the second.
      *
      * `scope` IS EMPTY BECAUSE COMPOSIO GRANTS NONE THAT IT TELLS US ABOUT. The field exists so a
      * later refusal for want of a permission can be explained by what the vendor actually granted,
@@ -4934,12 +5093,35 @@ export function createPluginStore(options: PluginStoreOptions) {
        * make: `mcp_servers.id` is a display name and nothing holds the two equal, so a row called
        * `gmail` at `composio://slack` would decide a Slack confirm on Gmail's scheme, and a second
        * row at the app's own url would have this confirm branch on a scheme the re-check beside it
-       * disagrees with. Asked through {@link isFieldScheme} rather than compared as a string, so the
-       * schemes this branches on cannot drift from the schemes that have a key behind them.
+       * disagrees with. Asked through {@link brokeredAppKind} rather than compared as a string, so
+       * the schemes this branches on cannot drift from the schemes that have a key behind them.
+       *
+       * AND THE QUESTION IS "IS THIS A CONSENT APP", NOT "IS THIS NOT A KEY APP", which are the same
+       * question only if the column can always be read.
+       *
+       * CRITERION. `verified: true` is written here for an app this deployment KNOWS connects by
+       * consent, and for no other.
+       *
+       * REASON. This branched on {@link isFieldScheme} alone, so every other answer — a consent
+       * scheme, a literal from a deployment that knew other names, a NULL — fell into the consent
+       * arm by elimination. A null is not a consent app: it is a column this deployment cannot read,
+       * which {@link mcpServers.authScheme} calls a row that is not brokered and which the row that
+       * ANSWERS for an app is perfectly free to carry — no unique index stands behind that url, so
+       * the row an enable wrote its scheme onto is not always the row found here. Confirm runs from
+       * an effect on mount, so the elimination wrote `verified: true` with a fresh `verified_at` and
+       * a null probe over that row on every page load: a verdict about evidence nobody has, dated to
+       * the day somebody opened a page, over whatever a real check had recorded. The other two
+       * readers of this column already fail closed on the null — {@link recheckBrokeredConnection}
+       * refuses the press, {@link disconnectBrokered} claims no revocation — so the one caller that
+       * could not survive being wrong was the only one failing open.
+       *
+       * SO AN UNREADABLE SCHEME IS TREATED AS A KEY APP IS, and that is the cautious half in both
+       * directions: nothing already recorded is overwritten, and the row that is the gate is still
+       * written where the vendor holds an account nothing here has a row for.
        */
-      const holdsKey = isFieldScheme(await brokeredAppScheme(input.toolkit));
+      const kind = await brokeredAppKind(input.toolkit);
 
-      if (!holdsKey) {
+      if (kind === "consent") {
         // VERIFIED, BECAUSE A CONSENT SCREEN IS A VERIFICATION AND NOT A LESSER KIND OF ONE. The
         // vendor has just answered that this person's account is attached, which is the same
         // question a probe goes and asks; that the evidence arrived through a consent flow rather
@@ -4969,6 +5151,12 @@ export function createPluginStore(options: PluginStoreOptions) {
          * whose row was lost — so no key of theirs has ever been tried from here, and null beside
          * `false` is exactly "nothing was spent". The row still has to exist: it is the gate every
          * later brokered call passes through, and the only thing Disconnect works off.
+         *
+         * AND AN APP WHOSE SCHEME CANNOT BE READ IS WRITTEN THE SAME WAY, for the same sentence
+         * one word weaker: nothing here has ever checked this account, and nothing here knows what
+         * checking it would even mean. `false` beside a null claims neither a check nor a refusal,
+         * which is the only pair that is true of it — and the row is still the permission, so a
+         * person whose account Composio holds does not lose their access to a column nobody wrote.
          */
         await this.recordBrokeredConnection({
           toolkit: input.toolkit,
@@ -5002,8 +5190,13 @@ export function createPluginStore(options: PluginStoreOptions) {
        * connectBrokeredWithFields} and {@link recheckBrokeredConnection} — are the only writers of
        * this row's verdict. This one records what it learned by not writing.
        *
-       * THE NEGATIVE HEAL IS UNTOUCHED, for both kinds. A vendor answering NO still deletes the
+       * THE NEGATIVE HEAL IS UNTOUCHED, for all three kinds. A vendor answering NO still deletes the
        * row above, which is what a confirm on a key app is still worth running for.
+       *
+       * AND AN EXISTING ROW UNDER AN UNREADABLE SCHEME IS LEFT ALONE FOR A STRICTLY WIDER REASON.
+       * For a key app the yes is not evidence; for an app whose scheme nothing here can read, it is
+       * not known WHAT the yes is evidence of. Both answers are the same act — write nothing — and
+       * it is the only act available that cannot claim more than was learned.
        */
 
       if (!existing) {
@@ -5460,11 +5653,13 @@ export function createPluginStore(options: PluginStoreOptions) {
     }> {
       if (!broker) throw new BrokerUnconfiguredError();
 
-      // Keyed on the url and on the one row that answers for it — see `brokeredAppScheme`. It is
-      // the read `connectBrokeredWithFields` and `disconnectBrokered` both make, for the same
-      // stake: a row called `gmail` at `composio://slack` would decide a Slack re-check on Gmail's
-      // scheme.
-      if (!isFieldScheme(await brokeredAppScheme(input.toolkit))) {
+      // Keyed on the url and on the one row that answers for it — see `brokeredAppKind`. It is the
+      // read `connectBrokeredWithFields`, `confirmBrokeredConnection` and `disconnectBrokered` all
+      // make, for the same stake: a row called `gmail` at `composio://slack` would decide a Slack
+      // re-check on Gmail's scheme. Anything but a key refuses, a scheme nothing here can read
+      // included — there is no key recorded to re-check, and the sentence below is the same one
+      // either way.
+      if ((await brokeredAppKind(input.toolkit)) !== "key") {
         throw new PluginRefusedError(
           `${input.toolkit} is not an app this deployment holds a key for, so there is nothing here to re-check. It was connected at ${input.toolkit}'s own sign-in screen, and if it has stopped working, disconnecting it on the Plugins page and connecting it again is what fixes it.`,
           null,
@@ -5704,18 +5899,20 @@ export function createPluginStore(options: PluginStoreOptions) {
       if (!broker) throw new BrokerUnconfiguredError();
 
       /*
-       * Keyed on the url and on the one row that answers for it — see {@link brokeredAppScheme}.
+       * Keyed on the url and on the one row that answers for it — see {@link brokeredAppKind}.
        * It is the read {@link connectBrokeredWithFields} makes, for the same stake: a row called
        * `gmail` at `composio://slack` would have this disconnect reading Gmail's scheme to describe
        * what happened to a Slack account.
        *
-       * AN APP WITH NO ROW HERE IS NOT A FIELD APP. A person can hold an account at Composio for
-       * an app this deployment has since removed — the row is a cache and the removal takes no
-       * grant with it — and the revoke below is the one operation that can still end it. Nothing
-       * names the scheme it was connected under any more, so the honest reading is the broker's
-       * own answer, which is what an absent row falls through to.
+       * AN APP WITH NO ROW HERE IS NOT A FIELD APP, AND NEITHER IS ONE WHOSE SCHEME CANNOT BE READ.
+       * A person can hold an account at Composio for an app this deployment has since removed — the
+       * row is a cache and the removal takes no grant with it — and the revoke below is the one
+       * operation that can still end it. Nothing names the scheme it was connected under any more,
+       * so the honest reading is the broker's own answer, which is what both of those fall through
+       * to: the field below is a claim that this deployment asked the vendor to withdraw something,
+       * and an app it cannot say holds a key is one whose withdrawal it has to report as asked.
        */
-      const fieldScheme = isFieldScheme(await brokeredAppScheme(input.toolkit));
+      const fieldScheme = (await brokeredAppKind(input.toolkit)) === "key";
 
       // Whether there was an account to end at all, which is what decides if anybody was
       // disconnected. Named apart from the field below because for a key the two differ: something

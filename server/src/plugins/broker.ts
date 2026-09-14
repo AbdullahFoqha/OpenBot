@@ -50,6 +50,63 @@ export function isFieldScheme(scheme: string | null): scheme is FieldScheme {
 }
 
 /**
+ * The schemes where the VENDOR'S OWN YES is the whole of the check, and nothing here is ever spent.
+ *
+ * `OAUTH2` and `DCR_OAUTH` are the two consent flows: somebody finishes at the vendor's own screen
+ * and the account it attaches is the evidence. `NO_AUTH` joins them for the same reason rather than
+ * a different one — an app that needs no credential has nothing that could be tried, so a call
+ * against it is never evidence about an account either.
+ *
+ * WRITTEN AS A LIST FOR {@link FIELD_SCHEME_NAMES}' REASON, and read by {@link schemeKind}. The
+ * writer of this column is `schemeFor` in `plugins/store.ts`; a literal it spelled that the reader
+ * here did not recognise is the failure this pair exists to make impossible, and
+ * {@link RecordedScheme} — that function's return type — is what holds the two to one set.
+ */
+const CONSENT_SCHEME_NAMES = ["OAUTH2", "DCR_OAUTH", "NO_AUTH"] as const;
+
+export type ConsentScheme = (typeof CONSENT_SCHEME_NAMES)[number];
+
+/**
+ * Every literal this deployment ever WRITES to `mcp_servers.auth_scheme`.
+ *
+ * The return type of the function that composes one, so a scheme neither list admits cannot be
+ * written down in the first place. Reading is the other half and is deliberately wider: the column
+ * is `text`, a row may have been inserted by hand or restored from a deployment that knew other
+ * names, and {@link schemeKind} is what says what to do about one of those.
+ */
+export type RecordedScheme = FieldScheme | ConsentScheme;
+
+/**
+ * What a recorded scheme DECIDES, which is the one vocabulary every caller branches on.
+ *
+ * THREE ANSWERS AND NOT TWO, which is the whole reason this exists rather than a second `includes`
+ * beside {@link isFieldScheme}. `key` and `consent` are the two kinds of app; `unreadable` is a
+ * column this deployment cannot act on — a null, or a literal nothing here writes — and it is a
+ * real state rather than a defensive one: `mcp_servers.url` carries no unique index, so the row
+ * that answers for an app is not always the row an enable wrote a scheme onto, and a hand-inserted
+ * or restored row carries whatever it carries.
+ *
+ * AND IT IS NOT A SPELLING OF `consent`, WHICH IS THE FAILURE THIS TYPE REPLACES. Asking only "is
+ * this a key app" makes every other answer consent by elimination, and consent is the one scheme
+ * where the vendor's yes IS a verification — so a column nobody could read was writing a verdict
+ * about evidence nobody had, on every page load. A caller that cannot tell the third answer from
+ * the second has no way to fail closed, because it never learns that there was nothing to read.
+ */
+export type SchemeKind = "key" | "consent" | "unreadable";
+
+/** {@link SchemeKind} for a value read out of the column. */
+export function schemeKind(scheme: string | null): SchemeKind {
+  if (isFieldScheme(scheme)) return "key";
+  if (
+    scheme !== null &&
+    (CONSENT_SCHEME_NAMES as readonly string[]).includes(scheme)
+  ) {
+    return "consent";
+  }
+  return "unreadable";
+}
+
+/**
  * One value Composio wants from the person connecting, as Composio itself describes it.
  *
  * Every field here is published per app rather than guessed: `is_secret` says which one to mask,

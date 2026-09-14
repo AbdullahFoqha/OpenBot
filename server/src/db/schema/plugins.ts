@@ -100,7 +100,17 @@ export const mcpServers = pgTable("mcp_servers", {
    * says: somebody looking here for `consent` or `fields` is reading the other one. Migration 0030
    * backfilled every row whose provenance is `composio` to `OAUTH2`, because managed OAuth was the
    * only config this deployment ever created and `addBrokeredApp` writes the row only after that
-   * config stands. A null is therefore not an older brokered row — it is a row that is not brokered.
+   * config stands. A null is therefore not an older brokered row this deployment WROTE.
+   *
+   * WHICH IS NOT THE SAME AS A NULL BEING UNREACHABLE ON A BROKERED READ, and the difference has
+   * cost a verdict already. Every reader finds an app's row by {@link mcpServers.url}, which carries
+   * no unique index — two rows may name one app, and the one that answers is not always the one an
+   * enable wrote a scheme onto. Add a row inserted by hand, a row restored from elsewhere, or an app
+   * whose `BrokerConnection` was `unsupported`, and a brokered read really does meet a null here. So
+   * a reader must have three answers and not two: a key, a consent, and a column it cannot act on.
+   * `schemeKind` in `plugins/broker.ts` is that reading, and `confirmBrokeredConnection` is what
+   * happened without it — a null read as consent, and `verified: true` written on every page load
+   * over evidence nobody had.
    */
   authScheme: text("auth_scheme"),
   /** What the deployment last heard back from it. `null` until the first successful listing. */
