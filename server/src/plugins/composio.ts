@@ -712,6 +712,53 @@ export async function listTools(connection: {
   }
 
   /*
+   * AND THE ACTION'S OWN WORDS, WHICH IS THE FOURTH FIELD THE MAP READS AND THE ONE NOBODY HELD.
+   *
+   * The three guards above were written together and this one was left out, so `description` was
+   * the only field in the map below with nothing between the vendor and the row. The map's
+   * `description ?? ""` answers for ABSENCE and says nothing about type, which is precisely what
+   * `action.version?.trim()` did on the field next door before the guard above it existed.
+   *
+   * WHAT MEETS IT IS `replaceAll`, ONE MODULE ON. `storableTools` in `./store` writes
+   * `(tool.description ?? "").replaceAll(NUL, "")`, so a number, an object or a list throws
+   * `(tool.description ?? "").replaceAll is not a function`. That throw IS caught — the `try` around
+   * `storableTools` exists so nothing a vendor sent leaves `refreshTools` raw — and what it writes
+   * into `lastError` for an administrator to read is "an action whose schema could not be stored as
+   * it arrived", followed by the engine's sentence. BOTH HALVES MISLEAD: it was not the schema,
+   * nothing names the action, and nothing names the field, so a listing of sixty actions fails
+   * whole and the row points at the wrong thing. That is the same tool-and-version stranding the
+   * three refusals above exist to prevent, arriving through the one field they skipped.
+   *
+   * REFUSED RATHER THAN DEFAULTED TO `""`, which is the other candidate repair and is the silent
+   * one. The description is what a model reads to decide whether to call the action at all, and
+   * `mcp_tools.description` is what an administrator grants against; recording "no description" for
+   * an action Composio described is a wrong answer nobody can see, on a row that looks fine. The
+   * refusal keeps every action, effect, version and grant the app already has, and says which
+   * action it was while the listing that names it is still in hand.
+   *
+   * `null` IS ABSENCE HERE, for the reason the two guards above give on their own fields. "Composio
+   * described this action in no words" is a real state with an answer already — `?? ""` has always
+   * read it that way — and `null` is how JSON spells it. Refusing it would abort the whole app's
+   * listing over a field that reads fine, permanently, which is the loss rather than the fix.
+   *
+   * READ AS `unknown` because the type above is this module's projection and the value is the
+   * vendor's, and ASKED OF THE OFFERED ACTIONS because the map and the row are only about those.
+   */
+  const oddDescription = offered.find((action) => {
+    const description: unknown = action.description;
+    return (
+      description !== undefined &&
+      description !== null &&
+      typeof description !== "string"
+    );
+  });
+  if (oddDescription) {
+    throw new Error(
+      `Composio's action list for ${toolkit} described ${oddDescription.slug.trim()}'s description as something other than text, and the description is what a model reads to decide whether to call the action at all. Nothing was refreshed and the actions already recorded for this app are kept rather than replaced by a listing whose descriptions could not be read.`,
+    );
+  }
+
+  /*
    * A FULL PAGE USED TO BE REFUSED HERE, AND THAT REFUSAL IS GONE BECAUSE ITS PREMISE WAS FALSE.
    *
    * It said that `LISTING_LIMIT` is the largest page the vendor's REST parameter allows and that
@@ -787,7 +834,25 @@ export async function listTools(connection: {
        * granted and one Composio has never heard of.
        */
       name: action.slug.trim(),
+      /*
+       * WHAT THE `??` ANSWERS FOR IS ABSENCE AND NOT TYPE, which is why this line is no longer the
+       * only thing between the vendor's field and `store.ts`'s `replaceAll`. A description that is
+       * neither absent nor text is refused above, beside the version, where a sentence can still
+       * name the action; here it cannot arrive. What is left for this line is the real absence —
+       * no key, or a `null` — and `""` is the honest answer to it: the vendor said nothing, so this
+       * deployment says nothing rather than inventing a sentence a model reads as the action's own.
+       */
       description: action.description ?? "",
+      /*
+       * NOT GUARDED ABOVE, AND THAT IS A DECISION RATHER THAN THE SAME OMISSION AGAIN. Every other
+       * field in this object has a reader that would break on the wrong shape: `slug` a name the
+       * insert needs, `tags` a `Set` and an identity comparison, `version` and `description` a
+       * `trim` and a `replaceAll`. A schema has no such reader. `parametersFor` in `./tools` says
+       * outright that anything which is not an object schema is offered as an open one — the vendor
+       * is the right party to reject a bad argument — and `storableSchema` in `./store` walks any
+       * shape into the `jsonb` column. So an unreadable schema already has an answer that keeps the
+       * action callable, and refusing the app's whole listing over it would cost more than it saves.
+       */
       inputSchema: action.inputParameters ?? {},
       effect,
       destructive,

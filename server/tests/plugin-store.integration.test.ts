@@ -5783,6 +5783,70 @@ describe("a listing this database would not have taken", () => {
     ).toEqual([{ name: "GMAIL_FETCH_EMAILS" }]);
   });
 
+  test("a description that is not text is named as a description, not as a schema", async () => {
+    /*
+     * THE FAR END OF A FIELD NOBODY GUARDED, and the reason the guard went into the transport
+     * rather than here.
+     *
+     * `storableTools` reads `(tool.description ?? "").replaceAll(NUL, "")`, and `??` answers for
+     * absence and not for type. A number, an object or a list in the vendor's `description` reached
+     * that line and threw the engine's own `replaceAll is not a function`, which the `try` around
+     * `storableTools` catches — so what an administrator read on the Plugins page was "an action
+     * whose schema could not be stored as it arrived" followed by that. BOTH HALVES WERE WRONG. It
+     * was not the schema, nothing named the action, nothing named the field, and the whole app's
+     * refresh failed on one malformed row out of sixty.
+     *
+     * `composio.listTools` now refuses the listing while a sentence can still name the action, so
+     * this lands in the vendor `catch` instead — the app keeps what it holds, stamps no refresh,
+     * and the row says which action and which field. The assertion is about that sentence, because
+     * the sentence is the whole difference between the two paths.
+     */
+    const { store, database } = await freshStore();
+    useComposioClient({
+      listActions: async () =>
+        [
+          {
+            slug: "GMAIL_SEND_EMAIL",
+            description: 7,
+            inputParameters: { type: "object", properties: {} },
+            version: "20260903_00",
+          },
+        ] as never,
+      execute: async () => vendorAnswered(),
+    });
+    await seedComposioGmail(database, store);
+
+    // Not a throw, and not a count that claims anything was learned.
+    expect(await store.refreshTools("gmail", "admin_user")).toEqual({
+      tools: 0,
+    });
+
+    const [row] = await database
+      .select({
+        lastError: mcpServers.lastError,
+        toolsRefreshedAt: mcpServers.toolsRefreshedAt,
+      })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, "gmail"));
+    // The action, so an administrator has one row to look at rather than the app's whole listing.
+    expect(row?.lastError).toContain("GMAIL_SEND_EMAIL");
+    // The field, in the vendor's own terms.
+    expect(row?.lastError).toContain("description");
+    // Not the engine's sentence, and not the wrong noun for the field that was unreadable.
+    expect(row?.lastError).not.toMatch(/is not a function/i);
+    expect(row?.lastError).not.toContain("schema could not be stored");
+    // Nothing was learned about the app, so nothing says otherwise.
+    expect(row?.toolsRefreshedAt).toBeNull();
+
+    // What the app already had is still there, because nothing was replaced.
+    expect(
+      await database
+        .select({ name: mcpTools.name })
+        .from(mcpTools)
+        .where(eq(mcpTools.serverId, "gmail")),
+    ).toEqual([{ name: "GMAIL_FETCH_EMAILS" }]);
+  });
+
   test("a replace this database still refuses raises without the statement", async () => {
     /*
      * A transaction forced to fail, because after the two cases above nothing a vendor can send

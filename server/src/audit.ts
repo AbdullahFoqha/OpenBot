@@ -589,16 +589,60 @@ export class AuditQueryError extends Error {
   }
 }
 
+/**
+ * The shape `audit_events.id` is, because that is what a cursor's id is compared against.
+ *
+ * Not a taste in ids: `lt(auditEvents.id, cursor.id)` is the DATABASE parsing this string, and
+ * anything it cannot parse is `invalid input syntax for type uuid` raised from inside the reader.
+ * Any version and any variant, because what the column accepts is what this must.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A caller's page marker, read as the two values the query builder will actually bind.
+ *
+ * WHAT ARRIVES HERE IS A STRING SOMEBODY TYPED. The cast below used to say `AuditCursor` outright,
+ * which was a promise nobody could keep: this is `JSON.parse` over base64 out of a query parameter,
+ * so the fields hold whatever the caller put in them — a stale bookmark from another deployment's
+ * trail, a hand-edited link, a cursor from a screen that has since changed shape. It says
+ * `Partial<AuditCursor>` now so that the checks below are the only thing narrowing it, and it
+ * admits `null` and `undefined` because `JSON.parse` answers both.
+ *
+ * THE ID IS CHECKED AS A UUID AND NOT MERELY AS PRESENT, which is the whole of this function's
+ * history. It asked `!parsed.id`, so every truthy value passed: `"event-1"`, a number, an object.
+ * All three reach `lt(auditEvents.id, cursor.id)` in {@link createAuditReader}, where PostgreSQL
+ * answers `invalid input syntax for type uuid` — or, for the number, `operator does not exist: uuid
+ * < integer`. That is a `DrizzleQueryError` rather than an {@link AuditQueryError}, so it goes
+ * straight past the admin route's catch and leaves as a 500 with the statement and every bound
+ * value in its message. The route's 400 exists for exactly this: a cursor the server cannot read is
+ * the caller's to fix, the way a bad `from` or `to` already is. The only id a cursor can honestly
+ * carry is one {@link encodeCursor} wrote off a row, and that is always a uuid.
+ *
+ * AND THE TIMESTAMP IS CHECKED AS A STRING BEFORE IT IS CHECKED AS A DATE, because `Date.parse`
+ * stringifies whatever it is handed and the reader does not. A `createdAt` of `2020` parses as the
+ * YEAR 2020 and passes; `new Date(2020)` in the query builder is 2020 MILLISECONDS after 1970. The
+ * two readings of one field differ by fifty years, the endpoint answers 200, and the page comes
+ * from the wrong end of the trail with nothing saying so. A silent wrong page on the record of
+ * whose credential was spent on what is worse than a refusal, so the shape is settled here.
+ *
+ * WHAT IS RETURNED IS THE TWO FIELDS, rebuilt, so nothing else the caller packed into the cursor
+ * travels on into the query.
+ */
 function decodeCursor(cursor: string): AuditCursor {
   try {
     const parsed = JSON.parse(
       Buffer.from(cursor, "base64url").toString("utf8"),
-    ) as AuditCursor;
+    ) as Partial<AuditCursor> | null | undefined;
 
-    if (!parsed.id || Number.isNaN(Date.parse(parsed.createdAt))) {
+    if (
+      typeof parsed?.id !== "string" ||
+      !UUID.test(parsed.id) ||
+      typeof parsed.createdAt !== "string" ||
+      Number.isNaN(Date.parse(parsed.createdAt))
+    ) {
       throw new AuditQueryError("cursor must be a valid audit page cursor");
     }
-    return parsed;
+    return { id: parsed.id, createdAt: parsed.createdAt };
   } catch (error) {
     if (error instanceof AuditQueryError) throw error;
     throw new AuditQueryError("cursor must be a valid audit page cursor");

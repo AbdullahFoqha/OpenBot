@@ -1217,21 +1217,39 @@ describe("listing an app's actions", () => {
      *
      * The empty string is the honest answer — the vendor said nothing, so this deployment says
      * nothing rather than inventing a sentence a model will read as the action's own.
+     *
+     * AND `null` IS THE SAME ABSENCE, which is the limit on the refusal further down, the same
+     * limit the tags and version guards draw on the fields beside this one. "Composio described
+     * this action in no words" is a real state with an answer already, `null` is how JSON spells
+     * it, and `?? ""` has always read it that way. Refusing it would abort the WHOLE listing for
+     * the app — every other action's effect, version and grant — over a field that reads fine.
      */
     useComposioClient(
       recording({
-        listActions: async () => [
-          { slug: "GMAIL_ODD", tags: ["readOnlyHint"], version: "20260903_00" },
-        ],
+        listActions: async () =>
+          [
+            {
+              slug: "GMAIL_ODD",
+              tags: ["readOnlyHint"],
+              version: "20260903_00",
+            },
+            {
+              slug: "GMAIL_NULL_DESCRIPTION",
+              description: null,
+              tags: ["readOnlyHint"],
+            },
+          ] as unknown as ComposioAction[],
       }).client,
     );
 
-    const [tool] = await listTools({ url: "composio://gmail" });
+    const [tool, nulled] = await listTools({ url: "composio://gmail" });
 
     expect(tool?.description).toBe("");
+    expect(nulled?.description).toBe("");
     // Asserted separately from `toEqual`, which treats a key holding `undefined` as a key that is
     // not there and would accept the fallback being dropped altogether.
     expect(Object.keys(tool ?? {})).toContain("description");
+    expect(Object.keys(nulled ?? {})).toContain("description");
   });
 
   test("an answer that is not a list of actions throws a sentence, not a TypeError", async () => {
@@ -1591,6 +1609,66 @@ describe("listing an app's actions", () => {
     ]);
     for (const tool of listed) {
       expect(Object.keys(tool)).not.toContain("version");
+    }
+  });
+
+  test("a description that is not text breaks the listing rather than the row that records it", async () => {
+    /*
+     * THE FOURTH FIELD THE MAP READS, AND THE ONE THE OTHER THREE GUARDS LEFT UNHELD.
+     *
+     * `slug`, `tags` and `version` each have a check above; `description` had none, so whatever the
+     * vendor put there travelled into `ListedTool.description` — typed `string`, holding a number,
+     * an object or a list. The read that meets it is one module on: `storableTools` in `./store`
+     * writes `(tool.description ?? "").replaceAll(NUL, "")`, and `??` guards absence, not type.
+     *
+     * WHICH FAILS THE WHOLE APP'S REFRESH WITH A SENTENCE ABOUT NOTHING. That throw is caught — the
+     * `try` around `storableTools` exists so a vendor's answer never leaves `refreshTools` raw —
+     * and what it records in `lastError` is "an action whose schema could not be stored as it
+     * arrived" followed by the engine's own `replaceAll is not a function`. Neither half is true or
+     * useful: it was not the schema, and nothing in that row names the action or the field, so an
+     * administrator has sixty actions to search and a sentence pointing at the wrong one.
+     * `plugin-store.integration.test.ts` pins that end.
+     *
+     * SO IT IS REFUSED HERE, WHERE A SENTENCE CAN STILL NAME THE ACTION, which is the argument the
+     * three guards above make and the reason they refuse rather than repair. Defaulting a malformed
+     * description to `""` would record the action with the vendor's own words silently dropped, on
+     * a row a model reads to decide whether to call it at all.
+     */
+    for (const description of [
+      7,
+      { text: "Fetch emails." },
+      ["Fetch."],
+      true,
+    ]) {
+      useComposioClient(
+        recording({
+          listActions: async () =>
+            [
+              GMAIL_READ,
+              {
+                slug: "GMAIL_ODD_DESCRIPTION",
+                description,
+                tags: ["readOnlyHint"],
+              },
+            ] as unknown as ComposioAction[],
+        }).client,
+      );
+
+      const outcome = await listTools({ url: "composio://gmail" }).then(
+        (listed) =>
+          `the listing was committed, as ${JSON.stringify(
+            listed.map((tool) => [tool.name, tool.description]),
+          )}`,
+        (error: unknown) => (error as Error).message,
+      );
+
+      const named = JSON.stringify(description);
+      // NAMED IN THE SUCCESS ARM for the reason the labels test names its pair: the wrong answer
+      // here is a specific value on a specific action, and a red run should say which.
+      expect(`${named}: ${outcome}`).not.toContain("the listing was committed");
+      expect(outcome).toContain("GMAIL_ODD_DESCRIPTION");
+      expect(outcome).toContain("gmail");
+      expect(outcome).not.toMatch(/is not a function|undefined is not/i);
     }
   });
 
