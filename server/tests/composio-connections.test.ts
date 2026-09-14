@@ -2517,22 +2517,26 @@ test("a confirm does not erase what a check spent on a key connection", async ()
  * AND IT DOES NOT REDATE A KEY THE LAST CHECK PASSED, EITHER.
  *
  * CRITERION. A key connection a probe verified at a known moment is confirmed, and afterwards its
- * `verified_at` is still that moment and its `probe_action` is still that action — while a CONSENT
- * connection, confirmed the same way against the same vendor answer, IS written and IS redated.
+ * `verified_at` is still that moment and its `probe_action` is still that action — and a CONSENT
+ * connection already carrying the verdict, confirmed the same way against the same vendor answer,
+ * keeps its own date too.
  *
  * REASON. The clobber has a quiet half as well as a loud one. On the refused-key row above the
  * damage is a false sentence; here both rows say "verified", and what a mount-time write destroys
  * is the DATE — the page prints "last checked" off `verified_at`, so a confirm stamping today would
- * have every key connection in the deployment claim it was checked on whatever day its owner last
+ * have every connection in the deployment claim it was checked on whatever day its owner last
  * opened the page, forever, without a single call being made. A row that has not been checked since
  * August must go on saying August; that is the whole value of the column.
  *
- * WHY BOTH SCHEMES IN ONE TEST. The consent half is what separates a confirm that learned to tell
- * the two kinds apart from one that simply stopped writing. Consent IS the check — the vendor's own
- * yes at the end of its own screen is the evidence, and it is fresh evidence on every confirm — so
- * that row is written, dated now, and keeps the null that says no action was ever spent on it. One
- * app under each scheme, the same act against the same stub, so the only thing that differs between
- * the two outcomes is the scheme recorded on the app's row.
+ * WHY BOTH SCHEMES IN ONE TEST, AND WHY THE CONSENT HALF CHANGED ITS MIND. It used to assert that
+ * the consent row WAS redated, on the reasoning that the vendor's yes is fresh evidence on every
+ * confirm. That reasoning is right about the FLAG and wrong about the DATE: what `verified_at` says
+ * for a consent connection is the day somebody finished at the vendor's own screen, which is a fact
+ * nothing else in this deployment records and which no later yes re-earns.
+ * {@link recheckBrokeredConnection} refuses to probe a consent app in order to protect exactly that
+ * date, and a confirm running from an effect on mount was destroying it on every page load from the
+ * inside. So the rule is one rule for both kinds now — a verdict already recorded is left alone —
+ * and what still differs between them is which act may write it in the first place.
  */
 test("a confirm does not redate a key the last check verified", async () => {
   useAnsweringClient();
@@ -2580,8 +2584,9 @@ test("a confirm does not redate a key the last check verified", async () => {
   expect(after.verified).toBe(true);
 
   // THE OTHER KIND, against the same stub and the same act. A consent connection's evidence IS the
-  // vendor's yes, so this one is written and dated by the confirm — and keeps the null that says
-  // nothing of the app's was ever called against it.
+  // vendor's yes — but it is the yes somebody gave at the vendor's screen on the day they gave it,
+  // and this row already carries it. So the confirm writes nothing: the date stands, and so does
+  // the null that says nothing of the app's was ever called against it.
   const consentSeeded = new Date("2026-08-30T09:00:00.000Z");
   await store.addBrokeredApp({
     slug: enabledToolkit,
@@ -2614,12 +2619,7 @@ test("a confirm does not redate a key the last check verified", async () => {
     );
   expect(consent.verified).toBe(true);
   expect(consent.probeAction).toBeNull();
-  expect(consent.verifiedAt?.toISOString()).not.toBe(
-    consentSeeded.toISOString(),
-  );
-  expect(consent.verifiedAt?.getTime()).toBeGreaterThan(
-    consentSeeded.getTime(),
-  );
+  expect(consent.verifiedAt?.toISOString()).toBe(consentSeeded.toISOString());
 
   // One probe, spent by the connect, and nothing since.
   expect(reached).toEqual([probeAction]);

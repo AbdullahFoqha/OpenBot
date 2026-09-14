@@ -13,6 +13,7 @@ import {
   type Decides,
   isFieldScheme,
   type SchemeKind,
+  schemeKind,
 } from "./broker";
 import { CATALOGUE, catalogueEntry } from "./catalogue";
 import { toolkitOf, vendorSentence } from "./composio";
@@ -1019,36 +1020,42 @@ export function createPluginRoutes(
       const authScheme = row.authScheme;
 
       /**
-       * WHAT THIS FORK ANSWERS FOR EACH KIND OF APP, WRITTEN DOWN BECAUSE THE FORK DOES NOT.
+       * WHAT THIS FORK ANSWERS FOR EACH KIND OF APP, AND EVERY ARM IS REACHED BY DECIDING.
        *
-       * Type-only and erased; see {@link Decides} in `./broker`. This file imports
-       * {@link isFieldScheme} and NOT `schemeKind`, and it compares one raw literal beside it — so
-       * the fork below is two tests and a fall-through, and the fall-through is the consent arm.
-       * That arm mints a link at Composio, which is a real act performed on behalf of an answer
-       * nobody decided. A fourth {@link SchemeKind} would inherit it in silence, which is what this
-       * roster is here to stop: it has to name every member, and the compiler says which one is
-       * missing.
+       * Type-only and erased; see {@link Decides} in `./broker`. A fourth {@link SchemeKind} fails
+       * `tsc` here by name, which is what this roster is for: the fork below reads a three-member
+       * vocabulary with a chain of `if`s, and an `if` chain has no opinion about the answers it was
+       * not written for.
        *
-       * `unreadable` IS THE CONTESTED CELL and is written as what the code does rather than as what
-       * it should do: the store below it already fails closed on a scheme nothing can read, and this
-       * route above it still reaches consent by elimination. That is a live finding, and a roster
-       * describing the intended behaviour would be the prose contract this mechanism replaces. See
-       * the table in `tests/composio-connection-kinds.test.ts`, which declares the cell by name.
+       * CRITERION. Every arm below is entered because {@link schemeKind} said so. No arm is the
+       * fall-through of the others.
+       *
+       * REASON. This file used to import {@link isFieldScheme} and not `schemeKind`, and compare one
+       * raw literal beside it — so the fork was two tests and a fall-through, and the fall-through
+       * was the consent arm. A scheme this deployment cannot read — a null, or a literal nothing
+       * here writes, which the row that ANSWERS for an app is free to carry because
+       * `mcp_servers.url` has no unique index — therefore landed in the arm that mints an
+       * authorization link at Composio for an app with no consent config behind it. That is a real
+       * act performed at the vendor on behalf of an answer nobody decided, and its only possible end
+       * is a link the person cannot complete. The three readers of this column in `./store` already
+       * fail closed on that value; this one was the last that did not.
        */
       type _ConnectForkDecides = Decides<
         SchemeKind,
         {
           key: "answers with the form the app publishes, and connects what is typed into it";
-          consent: "mints a link at Composio, except for the NO_AUTH literal, which is refused above with the fact about it";
-          unreadable: "mints a link at Composio too, reached by elimination rather than by decision";
+          consent: "mints a link at Composio for the person to finish at the vendor's own screen";
+          none: "refuses with the fact about the app — there is no account to connect and nothing is asked of Composio";
+          unreadable: "refuses, and asks Composio nothing — it is not a consent app and there is no link to mint";
         }
       >;
+      const kind = schemeKind(authScheme);
 
       /*
        * AN APP THAT NEEDS NO CREDENTIAL IS ANSWERED WITH WHAT IS TRUE OF IT, AND ASKS COMPOSIO
        * NOTHING.
        *
-       * THE THIRD KIND, AND THE ONE THIS FORK USED TO HAVE NO ARM FOR. `NO_AUTH` is what
+       * ITS OWN KIND, AND THE ONE THIS FORK USED TO HAVE NO ARM FOR. `NO_AUTH` is what
        * `connectionOf` resolves thirty-four of Composio's toolkits to and what `addBrokeredApp`
        * records on their rows. It is not a field scheme, so without this it fell through into the
        * consent arm below and met one of two dead ends: a 503 demanding `OPENBOT_APP_URL` for a
@@ -1058,6 +1065,14 @@ export function createPluginRoutes(
        * the app and add it again, and adding it again writes the identical row and fails
        * identically. That is one of the five connection kinds broken end to end, in the arm reached
        * by elimination rather than by decision.
+       *
+       * ASKED OF {@link schemeKind} RATHER THAN COMPARED AS A STRING, which is the second half of
+       * that fix and arrived later than the first. The literal comparison here was right about the
+       * app and silent about the vocabulary: `schemeKind` went on calling `NO_AUTH` a CONSENT
+       * scheme, so this route and the per-person gate disagreed with the classifier — and with the
+       * one consumer that did ask it, which wrote a `verified: true` connection row on every page
+       * load for exactly the apps this branch refuses to make one for. `none` is now its own member
+       * and this reads it.
        *
        * REFUSED RATHER THAN ANSWERED `connected`, AND THE DIFFERENCE IS A ROW. `composio_connections`
        * is the whole of the permission for a brokered call, and every row in it means one thing: this
@@ -1077,7 +1092,7 @@ export function createPluginRoutes(
        * `composio-hackernews` is how this deployment keys a table and "Hacker News" is the name of
        * the thing on the screen.
        */
-      if (authScheme === "NO_AUTH") {
+      if (kind === "none") {
         return context.json(
           {
             error: `${row.title} needs no account, so there is nothing to connect. A Bot granted its tools can use it as it is.`,
@@ -1384,6 +1399,33 @@ export function createPluginRoutes(
           );
           return context.json({ error: refusal.error }, refusal.status);
         }
+      }
+
+      /*
+       * A SCHEME THIS DEPLOYMENT CANNOT READ IS REFUSED, AND IS NOT WALKED INTO THE CONSENT FLOW.
+       *
+       * `unreadable` is a null column or a literal nothing here writes — which is an ordinary row
+       * rather than a corrupt one: `mcp_servers.url` carries no unique index, so the row that
+       * answers for an app is not always the row an enable wrote a scheme onto, and a row may have
+       * been inserted by hand or restored from a deployment that knew other names. Reached by
+       * elimination, it arrived at the arm below and minted an authorization link at Composio for an
+       * app this deployment holds no consent config for — a call spent at the vendor, and a link
+       * whose only possible end is the person failing to complete it at a screen that has nothing
+       * to ask them.
+       *
+       * THE REMEDY IS AN ADMINISTRATOR'S, because nothing the person pressing Connect can do
+       * changes which scheme this deployment recorded for the app. Re-adding it is what writes the
+       * column again, which is the same remedy the field branch above names for its own two
+       * unreadable-app states. 400 rather than 503: it is a fact about this one app's row and not
+       * about the deployment's settings.
+       */
+      if (kind === "unreadable") {
+        return context.json(
+          {
+            error: `This deployment cannot tell how ${row.title} connects, so nothing was sent to Composio and no account was made. An administrator has to remove it on the Plugins page and add it again, which records the way Composio connects it now.`,
+          },
+          400,
+        );
       }
 
       /*

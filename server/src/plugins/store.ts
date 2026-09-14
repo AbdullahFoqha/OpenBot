@@ -1440,22 +1440,26 @@ export function createPluginStore(options: PluginStoreOptions) {
        * per connector on any deployment, and the call it guards is a network round trip to the
        * vendor.
        */
-      if ((await brokeredAppScheme(access.toolkit)) === "NO_AUTH") return {};
+      if ((await brokeredAppKind(access.toolkit)) === "none") return {};
 
       /**
        * WHAT THAT GATE ANSWERS FOR EACH KIND OF APP, WRITTEN DOWN BECAUSE THE LINE ABOVE DOES NOT.
        *
-       * Type-only and erased; see {@link Decides}. This is the ONE scheme read in the file that
-       * compares a raw literal instead of asking {@link schemeKind}, so the vocabulary it decides on
-       * is not the vocabulary it reads — a fourth {@link SchemeKind} changes nothing here, and that
-       * is exactly what makes the omission invisible. The roster is what a fourth member fails
-       * against, and the sentences are what say which arm each kind really lands in today.
+       * Type-only and erased; see {@link Decides}. This was the ONE scheme read in the file that
+       * compared a raw literal instead of asking {@link schemeKind}, so the vocabulary it decided on
+       * was not the vocabulary it read: `NO_AUTH` was a CONSENT-kind scheme, and this line exempted
+       * it from inside that member while every other consumer of `consent` demanded a row. One
+       * member answered two ways is the drift a closed vocabulary exists to make impossible, and the
+       * cost was paid next door — {@link confirmBrokeredConnection} asked the classifier, was told
+       * `consent`, and wrote the verified connection row this gate and the connect route both exist
+       * to keep out of that table. `none` is now its own member, and this asks for it by name.
        */
       type _NoAuthGateDecides = Decides<
         SchemeKind,
         {
           key: "demands a connection row, because a key app has an account to hold one";
-          consent: "demands a connection row for every consent scheme EXCEPT the NO_AUTH literal, which the line above exempts without asking the classifier";
+          consent: "demands a connection row, because somebody consented and the row is that grant";
+          none: "lets the call through with no row at all — there is no account, so there is nothing anybody could have granted";
           unreadable: "demands a connection row, which is the closed direction and the right one";
         }
       >;
@@ -5177,9 +5181,27 @@ export function createPluginStore(options: PluginStoreOptions) {
         return { connected: false };
       }
 
-      // Read before the write, because the upsert leaves nothing behind that tells the two cases
-      // apart, and whether a row was already here is the whole of what decides if anybody acted.
-      const existing = await this.brokeredConnection(input);
+      /*
+       * READ BEFORE THE WRITE, because the upsert leaves nothing behind that tells the two cases
+       * apart, and whether a row was already here is the whole of what decides if anybody acted.
+       *
+       * AND THE VERDICT IS READ BESIDE THE ROW'S EXISTENCE, which is the consent arm's business.
+       * `verified` here is the difference between "this deployment has already recorded the
+       * vendor's yes" and "it has not", and the write below is conditioned on it so that a mount
+       * cannot re-date a consent that was recorded days ago. The column is read directly rather
+       * than through {@link brokeredConnection}, which answers with the connection date alone.
+       */
+      const [held] = await database
+        .select({ verified: composioConnections.verified })
+        .from(composioConnections)
+        .where(
+          and(
+            eq(composioConnections.toolkit, input.toolkit),
+            eq(composioConnections.userId, input.userId),
+          ),
+        )
+        .limit(1);
+      const existing = held !== undefined;
 
       /*
        * THE SCHEME ON THE APP'S ROW, WHICH IS WHAT DECIDES WHETHER THE YES ABOVE IS A CHECK.
@@ -5221,28 +5243,80 @@ export function createPluginStore(options: PluginStoreOptions) {
        * WHAT THIS CONFIRM ANSWERS FOR EACH KIND OF APP, WRITTEN DOWN BECAUSE THE CHAIN CANNOT BE.
        *
        * Type-only and erased; see {@link Decides}. The chain below tests ONE member and then tests
-       * something else — `kind === "consent"`, then `!existing` — so there is no position where the
-       * compiler has this vocabulary narrowed away and nothing here would fail for a fourth member.
+       * something else — `kind === "none"`, `kind === "consent"`, then `!existing` — so there is no
+       * position where the compiler has this vocabulary narrowed away and nothing here would fail
+       * for a fifth member.
        * This is the caller that WRITES, and it is the one that could not survive being wrong: it
        * runs from an effect on mount, so whatever it decides for a member nobody named is decided
        * again on every page load.
        *
-       * `consent` IS THE CONTESTED CELL and is written as what the code does rather than as what it
-       * should do — the re-stamp of `verified_at` on an already-consented row is a live finding, and
-       * a roster that described the intended behaviour would be the prose contract this mechanism
-       * exists to replace. See the table in `tests/composio-connection-kinds.test.ts`, which
-       * declares that cell by name instead of asserting it.
+       * EVERY CELL IS NOW ASSERTED RATHER THAN DECLARED. `consent` used to be written as what the
+       * code did rather than as what it should do — the re-stamp of `verified_at` on an
+       * already-consented row was a live finding — and `none` did not exist as a member at all, so
+       * a no-auth app was classified `consent` and got that same write on every mount. See the
+       * table in `tests/composio-connection-kinds.test.ts`, which drives each of these four against
+       * the running code.
        */
       type _ConfirmDecides = Decides<
         SchemeKind,
         {
           key: "leaves an existing row exactly as it is; records a new one as unchecked";
-          consent: "records the vendor's yes as a verification, re-stamping verified_at on every mount";
+          consent: "records the vendor's yes as a verification the first time, and leaves an already-consented row alone";
+          none: "writes nothing and files nothing — there is no account here for a row to be about";
           unreadable: "treated as a key app is — nothing already recorded is overwritten";
         }
       >;
 
-      if (kind === "consent") {
+      /*
+       * AND THE CONSENT WRITE HAPPENS ONCE, WHICH IS THE OTHER HALF OF "A MOUNT DOES NOT RE-DECIDE".
+       *
+       * CRITERION. `verified: true` is written for a consent app only where this deployment has not
+       * already recorded it. A row already carrying that verdict is left exactly as it is, its
+       * `verified_at` included.
+       *
+       * REASON. The arm was unconditional, and this method runs from an effect on mount — so every
+       * page load re-stamped `verified_at` to the moment of the load. The flag never changed, so
+       * nothing looked wrong; what was destroyed was the DATE, which for a consent connection is
+       * the day somebody finished at the vendor's own screen and is a fact nothing else in this
+       * deployment records. The row's own sentence, "last checked 1 Sep", became "last checked
+       * today" on a day nothing was checked, and the real date could not be recovered from anywhere.
+       * {@link recheckBrokeredConnection} refuses to probe a consent app in order to protect exactly
+       * that date; a confirm that re-stamped it on every mount destroyed from the inside what that
+       * refusal protects from the outside. Two earlier fixes made this arm conditional for the key
+       * case and then for the unreadable case and left the consent case — the one the arm is
+       * actually FOR — writing on every load.
+       *
+       * AND A ROW NOT YET CARRYING THE VERDICT IS STILL HEALED, once. A consent app whose row was
+       * written by some other path — a key-era connect, an enable that changed the app's scheme
+       * afterwards — reads `false` with a null date, which is the pair "nobody has checked" and is
+       * not true of a consented account. The vendor's yes above is the check for this kind of app,
+       * so it is recorded, with the stamp of the moment it was first recorded here, and the next
+       * mount finds the verdict already present and writes nothing.
+       */
+      /*
+       * AN APP THERE IS NOTHING TO CONNECT TO GETS NO ROW, WHICH IS THE OTHER TABLE'S RULE APPLIED
+       * HERE FOR THE FIRST TIME.
+       *
+       * CRITERION. Nothing is written and nothing is filed for a `none` app, whatever the vendor
+       * answered about it.
+       *
+       * REASON. `NO_AUTH` used to be a member of the CONSENT list, so the classifier called it
+       * consent and the arm below wrote `verified: true` with a fresh `verified_at` for it — on
+       * every page load, because this runs from an effect on mount. That is precisely the row the
+       * connect route refuses to create for these apps and the row the per-person gate is written to
+       * do without: `composio_connections` is the whole of the permission for a brokered call, and
+       * every row in it means one thing, that this person granted this deployment access to their
+       * account at this app. There is no account — Composio refuses even to hold an authorization
+       * config for a no-auth toolkit — and there is no grant, so a year on, offboarding, the trail
+       * and the Disconnect button could not tell those rows from ones somebody really made.
+       *
+       * THE NEGATIVE HEAL ABOVE STILL RAN, and deliberately: a row left behind by the version that
+       * wrote them is removed by the first mount that finds the vendor holding no account, which is
+       * every mount for an app like this.
+       */
+      if (kind === "none") return { connected: true };
+
+      if (kind === "consent" && !held?.verified) {
         // VERIFIED, BECAUSE A CONSENT SCREEN IS A VERIFICATION AND NOT A LESSER KIND OF ONE. The
         // vendor has just answered that this person's account is attached, which is the same
         // question a probe goes and asks; that the evidence arrived through a consent flow rather
@@ -5264,7 +5338,7 @@ export function createPluginStore(options: PluginStoreOptions) {
           // having been checked with an action nothing had called.
           probeAction: null,
         });
-      } else if (!existing) {
+      } else if (kind !== "consent" && !existing) {
         /*
          * A KEY APP THE VENDOR HOLDS AN ACCOUNT FOR AND NOTHING HERE HAS A ROW FOR: recorded as
          * UNCHECKED, which is the honest one of the four states for it. The account was made
@@ -5425,6 +5499,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         {
           key: "connects, then checks the key it was just handed";
           consent: "refuses — not an app this deployment connects with values somebody types";
+          none: "the same refusal — an app that needs no credential has nowhere to put one";
           unreadable: "the same refusal, reached by elimination rather than by decision";
         }
       >;
@@ -5820,6 +5895,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         {
           key: "spends a call against the key this deployment holds";
           consent: "refuses — there is no key here to re-check";
+          none: "the same refusal — there is no account, let alone a key, to check";
           unreadable: "the same refusal, which is the closed direction";
         }
       >;
@@ -6099,6 +6175,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         {
           key: "claims no vendor revocation — nothing at the vendor holds this key";
           consent: "reports the vendor's own withdrawal as asked for";
+          none: "reports whatever the vendor says it ended, which for an app with no account is nothing";
           unreadable: "reports it as asked for too, which is the claim that cannot be too weak";
         }
       >;

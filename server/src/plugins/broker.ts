@@ -52,45 +52,79 @@ export function isFieldScheme(scheme: string | null): scheme is FieldScheme {
 /**
  * The schemes where the VENDOR'S OWN YES is the whole of the check, and nothing here is ever spent.
  *
- * `OAUTH2` and `DCR_OAUTH` are the two consent flows: somebody finishes at the vendor's own screen
- * and the account it attaches is the evidence. `NO_AUTH` joins them for the same reason rather than
- * a different one — an app that needs no credential has nothing that could be tried, so a call
- * against it is never evidence about an account either.
+ * `OAUTH2` and `DCR_OAUTH` are the two consent flows: somebody finishes at the vendor's own screen,
+ * the account it attaches is the evidence, and `composio_connections` holds a row saying this
+ * person granted this deployment access to it.
+ *
+ * `NO_AUTH` IS NOT ONE OF THEM, AND USED TO BE. It was put here on the reasoning that an app with no
+ * credential has nothing that could be tried either — true, and the wrong half of the question. What
+ * this list decides is not "is there anything to probe" but "is the vendor's yes a verification of
+ * an ACCOUNT", and a no-auth app has no account at all: Composio refuses even to hold an
+ * authorization config for one, nobody ever consents to anything, and there is nothing to withdraw.
+ * Two consumers already knew that and said so by comparing the raw string — the per-person gate let
+ * such a call through without a row, and the connect route refused to make one — while
+ * {@link schemeKind} went on answering `consent`, so the one consumer that asked the classifier
+ * wrote, on every page load, the exact row the other two exist to keep out of that table. See
+ * {@link NO_CREDENTIAL_SCHEME_NAMES}.
  *
  * WRITTEN AS A LIST FOR {@link FIELD_SCHEME_NAMES}' REASON, and read by {@link schemeKind}. The
  * writer of this column is `schemeFor` in `plugins/store.ts`; a literal it spelled that the reader
  * here did not recognise is the failure this pair exists to make impossible, and
  * {@link RecordedScheme} — that function's return type — is what holds the two to one set.
  */
-const CONSENT_SCHEME_NAMES = ["OAUTH2", "DCR_OAUTH", "NO_AUTH"] as const;
+const CONSENT_SCHEME_NAMES = ["OAUTH2", "DCR_OAUTH"] as const;
 
 export type ConsentScheme = (typeof CONSENT_SCHEME_NAMES)[number];
 
 /**
+ * The schemes where there is NOTHING TO CONNECT: no credential, no account, no consent.
+ *
+ * ONE MEMBER, AND A LIST ANYWAY, for {@link FIELD_SCHEME_NAMES}' reason and because the set is the
+ * vendor's rather than ours — `NO_AUTH` is what Composio publishes for the thirty-odd toolkits that
+ * need nothing, and it sits beside `API_KEY`, `BASIC`, `BEARER_TOKEN` and `BASIC_WITH_JWT` in its
+ * own scheme enum. A second name for the same idea is Composio's to add, and a list is what makes
+ * that a one-line change here rather than a search for a string literal.
+ *
+ * WHAT IT DECIDES IS WHETHER A ROW MAY BE WRITTEN AT ALL. `composio_connections` is the whole of
+ * the permission for a brokered call and every row in it means one thing: this person granted this
+ * deployment access to their account at this app. There is no account and no grant here, so nothing
+ * may be written — which is what the per-person gate and the connect route already acted on, each
+ * by comparing this literal itself. They now ask {@link schemeKind}, and so does everything else.
+ */
+const NO_CREDENTIAL_SCHEME_NAMES = ["NO_AUTH"] as const;
+
+export type NoCredentialScheme = (typeof NO_CREDENTIAL_SCHEME_NAMES)[number];
+
+/**
  * Every literal this deployment ever WRITES to `mcp_servers.auth_scheme`.
  *
- * The return type of the function that composes one, so a scheme neither list admits cannot be
- * written down in the first place. Reading is the other half and is deliberately wider: the column
- * is `text`, a row may have been inserted by hand or restored from a deployment that knew other
- * names, and {@link schemeKind} is what says what to do about one of those.
+ * The return type of the function that composes one, so a scheme no list admits cannot be written
+ * down in the first place. Reading is the other half and is deliberately wider: the column is
+ * `text`, a row may have been inserted by hand or restored from a deployment that knew other names,
+ * and {@link schemeKind} is what says what to do about one of those.
  */
-export type RecordedScheme = FieldScheme | ConsentScheme;
+export type RecordedScheme = FieldScheme | ConsentScheme | NoCredentialScheme;
 
 /**
  * What a recorded scheme DECIDES, which is the one vocabulary every caller branches on.
  *
- * THREE ANSWERS AND NOT TWO, which is the whole reason this exists rather than a second `includes`
- * beside {@link isFieldScheme}. `key` and `consent` are the two kinds of app; `unreadable` is a
- * column this deployment cannot act on — a null, or a literal nothing here writes — and it is a
- * real state rather than a defensive one: `mcp_servers.url` carries no unique index, so the row
- * that answers for an app is not always the row an enable wrote a scheme onto, and a hand-inserted
- * or restored row carries whatever it carries.
+ * FOUR ANSWERS AND NOT TWO, which is the whole reason this exists rather than a second `includes`
+ * beside {@link isFieldScheme}. `key` and `consent` are the two kinds of app somebody CONNECTS;
+ * `none` is an app there is nothing to connect to at all; and `unreadable` is a column this
+ * deployment cannot act on — a null, or a literal nothing here writes — and it is a real state
+ * rather than a defensive one: `mcp_servers.url` carries no unique index, so the row that answers
+ * for an app is not always the row an enable wrote a scheme onto, and a hand-inserted or restored
+ * row carries whatever it carries.
  *
- * AND IT IS NOT A SPELLING OF `consent`, WHICH IS THE FAILURE THIS TYPE REPLACES. Asking only "is
- * this a key app" makes every other answer consent by elimination, and consent is the one scheme
- * where the vendor's yes IS a verification — so a column nobody could read was writing a verdict
- * about evidence nobody had, on every page load. A caller that cannot tell the third answer from
- * the second has no way to fail closed, because it never learns that there was nothing to read.
+ * AND NEITHER OF THE OTHER TWO IS A SPELLING OF `consent`, WHICH IS THE FAILURE THIS TYPE REPLACES
+ * — TWICE. Asking only "is this a key app" makes every other answer consent by elimination, and
+ * consent is the one scheme where the vendor's yes IS a verification — so a column nobody could
+ * read was writing a verdict about evidence nobody had, on every page load. A caller that cannot
+ * tell that answer from consent has no way to fail closed, because it never learns that there was
+ * nothing to read. `none` was the same mistake made one level up: `NO_AUTH` sat in the consent
+ * LIST, so the classifier itself called it consent, and the two consumers that knew better said so
+ * by comparing the raw literal rather than by asking — one vocabulary member answered two ways from
+ * inside, which is the drift a closed vocabulary exists to make impossible.
  *
  * WRITTEN AS A ROSTER FOR {@link FIELD_SCHEME_NAMES}' REASON, AND FOR A SECOND ONE. The first is
  * that file's: one list, read by the type and by everything that has to enumerate the members, so
@@ -100,7 +134,7 @@ export type RecordedScheme = FieldScheme | ConsentScheme;
  * about the answers it was not written for. The roster is what the witnesses at those consumers are
  * checked against.
  */
-export const SCHEME_KINDS = ["key", "consent", "unreadable"] as const;
+export const SCHEME_KINDS = ["key", "consent", "none", "unreadable"] as const;
 
 export type SchemeKind = (typeof SCHEME_KINDS)[number];
 
@@ -141,10 +175,11 @@ export type Decides<
 /** {@link SchemeKind} for a value read out of the column. */
 export function schemeKind(scheme: string | null): SchemeKind {
   if (isFieldScheme(scheme)) return "key";
-  if (
-    scheme !== null &&
-    (CONSENT_SCHEME_NAMES as readonly string[]).includes(scheme)
-  ) {
+  if (scheme === null) return "unreadable";
+  if ((NO_CREDENTIAL_SCHEME_NAMES as readonly string[]).includes(scheme)) {
+    return "none";
+  }
+  if ((CONSENT_SCHEME_NAMES as readonly string[]).includes(scheme)) {
     return "consent";
   }
   return "unreadable";

@@ -505,13 +505,13 @@ for (const padded of PADDED_SCHEMES) {
  * every one of them by name. This table is what the compiler cannot check — what each consumer
  * actually DOES with the member, asserted against the running code.
  *
- * THE TWO CONTESTED CELLS ARE DECLARED AND NOT ASSERTED, WHICH IS THE POINT OF HAVING THEM HERE.
- * `confirmBrokeredConnection × consent` and `the connect route × unreadable` are each claimed by an
- * open finding on this branch; the behaviour they have today is the behaviour those findings exist
- * to change. Asserting it would pin the defect, and omitting the cell would leave the hole
- * invisible — which is the whole failure this table is a lever against. So each is named, with the
- * finding that claims it, and {@link declaredCells} holds the two to being exactly two: the fix
- * cycle that closes one and does not flip its cell to an assertion reddens here.
+ * NOTHING IS DECLARED RATHER THAN ASSERTED ANY MORE, AND THE MECHANISM THAT SAYS SO STAYS.
+ * `confirmBrokeredConnection × consent` and `the connect route × unreadable` were each claimed by an
+ * open finding: asserting what they did would have pinned the defect, and omitting the cell would
+ * have left the hole invisible — which is the whole failure this table is a lever against. Both
+ * findings are closed and both cells are assertions now, so {@link DECLARED_CELLS} is empty; it is
+ * kept because the next contested cell has to be declared somewhere, and an empty list holds the
+ * table to the claim that there is no such cell today.
  */
 
 /**
@@ -558,6 +558,11 @@ const APP: Record<
     id: `composio-kinds-consent-${suite}`,
     recorded: "OAUTH2",
   },
+  none: {
+    slug: `kinds-noauth-${suite}`,
+    id: `composio-kinds-noauth-${suite}`,
+    recorded: "NO_AUTH",
+  },
   unreadable: {
     slug: `kinds-unreadable-${suite}`,
     id: `composio-kinds-unreadable-${suite}`,
@@ -568,21 +573,23 @@ const APP: Record<
 /**
  * A SECOND LITERAL PER MEMBER, so no cell below rests on one spelling of its member.
  *
- * The `consent` entry is what earns this column its keep: `NO_AUTH` is a consent-kind scheme by
- * `schemeKind`, and TWO of the consumers below single it out by comparing that raw string instead
- * of asking the classifier. A member whose consumers disagree INSIDE the member is exactly the
- * drift a one-literal-per-member table would report as agreement.
+ * IT USED TO CARRY `NO_AUTH` AS THE SECOND SPELLING OF `consent`, AND THAT IS WHAT IT WAS FOR. Two
+ * consumers singled that literal out by comparing the raw string instead of asking the classifier,
+ * so one member was answered two ways from inside — exactly the drift a one-literal-per-member table
+ * would report as agreement. It is its own member now, and the entry that earns this column its keep
+ * is `consent`'s second consent flow.
+ *
+ * `none` HAS NO SECOND SPELLING, AND THE NULL SAYS SO RATHER THAN INVENTING ONE. `NO_AUTH` is the
+ * whole of that member — it is Composio's own name for a toolkit that needs nothing — so a second
+ * literal here would be a name this deployment made up, and a cell resting on it would be asserting
+ * about a value the column can never hold. The member is still reached from a real value: `APP.none`
+ * records the literal, and the reachability test below reads both lists.
  */
-const OTHER_LITERAL: Record<SchemeKind, string> = {
+const OTHER_LITERAL: Record<SchemeKind, string | null> = {
   key: "BEARER_TOKEN",
-  consent: "NO_AUTH",
+  consent: "DCR_OAUTH",
+  none: null,
   unreadable: "SOMETHING_THIS_DEPLOYMENT_NEVER_WRITES",
-};
-
-/** The no-auth app, which is a `consent` member that two of the consumers answer differently. */
-const NO_AUTH_APP = {
-  slug: `kinds-noauth-${suite}`,
-  id: `composio-kinds-noauth-${suite}`,
 };
 
 /**
@@ -601,14 +608,9 @@ const NO_PROBE_APP = {
 const botId = `agent_kinds_${suite}`;
 const admin = "admin@openbot.local";
 
-const APP_IDS = [
-  ...Object.values(APP).map((app) => app.id),
-  NO_AUTH_APP.id,
-  NO_PROBE_APP.id,
-];
+const APP_IDS = [...Object.values(APP).map((app) => app.id), NO_PROBE_APP.id];
 const TOOLKITS = [
   ...Object.values(APP).map((app) => app.slug),
-  NO_AUTH_APP.slug,
   NO_PROBE_APP.slug,
 ];
 
@@ -781,6 +783,27 @@ async function publishProbe(serverId: string): Promise<void> {
   });
 }
 
+/**
+ * The date one row claims it was last verified on, which is the fact a re-stamp destroys.
+ *
+ * READ AS THE COLUMN RATHER THAN THROUGH `brokeredConnectionsFor`, because what is at stake is the
+ * stored value and not the sentence a screen draws from it: a confirm that re-dates the row to the
+ * page load leaves every derived reading perfectly consistent with itself and wrong about the day.
+ */
+async function verifiedAtOf(toolkit: string): Promise<Date | null> {
+  const [row] = await database
+    .select({ verifiedAt: composioConnections.verifiedAt })
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, toolkit),
+        eq(composioConnections.userId, person),
+      ),
+    )
+    .limit(1);
+  return row?.verifiedAt ?? null;
+}
+
 /** What this deployment believes the person holds, out of this run's apps only. */
 async function recordedHere(): Promise<string[]> {
   const rows = await database
@@ -824,7 +847,6 @@ beforeEach(async () => {
   for (const app of Object.values(APP)) {
     await seedApp(app.id, app.slug, app.recorded);
   }
-  await seedApp(NO_AUTH_APP.id, NO_AUTH_APP.slug, "NO_AUTH");
   await seedApp(NO_PROBE_APP.id, NO_PROBE_APP.slug, "API_KEY");
   /*
    * THE ACTION IS PUBLISHED ON EVERY APP BUT ONE, so that the gate cell and the probe cells are
@@ -832,10 +854,7 @@ beforeEach(async () => {
    * would be refused for having nothing to call rather than for having no connection — and the
    * probe cells need the key app to have one. {@link NO_PROBE_APP} is the deliberate exception.
    */
-  for (const id of [
-    ...Object.values(APP).map((app) => app.id),
-    NO_AUTH_APP.id,
-  ]) {
+  for (const id of Object.values(APP).map((app) => app.id)) {
     await publishProbe(id);
     await store.grant("mcp", `${id}/${PROBE_ACTION}`, botId, admin);
   }
@@ -899,11 +918,16 @@ type Consumer<Member extends string> = {
  * other six can never be asked about — a hole that would leave every other row in this table
  * trivially green. It is the first row for that reason.
  *
- * THREE OF THE SIX DO NOT ASK THE CLASSIFIER, which is the finding this table records rather than
- * hides. The per-person gate compares the raw literal `NO_AUTH`; the connect route compares that
- * literal and then asks {@link isFieldScheme}; `connectBrokeredWithFields` asks `isFieldScheme`
- * alone. So their cells are about a member whose name they never learn, and the `consent` cells of
- * the first two say out loud that the member is answered two different ways INSIDE itself.
+ * THIS TABLE IS WHAT FOUND THE `none` MEMBER. Two consumers used to reach their answer by comparing
+ * the raw literal `NO_AUTH` rather than asking the classifier, which called that scheme `consent` —
+ * so their `consent` cells had to say out loud that one member was answered two different ways from
+ * INSIDE, and the cell beside them showed what it cost: the one consumer that did ask wrote a
+ * verified connection row, on every page load, for the apps those two exist to keep out of that
+ * table. `NO_AUTH` is its own member now and every consumer reads it by name.
+ *
+ * ONE CONSUMER STILL DOES NOT ASK. `connectBrokeredWithFields` branches on {@link isFieldScheme}
+ * alone, so its three non-key cells reach one refusal by elimination — which is the right answer
+ * three times over rather than three decisions, and its roster says so.
  */
 const SCHEME_CONSUMERS: Consumer<SchemeKind>[] = [
   {
@@ -918,10 +942,31 @@ const SCHEME_CONSUMERS: Consumer<SchemeKind>[] = [
       },
       consent: {
         decides:
-          "answers `consent` for both consent flows and for NO_AUTH, which has nothing to try either",
+          "answers `consent` for both consent flows, and for those two alone",
         assert: async () => {
           expect(schemeKind(APP.consent.recorded)).toBe("consent");
           expect(schemeKind(OTHER_LITERAL.consent)).toBe("consent");
+
+          /*
+           * AND NO LONGER FOR `NO_AUTH`, which is the whole of the change this member underwent.
+           * What this list decides is not "is there anything to probe" but "is the vendor's yes a
+           * verification of an ACCOUNT", and a no-auth app has no account to be verified.
+           */
+          expect(schemeKind("NO_AUTH")).not.toBe("consent");
+        },
+      },
+      none: {
+        decides:
+          "answers `none` for NO_AUTH, which is its own member and not a spelling of consent",
+        assert: async () => {
+          expect(schemeKind(APP.none.recorded)).toBe("none");
+
+          /*
+           * AND THE MEMBER HAS EXACTLY ONE SPELLING, which is what {@link OTHER_LITERAL} says with
+           * a null rather than with an invented second name. A cell resting on a literal the column
+           * can never hold would be asserting about nothing.
+           */
+          expect(OTHER_LITERAL.none).toBeNull();
         },
       },
       unreadable: {
@@ -957,7 +1002,7 @@ const SCHEME_CONSUMERS: Consumer<SchemeKind>[] = [
       },
       consent: {
         decides:
-          "demands a connection row for OAUTH2 — but NOT for the NO_AUTH literal, which this gate exempts by comparing the raw string instead of asking the classifier",
+          "demands a connection row, because somebody consented at the vendor and the row is that grant",
         assert: async () => {
           useAnsweringClient();
           expect(
@@ -971,20 +1016,28 @@ const SCHEME_CONSUMERS: Consumer<SchemeKind>[] = [
             ),
           ).toMatch(/have not connected/i);
           expect(reached).toEqual([]);
-
-          /*
-           * THE SAME MEMBER, THE OTHER LITERAL, AND THE OPPOSITE ANSWER. This is the whole reason
-           * the gate is in this table: one member of the vocabulary, two behaviours, decided by a
-           * string comparison that a fourth member would not disturb and that no reader of
-           * `schemeKind` would predict.
-           */
+        },
+      },
+      none: {
+        decides:
+          "lets the call through with no row at all, and writes none — there is no account, so there is nothing anybody could have granted",
+        assert: async () => {
+          useAnsweringClient();
           await store.callTool({
-            ref: `${NO_AUTH_APP.id}/${PROBE_ACTION}`,
+            ref: `${APP.none.id}/${PROBE_ACTION}`,
             args: {},
             botId,
             actorId: person,
           });
           expect(reached).toEqual([PROBE_ACTION]);
+
+          /*
+           * AND THE EXEMPTION IS ASKED OF THE CLASSIFIER NOW RATHER THAN OF THE RAW STRING, which
+           * is why this is a cell of its own member instead of half of `consent`'s. Nothing is
+           * recorded either: the whole reason this gate lets the call through is that the table has
+           * no honest row to hold for an app nobody connected.
+           */
+          expect(await recordedHere()).toEqual([]);
         },
       },
       unreadable: {
@@ -1023,9 +1076,85 @@ const SCHEME_CONSUMERS: Consumer<SchemeKind>[] = [
       },
       consent: {
         decides:
-          "records the vendor's yes as a verification, and re-stamps verified_at over an already-consented row on every mount",
-        claimedBy:
-          "round 3 finding 1-2 #2 — confirm re-stamps verified_at on the consent arm, destroying the consent date recheckBrokeredConnection fails closed to protect",
+          "records the vendor's yes as a verification where nothing is recorded yet, and leaves an already-consented row — and the date it earned — exactly as it is",
+        assert: async () => {
+          /*
+           * THE FIRST MOUNT, which is the one that has something to learn: the vendor holds an
+           * account, this deployment holds no row, and for a consent app the vendor's yes IS the
+           * check. That is the one write this arm makes.
+           */
+          await store.confirmBrokeredConnection({
+            toolkit: APP.consent.slug,
+            userId: person,
+          });
+          expect(await recordedHere()).toEqual([
+            `${APP.consent.slug}:true:null`,
+          ]);
+          expect(await verifiedAtOf(APP.consent.slug)).not.toBeNull();
+
+          /*
+           * AND EVERY MOUNT AFTER IT, WHICH IS WHAT THIS CELL IS ABOUT. Confirm runs from an effect
+           * on mount, so an unconditional write here is a write on every page load — and the value
+           * it overwrites is the DATE somebody consented, which nothing else in this deployment
+           * records. {@link recheckBrokeredConnection} refuses to probe a consent app for exactly
+           * that reason, and a mount that re-stamps the row destroys from the inside what that
+           * refusal protects from the outside.
+           *
+           * SEEDED WITH A DATE IN THE PAST rather than compared across two calls a millisecond
+           * apart, so the assertion cannot pass on a clock that did not tick.
+           */
+          const consentedOn = new Date("2026-09-01T10:00:00.000Z");
+          await database
+            .delete(composioConnections)
+            .where(
+              and(
+                eq(composioConnections.toolkit, APP.consent.slug),
+                eq(composioConnections.userId, person),
+              ),
+            );
+          await database.insert(composioConnections).values({
+            toolkit: APP.consent.slug,
+            userId: person,
+            verified: true,
+            verifiedAt: consentedOn,
+            probeAction: null,
+          });
+
+          await store.confirmBrokeredConnection({
+            toolkit: APP.consent.slug,
+            userId: person,
+          });
+          expect(await verifiedAtOf(APP.consent.slug)).toEqual(consentedOn);
+          expect(await recordedHere()).toEqual([
+            `${APP.consent.slug}:true:null`,
+          ]);
+        },
+      },
+      none: {
+        decides:
+          "writes nothing and files nothing — the row it used to write on every mount is the exact row the connect route refuses to make",
+        assert: async () => {
+          await store.confirmBrokeredConnection({
+            toolkit: APP.none.slug,
+            userId: person,
+          });
+          expect(await recordedHere()).toEqual([]);
+
+          /*
+           * AND AGAIN, BECAUSE WHAT IT USED TO DO IT DID ON EVERY PAGE LOAD. `NO_AUTH` was a member
+           * of the consent LIST, so this — the one consumer that asked the classifier — was told
+           * `consent` and wrote `verified: true` with a fresh date for an app that has no account,
+           * no consent and nothing Composio will even hold an authorization config for. Every row in
+           * `composio_connections` means one thing, that this person granted this deployment access
+           * to their account at this app, and a year on those rows are indistinguishable from ones
+           * somebody really made.
+           */
+          await store.confirmBrokeredConnection({
+            toolkit: APP.none.slug,
+            userId: person,
+          });
+          expect(await recordedHere()).toEqual([]);
+        },
       },
       unreadable: {
         decides:
@@ -1075,19 +1204,33 @@ const SCHEME_CONSUMERS: Consumer<SchemeKind>[] = [
       },
       consent: {
         decides:
-          "refuses — not an app this deployment connects with values somebody types — for OAUTH2 and for NO_AUTH alike",
+          "refuses — not an app this deployment connects with values somebody types",
         assert: async () => {
-          for (const slug of [APP.consent.slug, NO_AUTH_APP.slug]) {
-            expect(
-              await refusalOf(
-                store.connectBrokeredWithFields({
-                  toolkit: slug,
-                  userId: person,
-                  values: { generic_api_key: "never-sent-anywhere" },
-                }),
-              ),
-            ).toMatch(/not an app this deployment connects with values/);
-          }
+          expect(
+            await refusalOf(
+              store.connectBrokeredWithFields({
+                toolkit: APP.consent.slug,
+                userId: person,
+                values: { generic_api_key: "never-sent-anywhere" },
+              }),
+            ),
+          ).toMatch(/not an app this deployment connects with values/);
+          expect(brokerAsks).toEqual([]);
+        },
+      },
+      none: {
+        decides:
+          "the same refusal, reached by elimination too — an app that needs no credential has nowhere to put one",
+        assert: async () => {
+          expect(
+            await refusalOf(
+              store.connectBrokeredWithFields({
+                toolkit: APP.none.slug,
+                userId: person,
+                values: { generic_api_key: "never-sent-anywhere" },
+              }),
+            ),
+          ).toMatch(/not an app this deployment connects with values/);
           expect(brokerAsks).toEqual([]);
         },
       },
@@ -1129,22 +1272,39 @@ const SCHEME_CONSUMERS: Consumer<SchemeKind>[] = [
       },
       consent: {
         decides:
-          "refuses — there is no key here to re-check — for OAUTH2 and for NO_AUTH alike, and spends nothing",
+          "refuses — there is no key here to re-check — and spends nothing, which is what protects the date the consent earned",
         assert: async () => {
           useAnsweringClient();
-          for (const slug of [APP.consent.slug, NO_AUTH_APP.slug]) {
-            await database
-              .insert(composioConnections)
-              .values({ toolkit: slug, userId: person });
-            expect(
-              await refusalOf(
-                store.recheckBrokeredConnection({
-                  toolkit: slug,
-                  userId: person,
-                }),
-              ),
-            ).toMatch(/is not an app this deployment holds a key for/);
-          }
+          await database
+            .insert(composioConnections)
+            .values({ toolkit: APP.consent.slug, userId: person });
+          expect(
+            await refusalOf(
+              store.recheckBrokeredConnection({
+                toolkit: APP.consent.slug,
+                userId: person,
+              }),
+            ),
+          ).toMatch(/is not an app this deployment holds a key for/);
+          expect(reached).toEqual([]);
+        },
+      },
+      none: {
+        decides:
+          "the same refusal — there is no account here, let alone a key, and nothing is spent",
+        assert: async () => {
+          useAnsweringClient();
+          await database
+            .insert(composioConnections)
+            .values({ toolkit: APP.none.slug, userId: person });
+          expect(
+            await refusalOf(
+              store.recheckBrokeredConnection({
+                toolkit: APP.none.slug,
+                userId: person,
+              }),
+            ),
+          ).toMatch(/is not an app this deployment holds a key for/);
           expect(reached).toEqual([]);
         },
       },
@@ -1206,6 +1366,30 @@ const SCHEME_CONSUMERS: Consumer<SchemeKind>[] = [
           ).toEqual({ vendorRevocationRequested: true });
         },
       },
+      none: {
+        decides:
+          "reports whatever the vendor says it ended, which is the same claim it makes for everything it cannot call a key app",
+        assert: async () => {
+          await database
+            .insert(composioConnections)
+            .values({ toolkit: APP.none.slug, userId: person });
+          expect(
+            await store.disconnectBrokered({
+              toolkit: APP.none.slug,
+              userId: person,
+              by: person,
+              reason: "self",
+            }),
+            /*
+             * THE VENDOR'S ANSWER AND NOT THIS DEPLOYMENT'S GUESS, which is why this cell is not the
+             * `false` a reader might expect of an app with no account: the field is a claim that a
+             * withdrawal was asked for, `broker.revoke` is what was asked, and its answer is what is
+             * reported. The stub answers yes for every app; a real no-auth toolkit has nothing to
+             * end and would answer no, and either way the row here says what the vendor said.
+             */
+          ).toEqual({ vendorRevocationRequested: true });
+        },
+      },
       unreadable: {
         decides:
           "reports it as asked for too — an app this deployment cannot say holds a key is one whose withdrawal it has to report as asked",
@@ -1240,24 +1424,47 @@ const SCHEME_CONSUMERS: Consumer<SchemeKind>[] = [
       },
       consent: {
         decides:
-          "mints a link at Composio for OAUTH2 — and refuses the NO_AUTH literal with the fact about it, which is the one arm this fork reaches by comparing a raw string",
+          "mints a link at Composio for the person to finish at the vendor's own screen",
         assert: async () => {
           const consented = await connectPress(APP.consent.id);
           expect(consented.status).toBe(200);
           expect(consented.payload).toHaveProperty("authorizationUrl");
-
-          const noAuth = await connectPress(NO_AUTH_APP.id);
-          expect(noAuth.status).toBe(400);
-          expect(String(noAuth.payload.error)).toMatch(/needs no account/);
-          // And the refusal cost nothing at the vendor, which is half of what makes it a refusal.
           expect(brokerAsks).toEqual([`authorize:${APP.consent.slug}`]);
+        },
+      },
+      none: {
+        decides:
+          "refuses with the fact about the app — there is no account to connect — and asks Composio nothing",
+        assert: async () => {
+          const pressed = await connectPress(APP.none.id);
+          expect(pressed.status).toBe(400);
+          expect(String(pressed.payload.error)).toMatch(/needs no account/);
+
+          /*
+           * THE REFUSAL COST NOTHING AT THE VENDOR, which is half of what makes it a refusal — and
+           * this arm is now reached by asking {@link schemeKind} rather than by comparing the raw
+           * literal, which is what put this route and the classifier on speaking terms.
+           */
+          expect(brokerAsks).toEqual([]);
         },
       },
       unreadable: {
         decides:
-          "mints a link at Composio too, reached by elimination: this route imports isFieldScheme and not schemeKind, so the consent arm is the fall-through",
-        claimedBy:
-          "round 3 findings 1-3 #1 / 2-3 #2 — the connect route still reaches consent by elimination while the store beneath it fails closed on a scheme nothing can read",
+          "refuses and asks Composio nothing — a scheme this deployment cannot read is not a consent app, and no link is minted for one",
+        assert: async () => {
+          const pressed = await connectPress(APP.unreadable.id);
+          expect(pressed.status).toBe(400);
+          expect(String(pressed.payload.error)).toMatch(
+            /cannot tell how .* connects/,
+          );
+
+          /*
+           * AND THE REFUSAL COST NOTHING AT THE VENDOR, which is half of what makes it a refusal
+           * rather than a failed attempt. Minting a link is a real act performed at Composio, and
+           * the arm this used to fall into performed it on behalf of an answer nobody decided.
+           */
+          expect(brokerAsks).toEqual([]);
+        },
       },
     },
   },
@@ -1472,16 +1679,15 @@ const PROBE_CONSUMERS: Consumer<BrokeredProbe["outcome"]>[] = [
 /**
  * EVERY CELL DECLARED RATHER THAN ASSERTED, WITH THE FINDING THAT CLAIMS IT.
  *
- * Held to being exactly these two. A fix cycle that closes one of these holes and does not flip its
- * cell from a declaration to an assertion reddens here — which is the half a `test.todo` or a
- * commented-out case cannot do, because both of those stay quiet whether or not the thing they
- * describe is still true. A THIRD declaration appearing is the same failure the other way round:
- * somebody has decided a cell is contested, and this is where that decision is visible.
+ * EMPTY, WHICH IS A CLAIM AND NOT AN ABSENCE. It held two — `confirmBrokeredConnection × consent`,
+ * which re-stamped `verified_at` on every mount, and `the connect route × unreadable`, which minted
+ * a vendor link for a scheme nothing could read — and both are now assertions above. A cell that
+ * goes back to being a declaration has to be named here, and a declaration that outlives the finding
+ * it names reddens: a fix cycle that closes a hole and does not flip its cell fails at
+ * {@link declaredCellsOf}, which is the half a `test.todo` or a commented-out case cannot do,
+ * because both of those stay quiet whether or not the thing they describe is still true.
  */
-const DECLARED_CELLS = [
-  "confirmBrokeredConnection, the one consumer that WRITES on a page load × consent",
-  "the connect route's fork, POST /servers/:id/connect × unreadable",
-];
+const DECLARED_CELLS: string[] = [];
 
 function declaredCellsOf(consumers: Consumer<string>[]): string[] {
   return consumers.flatMap((consumer) =>

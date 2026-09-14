@@ -1973,63 +1973,48 @@ describe("connecting a brokered app", () => {
   });
 
   /**
-   * THE ARM REACHED BY ELIMINATION, AGAINST THE TWO ROW SHAPES THAT ACTUALLY REACH IT.
+   * THE ARM THAT USED TO BE REACHED BY ELIMINATION, AGAINST THE TWO ROW SHAPES THAT REACH IT.
    *
    * CRITERION. A brokered row recorded with NO scheme, and one recorded with a scheme this route
-   * never names, are both answered a consent link minted for the session's own person.
+   * never names, are both REFUSED, and nothing is minted at Composio for either.
    *
-   * REASON. The fork decides `NO_AUTH` first and a field scheme second, and consent is what is left
-   * — so the consent arm is the one arm no row here was ever chosen FOR. Every brokered fixture
-   * above carries a word this route reads by name, which means the tests about minting a link all
-   * enter the arm from the one row shape that would still work if the fall-through were replaced by
-   * an explicit `authScheme === "OAUTH2"`. The two shapes below are the ones that would then stop
-   * working, and both exist in live databases: `auth_scheme` arrived as a nullable column with no
-   * backfill, so every app connected before migration 0030 carries a null, and the catalogue is the
-   * vendor's, so a scheme this deployment has never heard of is one Composio release away.
+   * REASON. The fork used to decide `NO_AUTH` first and a field scheme second, and consent was what
+   * was left — so the consent arm was the one arm no row was ever chosen FOR. Both shapes below
+   * exist in live databases: `auth_scheme` arrived as a nullable column with no backfill, so every
+   * app connected before migration 0030 carries a null, and the catalogue is the vendor's, so a
+   * scheme this deployment has never heard of is one Composio release away. What each of them got
+   * was a real act performed at the vendor — an authorization link minted for an app this
+   * deployment cannot say it holds a consent config for — on the strength of an answer nobody
+   * decided.
    *
-   * AND WHAT THE WRONG ANSWER WOULD BE IS WHY THIS IS WORTH A TEST. Neither row can be answered a
-   * form — there is nothing typed at a consent screen — so a fork that refused what it could not
-   * name would leave every pre-0030 brokered app with a Connect button that reports the app is not
-   * one this deployment can connect. The person's remedy for that sentence is to have an
-   * administrator remove the app and add it again, which takes every grant on it with it.
+   * AND THIS TEST USED TO ASSERT THE OPPOSITE, ON AN ARGUMENT WORTH RECORDING RATHER THAN DELETING.
+   * It said: neither row can be answered a form, so refusing what the route cannot name leaves every
+   * pre-0030 brokered app with a Connect button that says the app is not one this deployment can
+   * connect, and the remedy — an administrator removing the app and adding it again — takes every
+   * grant on it with it. That is a true cost, and it is the smaller one. A minted link is a
+   * capability handed out about an app whose connection kind is unknown, and the three readers of
+   * this same column in `plugins/store.ts` all fail closed on that value: the re-check refuses, the
+   * disconnect claims no revocation, and the mount-time confirm writes nothing. A route that failed
+   * open was the last one that did, and a person told to ask an administrator gets a sentence naming
+   * the act that fixes it — which is more than the consent arm's dead end offered them.
    *
-   * THE PERSON IS THE SESSION'S HERE TOO, which is the other half of what `authorized` carries: a
-   * link is a capability, and one minted under the wrong name attaches the wrong account.
+   * NOTHING MINTED IS THE HALF THAT MATTERS, which is what `authorized` carries: a link is a
+   * capability, and one minted for an app nobody could classify is one nobody chose to hand out.
    */
-  test("a brokered row whose scheme this route cannot name is still sent to consent", async () => {
+  test("a brokered row whose scheme this route cannot name is refused rather than sent to consent", async () => {
     const { authorized, connectAt } = brokeredApp();
 
     // The pre-0030 row: brokered, connected, and carrying no scheme at all.
     const held = await connectAt("composio-slack");
-    expect(held.status).toBe(200);
-    expect(await held.json()).toEqual({
-      authorizationUrl: AUTHORIZATION_URL,
-    });
+    expect(held.status).toBe(400);
+    expect(String((await held.json()).error)).toMatch(/cannot tell how/);
 
     // And a scheme the vendor names that this deployment does not.
     const drifted = await connectAt("composio-trello");
-    expect(drifted.status).toBe(200);
-    expect(await drifted.json()).toEqual({
-      authorizationUrl: AUTHORIZATION_URL,
-    });
+    expect(drifted.status).toBe(400);
+    expect(String((await drifted.json()).error)).toMatch(/cannot tell how/);
 
-    // Both for the session's own person, at each app's own page — the app read out of the url and
-    // the return address built from this deployment and the row, as the consent tests above assert
-    // for a row that was chosen by name.
-    expect(authorized).toEqual([
-      {
-        userId: ADMIN.id,
-        toolkit: "slack",
-        returnUrl:
-          "http://localhost:3001/settings/connected-accounts/composio-slack",
-      },
-      {
-        userId: ADMIN.id,
-        toolkit: "trello",
-        returnUrl:
-          "http://localhost:3001/settings/connected-accounts/composio-trello",
-      },
-    ]);
+    expect(authorized).toEqual([]);
   });
 
   test("a second connection is refused with the step to take", async () => {
