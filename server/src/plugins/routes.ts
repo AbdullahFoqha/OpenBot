@@ -1127,6 +1127,84 @@ export function createPluginRoutes(
         }
 
         /*
+         * AND AN APP THAT PUBLISHES BOXES BUT REQUIRES NONE OF THEM IS THE SAME ACCOUNT WITH A FORM
+         * IN FRONT OF IT.
+         *
+         * THE GUARD BELOW READS `required` ON THE NAMES THAT ARRIVED; THIS ONE READS THE LIST. A
+         * published list with no required field in it leaves that guard nothing to be about, so
+         * `{"values":{}}` passes it vacuously — and so does a box holding spaces, and so does the
+         * default the form seeded itself from. What each of the three makes is an account carrying
+         * no credential, which Composio answers `ACTIVE` for because it does not grade what it is
+         * handed, and which an app with no probeable action leaves recorded and drawn as connected:
+         * the very end state the required guard exists to prevent, reached down the one path that
+         * guard cannot see.
+         *
+         * THE CLAIM THIS RESTS ON, STATED RATHER THAN ASSUMED: EVERY FIELD SCHEME IN COMPOSIO'S
+         * CATALOGUE PUBLISHES AT LEAST ONE REQUIRED FIELD, BECAUSE A FIELD SCHEME IS COMPOSIO'S OWN
+         * STATEMENT THAT THE PERSON HOLDS A CREDENTIAL. What makes it a claim about the catalogue
+         * rather than a guess is that "this app needs nothing" already has its own name there:
+         * `NO_AUTH` sits beside `API_KEY`, `BASIC`, `BEARER_TOKEN` and `BASIC_WITH_JWT` in the
+         * vendor's own scheme enum (`@composio/core` 0.18.1, `src/types/authConfigs.types.ts:9-24`),
+         * and this route answers it in its own branch a few lines above — so an app that reached
+         * HERE has told Composio it needs SOMETHING, and a field list requiring nothing is not that
+         * app saying it needs nothing after all.
+         *
+         * AND THE SDK SAYS WHAT THE SOMETHING IS, PER SCHEME. `connectedAccountAuthStates.types.ts`
+         * declares the shape of an ACTIVE account one scheme at a time: `BASIC` and `BASIC_WITH_JWT`
+         * require `username` and `password`, `BEARER_TOKEN` requires `token`, and `NO_AUTH` requires
+         * nothing at all — an ACTIVE no-auth account is the base row and no credential beside it.
+         * `API_KEY` is the one that marks `api_key` and `generic_api_key` optional, and it does so
+         * because the NAME of the box varies across the catalogue and both spellings occur in it,
+         * not because an API_KEY account may hold no key: the same declaration keeps a `catchall`
+         * for the third spelling. Three of the four field schemes therefore say in the vendor's own
+         * types that an account of theirs carries a credential, and the fourth says which credential
+         * it cannot name.
+         *
+         * WHAT WAS NOT DONE, AND IT IS THE HONEST LIMIT OF THE CLAIM: the live catalogue was not
+         * enumerated. There is no network and no Composio key on this path, so "no toolkit publishes
+         * a field scheme with an empty required list" is ARGUED from the vendor's own package rather
+         * than counted across its apps. The guard is written to fail in the safe direction for that
+         * reason. If such an app does exist, it becomes an app this deployment will not connect and
+         * SAYS SO, with a remedy addressed to the one person who could change it — which is the
+         * direction the empty-list guard directly above already chose, and the opposite of the
+         * silent credential-less account that is the alternative.
+         *
+         * THE STATE UNDER THIS GUARD IS ONE STATE AND NOT TWO, WHICH IS WHAT MAKES IT DECIDABLE AT
+         * ALL. "An app whose required flags we could not read" used to be indistinguishable from
+         * "an app that requires nothing", and it is no longer: {@link ComposioBroker.connectionFields}
+         * reads each flag through `flagOf`, which answers the caller's default for an ABSENT flag
+         * and refuses one that is PRESENT and not a boolean. So a list arriving here with every
+         * `required` false is the vendor's own no on every row — never a shape this deployment
+         * failed to read, because that shape never gets past the adapter.
+         *
+         * ON THE APP AND NOT ON THE SUBMISSION, AND THE SEEDED DEFAULT IS WHY. A guard that demanded
+         * one non-blank value would be satisfied by the form's own work: the form draws each box
+         * holding the default the app published and posts every published name back whether or not
+         * anybody touched it, so a person who types nothing at an app publishing an optional
+         * `base_url` submits that default — non-blank, unchosen, and a credential in no sense. The
+         * thing that is false here is the app's field list, so the app is what is refused.
+         *
+         * ON THE SUBMISSION AND NOT ON THE PRESS ABOVE IT, for the empty-list guard's reason: the
+         * list is a true answer to "what does this app ask for", and what is false is the account
+         * the next press would make.
+         *
+         * THE SENTENCE NAMES THE BOXES THE APP DOES PUBLISH AND NO VALUE OF ANY KIND. These names
+         * are the VENDOR's, read off the list just fetched rather than off the request, and they are
+         * the whole of what an administrator needs to see what the app is publishing now. Nothing
+         * submitted appears — not even a value that merely matches a published default, because on
+         * this request that value is the caller's text rather than the vendor's.
+         */
+        if (published.every((field) => !field.required)) {
+          const optional = published.map((field) => field.name).join(", ");
+          return context.json(
+            {
+              error: `${row.title} publishes no box it says has to be filled in — only ${optional} — so nothing you could type would be a credential it insists on, and no account was made. An app that genuinely needs none is one Composio publishes as needing no authentication, and ${row.title} is recorded here as an app whose secret you type. An administrator has to look at how ${row.title} is set up at Composio; removing it on the Plugins page and adding it again is what records the way Composio connects it now.`,
+            },
+            400,
+          );
+        }
+
+        /*
          * WHAT THE APP PUBLISHED, AND A NAME IT DID NOT IS REFUSED RATHER THAN QUIETLY DROPPED.
          *
          * ONE GUARD, THREE HOLES. What is submitted is spread into the field object the adapter

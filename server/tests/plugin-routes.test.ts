@@ -2050,6 +2050,69 @@ describe("connecting an app whose secret a person types", () => {
     expect(submitted).toEqual([]);
   });
 
+  test("an app that requires none of its boxes connects nobody, blank or seeded", async () => {
+    /*
+     * THE SAME CREDENTIAL-LESS ACCOUNT AS THE EMPTY LIST ABOVE, REACHED WITH BOXES ON THE SCREEN.
+     * A field scheme is Composio's own statement that this person holds a secret, so an app
+     * publishing not one box it says has to be filled in leaves the required guard nothing to be
+     * about: `{}` passes it vacuously, a box holding spaces passes it, and so does the very default
+     * the form seeded itself from. Every one of the three makes an account carrying no credential,
+     * which Composio answers `ACTIVE` for because it does not grade what it is handed, and which an
+     * app with nothing safe to probe leaves recorded and drawn as connected on every screen here.
+     *
+     * THE SEEDED DEFAULT IS THE CASE A GUARD ON THE SUBMISSION WOULD LET THROUGH, and it is the
+     * ordinary press rather than a contrived one: the form draws `base_url` already holding the
+     * default the app published and posts every published name back whether or not anybody touched
+     * it, so somebody who types nothing at all submits a non-blank value they did not choose.
+     * Counting non-blank values would call that a credential.
+     *
+     * AND THE FORM PRESS IS STILL ANSWERED HONESTLY, as it is for the empty list one test above:
+     * the list is a true answer to what the app asks for. What is false is the account the NEXT
+     * press would make, so that is the press that is refused.
+     */
+    const { submitted, connectFields } = brokeredApp(null, AUTHORIZATION_URL, {
+      published: [
+        {
+          name: "base_url",
+          label: "Base URL",
+          help: "Leave this alone unless you run Firecrawl yourself.",
+          required: false,
+          secret: false,
+          default: "https://api.firecrawl.dev",
+        },
+      ],
+    });
+
+    const form = await connectFields();
+    expect(form.status).toBe(200);
+    expect(
+      ((await form.json()).fields as BrokerField[]).map((field) => field.name),
+    ).toEqual(["base_url"]);
+
+    for (const values of [
+      {},
+      { base_url: "   " },
+      { base_url: "https://api.firecrawl.dev" },
+    ]) {
+      const response = await connectFields({ values });
+
+      expect(response.status).toBe(400);
+      const refusal = (await response.json()).error as string;
+      // The app's name rather than the row's id, as everywhere else in this branch.
+      expect(refusal).toContain("Firecrawl");
+      expect(refusal).not.toContain("composio-firecrawl");
+      /*
+       * AND NOTHING THAT WAS SUBMITTED. The seeded default is still a value off the request, and a
+       * refusal that echoed it would be echoing whatever a caller sent under that name instead.
+       * The vendor's field NAME is what the sentence may carry, and it does.
+       */
+      expect(refusal).not.toContain("https://api.firecrawl.dev");
+      expect(refusal).toContain("base_url");
+    }
+
+    expect(submitted).toEqual([]);
+  });
+
   test("an account already connected is refused before the form is drawn", async () => {
     /*
      * THE ONE-ACCOUNT GUARD STILL RUNS FIRST, which is the ordering both branches were put after on
