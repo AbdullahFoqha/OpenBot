@@ -7,7 +7,7 @@ import {
   test,
 } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { Hono, type MiddlewareHandler } from "hono";
 import { createAuditStore } from "../src/audit";
 import type { AppVariables } from "../src/auth/guards";
@@ -19,6 +19,7 @@ import type {
 import { createDatabase } from "../src/db/client";
 import {
   agents,
+  auditEvents,
   composioConnections,
   mcpServers,
   mcpTools,
@@ -1777,5 +1778,153 @@ describe("the vocabularies are covered by name and not by accident", () => {
       ].map((recorded) => schemeKind(recorded)),
     );
     expect([...reachable].sort()).toEqual([...SCHEME_KINDS].sort());
+  });
+});
+
+/**
+ * WHAT A ROW OF THE TRAIL IS ALLOWED TO CARRY, asserted against the trail itself rather than
+ * against the return value of the method that wrote it.
+ *
+ * `audit_events` is append-only by trigger — `0000_schema.sql` refuses every UPDATE and DELETE on
+ * it, and `0012_truncate_is_not_a_way_around_append_only.sql` closes the one way round that — it is
+ * carried out of the deployment by an export, and it is kept for the whole retention window. So
+ * everything below is about the one property those three facts make non-negotiable: whatever a row
+ * carries cannot be tidied up afterwards, and a foreign string is exactly the thing nobody here
+ * bounds. Read back out of the table rather than off a spy, because the claim is about what is
+ * STORED: a payload capped on its way to a stub proves nothing about the row an auditor reads.
+ *
+ * SCOPED TO THIS RUN'S OWN APPS. Every `targetId` below is a run-suffixed slug, so these reads name
+ * rows this file wrote and nothing else — which matters more here than anywhere else in the file,
+ * because nothing may be deleted afterwards to make up for a read that was too wide.
+ */
+describe("what a brokered connection writes into the append-only trail", () => {
+  /** Every payload this run filed under one app for one event type, oldest first. */
+  async function filedUnder(
+    eventType: string,
+    toolkit: string,
+  ): Promise<Record<string, unknown>[]> {
+    const rows = await database
+      .select({ payload: auditEvents.payload })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.eventType, eventType),
+          eq(auditEvents.targetId, toolkit),
+        ),
+      )
+      .orderBy(asc(auditEvents.createdAt), asc(auditEvents.id));
+    return rows.map((row) => row.payload as Record<string, unknown>);
+  }
+
+  /**
+   * The cap every other quoted foreign string in `store.ts` is held to — `refreshTools`' two
+   * `lastError` writes, the failed undo's `revokeAccount` reason, and `callTool`'s two `failure`
+   * fields all call `.slice(0, 400)`. Spelled once here so the assertion and the sentence agree.
+   */
+  const CAP = 400;
+
+  test("a vendor sentence no one bounded is capped before it becomes a row nothing can delete", async () => {
+    /*
+     * LONGER THAN THE CAP BY A WIDE MARGIN, AND GENUINELY THE VENDOR'S.
+     *
+     * `askAction` catches a throw out of the client and hands its message to `passableSentence`,
+     * which judges whether a candidate is worth repeating and says nothing at all about length;
+     * `failure` then caps at `MAX_RESULT_CHARS`, which is 20_000. So the sentence that reaches
+     * `probeBrokeredConnection` — and from there the `unreachable` field of the verification row —
+     * is up to fifty times what every sibling write of foreign text in `store.ts` allows itself.
+     * `@composio/client` builds an `APIError` message out of a whole response body, so a
+     * multi-kilobyte sentence is the ordinary shape of this arrival rather than a contrived one.
+     */
+    const shouted = `Composio was not reachable: ${"e".repeat(5_000)}`;
+    useAnsweringClient({
+      execute: async () => {
+        throw new Error(shouted);
+      },
+    });
+
+    expect(
+      await store.connectBrokeredWithFields({
+        toolkit: APP.key.slug,
+        userId: person,
+        values: { generic_api_key: "never-sent-anywhere" },
+      }),
+    ).toEqual({ connected: true, verified: false, probe: null });
+
+    /*
+     * EVERY SUCH ROW THIS RUN FILED, not the one this test just wrote, and the difference is not
+     * fussiness. Nothing may be deleted from this table, so the earlier probe cells' rows are still
+     * here under the same app — which makes "the row I just wrote" unidentifiable and makes the
+     * whole-run claim the honest one to assert. It is also the stronger claim: no `unreachable` any
+     * path of this file can produce exceeds the cap.
+     */
+    const shouts = (
+      await filedUnder("mcp.connection_verified", APP.key.slug)
+    ).flatMap((payload) =>
+      typeof payload.unreachable === "string" ? [payload.unreachable] : [],
+    );
+
+    /*
+     * PRESENT, because its absence is the other half of what this field says: a verification row
+     * with no `unreachable` is a check that reached a verdict, and this one did not.
+     */
+    expect(shouts.length).toBeGreaterThan(0);
+    // Still the vendor's, so the cap is a bound and not a redaction — and this one is the row this
+    // test wrote, which is what ties the property below to the arrival it was found on.
+    expect(
+      shouts.some((shout) => shout.startsWith("Composio was not reachable: e")),
+    ).toBe(true);
+    // And none longer than the four other places this file quotes somebody else's words.
+    expect(shouts.filter((shout) => shout.length > CAP)).toEqual([]);
+  });
+
+  test("the two writers of a brokered mcp.account_connected row agree on the keys it carries", async () => {
+    /*
+     * THE SAME APP, TWO WAYS IN, ONE ROW SHAPE.
+     *
+     * `recordConnection`, `confirmBrokeredConnection` and `connectBrokeredWithFields` all file
+     * `mcp.account_connected`, and the first two write a `scope`. The third wrote none — so for one
+     * person `payload->>'scope'` on a brokered app came back `''` and for the next it came back
+     * NULL, in a table whose whole purpose is being queried, with nothing in either row saying
+     * which of the two writers made it. A brokered connection has no scopes at all, which is what
+     * the empty string means and why it is the right value rather than an omission.
+     */
+    useAnsweringClient();
+
+    await store.confirmBrokeredConnection({
+      toolkit: APP.consent.slug,
+      userId: person,
+    });
+    await store.connectBrokeredWithFields({
+      toolkit: APP.key.slug,
+      userId: person,
+      values: { generic_api_key: "never-sent-anywhere" },
+    });
+
+    /*
+     * EVERY ROW EITHER WRITER FILED THIS RUN, for the reason the cap test reads them all: this
+     * table cannot be pruned, the earlier cells wrote their own rows under the same two apps, and
+     * "the row I just wrote" is not a thing a reader of the trail can identify either. What a
+     * querier actually needs is that NO row of this type is missing the key, which is what the
+     * disagreement cost them.
+     */
+    const byConsent = await filedUnder(
+      "mcp.account_connected",
+      APP.consent.slug,
+    );
+    const byFields = await filedUnder("mcp.account_connected", APP.key.slug);
+    expect(byConsent.length).toBeGreaterThan(0);
+    expect(byFields.length).toBeGreaterThan(0);
+
+    // The key itself, because the defect is an ABSENT key rather than a wrong value: a
+    // `toMatchObject` or a `scope: ""` equality both read `undefined` as the thing they wanted.
+    expect(
+      [...byConsent, ...byFields].filter(
+        (payload) => !Object.hasOwn(payload, "scope"),
+      ),
+    ).toEqual([]);
+    // And they agree on what it holds, which is the property rather than the value.
+    expect([
+      ...new Set([...byConsent, ...byFields].map((payload) => payload.scope)),
+    ]).toEqual([""]);
   });
 });

@@ -38,12 +38,13 @@ import type { PolicyStore } from "./computer/policy-store";
 import { createComputerRoutes } from "./computer/routes";
 import { configuredAuthProviders, type DeploymentConfig } from "./config";
 import type { CredentialAdminService, CredentialInput } from "./credentials";
+import { withoutStatement } from "./db/query-failure";
 import { createIntelligenceClient } from "./intelligence-client";
 import type { OnboardingStore } from "./people/onboarding";
 import type { PeopleStore } from "./people/store";
 import type { ComposioBroker } from "./plugins/broker";
 import { createPluginRoutes } from "./plugins/routes";
-import type { PluginStore } from "./plugins/store";
+import { isDeploymentFault, type PluginStore } from "./plugins/store";
 import { REFUSAL_MARKER } from "./plugins/tools";
 import { createRoutineRoutes, type RoutineStore } from "./routines/routes";
 import type { RoutineRunner } from "./routines/runner";
@@ -1201,10 +1202,38 @@ export function createApp(
         });
         return context.json({ text: result.text, isError: result.isError });
       } catch (error) {
-        // A refusal is an answer, not a failure: the Bot says what was blocked and carries on. The
-        // marker leads it so a transcript can draw a refusal without reading the wording.
+        /*
+         * A refusal is an answer, not a failure: the Bot says what was blocked and carries on. The
+         * marker leads it so a transcript can draw a refusal without reading the wording.
+         *
+         * AND THE SAME QUESTION THE IN-PROCESS DOOR ASKS, which this one asked of nothing at all.
+         *
+         * CRITERION. Nothing on the `isDeploymentFault` shelf has its message relayed from here,
+         * and nothing leaving here carries a statement or a value bound to one.
+         *
+         * WHAT THIS SURFACE IS. The answer goes into the calling Bot's model as the tool result, so
+         * it is the widest audience an error message in this deployment reaches: a model repeats
+         * what it is handed — to the person asking, into whatever it writes next, and to the next
+         * tool it calls. `plugins/tools.ts` wraps the identical `callTool` for a Bot running in
+         * this process and has refused that shelf for exactly this reason since the
+         * `ServerRowAmbiguousError` finding; the two doors to one store disagreeing meant a query
+         * failure came back as `Failed query: … params: linear, usr_…` through one of them and as a
+         * fixed sentence through the other. Which door a Bot arrives at is a deployment topology
+         * decision and was never a disclosure decision.
+         *
+         * AND THROUGH {@link withoutStatement} AS WELL, because the two answer different questions
+         * and `isDeploymentFault` says so itself: it "settles who may be told, not what". The shelf
+         * decides whether this audience may hear a sentence at all; the door decides what any
+         * sentence is allowed to contain. Today the two overlap on a query failure and this arm can
+         * only be reached by something neither recognises — which is exactly the state the last two
+         * findings in this area were found in, one predicate apart from a leak.
+         */
         return context.json({
-          text: `${REFUSAL_MARKER} ${error instanceof Error ? error.message : "That tool could not be called."}`,
+          text: `${REFUSAL_MARKER} ${
+            error instanceof Error && !isDeploymentFault(error)
+              ? withoutStatement(error)
+              : "That tool could not be called."
+          }`,
           isError: true,
         });
       }

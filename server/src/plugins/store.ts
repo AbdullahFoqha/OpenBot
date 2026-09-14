@@ -3558,10 +3558,27 @@ export function createPluginStore(options: PluginStoreOptions) {
             : error;
         }
 
-        const message =
-          error instanceof McpServerError || error instanceof Error
-            ? error.message
-            : String(error);
+        /*
+         * ASKED THROUGH THE ONE DOOR, like the `storableTools` catch forty lines below that writes
+         * the same column.
+         *
+         * `McpServerError` in the old test was doing nothing — it extends `Error`, so the second arm
+         * answered for it — and what the whole expression amounted to was
+         * `error instanceof Error ? error.message : String(error)`, which is precisely the reflex
+         * {@link reasonWithoutStatement} exists to replace: it reads `.message` directly and so walks
+         * straight past {@link withoutStatement}.
+         *
+         * NOTHING REACHABLE CHANGES BEHAVIOUR HERE TODAY, and that is the reason to write it rather
+         * than an argument against. The guard above answers every query failure before this line, so
+         * the shape whose message must never travel cannot arrive by any path anybody can name. What
+         * CAN arrive is a wrapper — `composio.listTools` rethrows `new Error(listingSentence(...))`,
+         * and `listingSentence` falls through to the thrown message verbatim — and a wrapper carries
+         * no `query` and no `params` of its own, so it is on nobody's shelf and answers to nobody's
+         * check. "No thrower reachable today" was also true of the credential envelope before the
+         * rotation path started writing one; the door costs nothing and does not need to be
+         * rediscovered at the next site.
+         */
+        const message = reasonWithoutStatement(error);
         // The failure is recorded rather than thrown away, because a server with no tools and no
         // explanation reads as a server that offers nothing, and an operator would go looking in
         // the wrong place. The tools already held are left alone: a vendor being briefly
@@ -5820,6 +5837,21 @@ export function createPluginStore(options: PluginStoreOptions) {
         payload: {
           actor: input.userId,
           server: input.toolkit,
+          /*
+           * EMPTY, AND PRESENT, which is the whole of what this field does on a brokered row.
+           *
+           * All three writers of `mcp.account_connected` now agree on the key. {@link
+           * recordConnection} carries what a vendor granted a `user-oauth` grant, and both brokered
+           * writers carry `""` — a brokered connection has no scopes at all, because Composio holds
+           * the grant and never tells this deployment what it covers.
+           *
+           * WRITING NOTHING IS NOT THE SAME AS WRITING THAT. This one wrote no key, so the same app
+           * connected by two people came back as `''` from {@link confirmBrokeredConnection} and as
+           * NULL from here, in a table whose entire purpose is being queried — and with nothing in
+           * either row saying which writer made it, a reader cannot tell an absent scope from an
+           * empty one, or either from a row written before the field existed.
+           */
+          scope: "",
           reconnected: existing !== null,
           /*
            * THE NAMES AND NEVER THE VALUES. What a reader of the trail needs is which app somebody
@@ -5861,6 +5893,21 @@ export function createPluginStore(options: PluginStoreOptions) {
        * is asking a different question, "was a check attempted and what became of it", and
        * `unreachable` is the whole of the difference, in Composio's own words. Present only on the
        * outage, so its absence is as informative as its value.
+       *
+       * AND CAPPED WHERE EVERY OTHER QUOTED FOREIGN STRING IN THIS FILE IS CAPPED, which this one
+       * alone was not. `passableSentence` decides whether a candidate is worth repeating and says
+       * nothing whatever about length; `askAction` then caps at `MAX_RESULT_CHARS`, which is 20_000
+       * and is a bound written for a model's context window rather than for a row. So the sentence
+       * arriving here can be fifty times what `refreshTools`' two `lastError` writes, the failed
+       * undo's own reason a hundred lines up, and `callTool`'s two `failure` fields each allow
+       * themselves — and `@composio/client` builds an `APIError` message out of an entire response
+       * body, so a multi-kilobyte one is the ordinary arrival and not a contrived one.
+       *
+       * WHY THIS ROW AND NOT ANOTHER. `audit_events` is append-only by trigger, it is exported, and
+       * it is kept for the deployment's whole retention window: a `lastError` written too long is
+       * overwritten by the next refresh, and this is not. Whatever lands here cannot be cleaned up
+       * afterwards, which makes the one uncapped write in the file the one that could least afford
+       * to be.
        */
       await recordAuditEvent(auditStore, {
         eventType: "mcp.connection_verified",
@@ -5871,7 +5918,7 @@ export function createPluginStore(options: PluginStoreOptions) {
           action: probe,
           verified,
           ...(probed.outcome === "unreachable"
-            ? { unreachable: probed.sentence }
+            ? { unreachable: probed.sentence.slice(0, 400) }
             : {}),
         },
       });
