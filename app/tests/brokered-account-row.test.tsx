@@ -1353,6 +1353,148 @@ test("a key the vendor rejected says so, and that the account still stands", () 
   ).toBeNull();
 });
 
+/**
+ * EVERY OUTCOME ONE CHECK OF A BROKERED ACCOUNT CAN HAVE, as the SERVER names them — `BrokeredProbe`
+ * in `server/src/plugins/store.ts` — beside the row each one leaves for this screen to read.
+ *
+ * A HAND COPY FOR `SERVER_FIELD_SCHEMES`' REASON, and the same seam one vocabulary further along.
+ * The server added a fourth outcome (`unreachable`) after this screen was written, and nothing in
+ * either process is in a position to notice: the two share no module, the outcome never travels as
+ * a word, and what reaches the browser is the PAIR `{ verified, probe }` the writers leave on
+ * `composio_connections`. So this roster is the mapping itself — four server outcomes onto the row
+ * shapes a page load reads — and the test below drives the real row through each of them.
+ *
+ * THE ROW SHAPES ARE THE WRITERS' OWN. `connectBrokeredWithFields` derives `verified` from
+ * `outcome === "answered"` and records `probed.probe`, which `BrokeredProbe` withholds on both
+ * outcomes where nothing can be shown to have been spent; `recheckBrokeredConnection` writes the
+ * same pair for the two outcomes that reach its writer.
+ *
+ * A FIFTH CLIENT READING EXISTS AND IS NOT A SERVER OUTCOME: `probe: undefined` is the field being
+ * absent, which is a held connection's row and no check at all. It is covered by its own case above
+ * and is deliberately not in this roster, because nothing on this list can produce it.
+ */
+const SERVER_PROBE_OUTCOMES = [
+  {
+    outcome: "nothing",
+    /** The app published nothing safe to call, so no name and no verdict earned. */
+    row: { probe: null, verified: false, verifiedAt: null },
+    says: /published nothing safe to try a key on at the time/,
+    sharesItsSentenceWith: null,
+  },
+  {
+    outcome: "answered",
+    /** It ran in this person's account and the vendor took the key. */
+    row: { probe: PROBE, verified: true, verifiedAt: CHECKED_AT },
+    says: /last checked/,
+    sharesItsSentenceWith: null,
+  },
+  {
+    outcome: "refused",
+    /** It ran and the vendor refused the key, and the account it ran in still stands. */
+    row: { probe: PROBE, verified: false, verifiedAt: null },
+    says: /was checked against Gmail and rejected/,
+    sharesItsSentenceWith: null,
+  },
+  {
+    /**
+     * THE OUTAGE, AND THE CELL THIS ROSTER DECLARES RATHER THAN ENDORSES.
+     *
+     * The vendor was not reached, so nothing was learned — about the key, and about whether the
+     * action ran at all. `BrokeredProbe` withholds the name from this outcome on purpose, which is
+     * right: a name beside `verified: false` is the accusation "the vendor refused your key", and
+     * an outage may not make it. But the row it leaves is then the SAME pair the first outcome
+     * leaves, and this screen draws that pair as a sentence written for the first outcome only:
+     * "which published nothing safe to try a key on at the time — that is about the app, not about
+     * your key." Both clauses are false of a Composio outage.
+     *
+     * IT IS NOT FIXED HERE AND IT IS NOT ASSERTED AWAY. The remedy is a behavioural change on this
+     * screen (round 3 finding 1-5 #1), so the roster carries the collision by name and the
+     * completeness test below counts it — and the moment the client learns the outage state, this
+     * entry stops being true and has to be rewritten, which is the point of declaring it.
+     */
+    outcome: "unreachable",
+    row: { probe: null, verified: false, verifiedAt: null },
+    says: /published nothing safe to try a key on at the time/,
+    sharesItsSentenceWith: "nothing",
+  },
+] as const;
+
+/** The line under the row's title, whole, so two shapes can be compared rather than matched. */
+function descriptionOf(view: { container: HTMLElement }): string {
+  const drawn = view.container.querySelector("[data-slot='item-description']");
+  if (drawn === null) throw new Error("the row drew no description");
+  return drawn.textContent ?? "";
+}
+
+for (const probed of SERVER_PROBE_OUTCOMES) {
+  test(`a check the server ended as ${probed.outcome} draws the sentence this roster names`, () => {
+    const view = renderRow(
+      accountState({ connected: true, kind: "fields", ...probed.row }),
+    );
+
+    expect(view.getByText(probed.says)).toBeTruthy();
+
+    /*
+     * AND NONE OF ITS SIBLINGS' SENTENCES, which is what keeps each row of this table answering for
+     * itself. An entry sharing another's sentence skips its twin and is measured against the rest —
+     * so the declared collision costs this table one comparison rather than its whole discipline.
+     */
+    for (const other of SERVER_PROBE_OUTCOMES) {
+      if (other.says.source === probed.says.source) continue;
+      expect(view.queryByText(other.says)).toBeNull();
+    }
+  });
+}
+
+test("the probe roster covers every outcome the server has, and names the one that shares another's sentence", () => {
+  /*
+   * THE COUNT, which is the lever. A fifth outcome added to `BrokeredProbe` is an outcome with no
+   * row here, and this is where that is said — rather than in a review of the screen that was never
+   * asked to change.
+   */
+  expect(SERVER_PROBE_OUTCOMES.map((probed) => probed.outcome)).toEqual([
+    "nothing",
+    "answered",
+    "refused",
+    "unreachable",
+  ]);
+
+  // Exactly one cell is declared rather than endorsed, and it is named beside what it collides with.
+  const declared = SERVER_PROBE_OUTCOMES.filter(
+    (probed) => probed.sharesItsSentenceWith !== null,
+  );
+  expect(
+    declared.map((probed) => [probed.outcome, probed.sharesItsSentenceWith]),
+  ).toEqual([["unreachable", "nothing"]]);
+
+  /*
+   * AND THE COLLISION IS PROVED RATHER THAN ASSERTED. Both outcomes leave `{ verified: false,
+   * probe: null }`, and the row draws one sentence for the pair — the same string, character for
+   * character. When this screen learns the outage state these two part company and this line fails,
+   * which is the fix telling this roster to catch up.
+   */
+  const outage = renderRow(
+    accountState({
+      connected: true,
+      kind: "fields",
+      ...SERVER_PROBE_OUTCOMES[3].row,
+    }),
+  );
+  const outageSentence = descriptionOf(outage);
+  cleanup();
+
+  const nothingTried = renderRow(
+    accountState({
+      connected: true,
+      kind: "fields",
+      ...SERVER_PROBE_OUTCOMES[0].row,
+    }),
+  );
+
+  expect(outageSentence).toBe(descriptionOf(nothingTried));
+  expect(outageSentence).toMatch(/published nothing safe to try a key on/);
+});
+
 test("Re-check is offered where the key is bad and withheld where there is nothing to check", async () => {
   /*
    * THE BUTTON BELONGS TO THE APP'S PROBE, NOT TO A CHECK THAT HAS ALREADY PASSED. Gating it on
