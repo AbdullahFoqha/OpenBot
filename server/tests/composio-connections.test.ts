@@ -229,6 +229,17 @@ const strandedAccountId = `ca_working_${suite}`;
 const collidedToolkit = `collided-${suite}`;
 /** What `addBrokeredApp` spells that app's row, which is also the id the custom add aims at. */
 const collidedId = `composio-${collidedToolkit}`;
+/**
+ * AN APP CONNECTED AT A CONSENT SCREEN, which is the kind `connectBrokeredWithFields` must refuse.
+ *
+ * Its own name rather than a scheme swapped onto {@link enabledToolkit}, for {@link rekeyedToolkit}'s
+ * reason: the app is enabled for real so that the `OAUTH2` the refusal turns on is the word
+ * `addBrokeredApp` records rather than this file's idea of it, and a slug shared with a test that
+ * connects for real would have each reading the other's append-only trail rows.
+ */
+const consentToolkit = `consented-${suite}`;
+/** What `addBrokeredApp` spells that app's row, so {@link clean} can take it back. */
+const consentId = `composio-${consentToolkit}`;
 /** Every app this run owns, which is the scope of every read and every delete below. */
 const ownedToolkits = [
   toolkit,
@@ -240,6 +251,7 @@ const ownedToolkits = [
   renamedProbedToolkit,
   decoyToolkit,
   collidedToolkit,
+  consentToolkit,
 ];
 /**
  * An app this file does NOT own, standing in for another run's fixture — or another file's.
@@ -436,6 +448,21 @@ const asks: { ask: string; held: string[] }[] = [];
  */
 const valuesSent: Record<string, string>[] = [];
 
+/**
+ * WHICH CREDENTIAL THE VENDOR WAS TOLD IT WAS BEING HANDED, which is a gate and not a label.
+ *
+ * `connectWithFields` takes an `authScheme` beside the values, and this stub used to drop it on the
+ * floor: a hardcoded wrong word in the store left all fifty-two tests in this file green. That word
+ * is what Composio creates the account under, so it decides which boxes the person was asked to
+ * fill in and what the vendor does with what they typed — a key sent as a BASIC password is a
+ * credential attached to a flow it cannot work in, and the first tool call is what finds out.
+ *
+ * READ OFF THE APP'S OWN ROW rather than off the request, which is the other half of what this
+ * records: `brokeredAppScheme` resolves the app by url, and a url may be named by more than one
+ * `mcp_servers` row. So the value here also says WHICH of those rows answered.
+ */
+const schemesSent: string[] = [];
+
 /** The asks alone, which is what an ordering assertion is about. */
 function asksMade(): string[] {
   return asks.map((entry) => entry.ask);
@@ -549,6 +576,9 @@ const broker: ComposioBroker = {
       held: await connectionsHeld(),
     });
     valuesSent.push(request.values);
+    // And under which scheme, which is the half of this call the stub used to drop. See
+    // {@link schemesSent}: it is what the account is created as, and it is read off a row.
+    schemesSent.push(request.authScheme);
     // Held from here, so that what the vendor is left with afterwards is a fact about the act
     // rather than about the fixture: the account exists because this call made it.
     vendorHolds.push(madeAccountId);
@@ -622,6 +652,7 @@ async function clean() {
         twinId,
         schemeTwinId,
         collidedId,
+        consentId,
       ]),
     );
   await database
@@ -640,6 +671,7 @@ async function clean() {
         twinId,
         schemeTwinId,
         collidedId,
+        consentId,
       ]),
     );
   await database
@@ -811,6 +843,7 @@ beforeEach(async () => {
   reached.length = 0;
   asks.length = 0;
   valuesSent.length = 0;
+  schemesSent.length = 0;
   // The vendor finding an account is the ordinary case — somebody connected, so there is a grant to
   // withdraw. The one test about the answer itself says otherwise for itself.
   vendorFinds = () => true;
@@ -2569,6 +2602,96 @@ test("a confirm reads the app's scheme off the same row the listing names it by"
 });
 
 /**
+ * AND SO DOES THE CONNECT, WHICH IS THE THIRD OF THE THREE READS AND THE ONE THAT SPENDS A SECRET.
+ *
+ * CRITERION. With the same two `mcp_servers` rows at the probed app's url — the one Add wrote,
+ * recorded `API_KEY`, and an older one recorded `OAUTH2` — a connect made from typed values reaches
+ * Composio under `API_KEY`.
+ *
+ * REASON. The pair above covers the re-check and the confirm and stops there, and the connect is the
+ * one of the three where the scheme is not merely read but SENT: `connectWithFields` creates the
+ * account under it, so it decides what the vendor believes it has been handed. Read off the other
+ * row this press is refused outright — in a sentence about a sign-in screen, at somebody standing in
+ * front of a form this deployment drew for them — and a reading that refused nothing but got the
+ * word wrong would attach a key to a flow it cannot work in, which nothing discovers until the first
+ * tool call.
+ *
+ * THE SCHEME IS ASSERTED AS WELL AS THE OUTCOME, because the two say different things. A `connected`
+ * answer says the gate admitted this app; {@link schemesSent} says which row the word came off, and
+ * it is the only assertion in this file that can tell one from the other.
+ */
+test("a connect reads the app's scheme off the same row the listing names it by", async () => {
+  useAnsweringClient();
+  // The same pair as the two tests above, ordered the same way. See {@link schemeTwinId}.
+  await database.insert(mcpServers).values({
+    id: schemeTwinId,
+    title: "Probed App, as it was recorded before",
+    vendor: "Composio",
+    url: `composio://${probedToolkit}`,
+    provenance: "composio",
+    authScheme: "OAUTH2",
+  });
+  await addProbedApp();
+
+  expect(
+    await store.connectBrokeredWithFields({
+      toolkit: probedToolkit,
+      userId: askerId,
+      values: { generic_api_key: typedKey },
+    }),
+  ).toEqual({ connected: true, verified: true, probe: probeAction });
+
+  expect(valuesSent).toEqual([{ generic_api_key: typedKey }]);
+  expect(schemesSent).toEqual(["API_KEY"]);
+});
+
+/**
+ * TYPING A KEY AT AN APP NOBODY TYPES A KEY AT, WHICH IS THE GATE ON WHAT REACHES THE VENDOR.
+ *
+ * CRITERION. `connectBrokeredWithFields` against an app recorded `OAUTH2` refuses, names the app,
+ * and hands Composio nothing at all.
+ *
+ * REASON. Every connect in this file is against an app enabled as a key app, so the `isFieldScheme`
+ * guard at the head of the method was a branch no test ever took. It is what stands between a
+ * request naming any app at all and an account created at the vendor under a scheme that is not the
+ * one the config was made as — and the caller is a route serving one URL for all three kinds, so
+ * "this app is a consent app" is a fact only this read holds. The refusal is asserted with the
+ * vendor's silence beside it: a guard that raised the right sentence AFTER handing the values over
+ * would satisfy the first half and have already leaked the secret.
+ */
+test("a key typed at a consent app is refused before the vendor is handed anything", async () => {
+  useAnsweringClient();
+  await store.addBrokeredApp({
+    slug: consentToolkit,
+    title: "Consented App",
+    by: admin,
+    connection: { kind: "consent" },
+  });
+
+  await expect(
+    store.connectBrokeredWithFields({
+      toolkit: consentToolkit,
+      userId: askerId,
+      values: { generic_api_key: typedKey },
+    }),
+    // The app by name, and the one act that is open to somebody standing in front of this: the
+    // Plugins page, where it is connected the way it asks for.
+  ).rejects.toThrow(
+    new RegExp(
+      `${consentToolkit} is not an app this deployment connects with values somebody types`,
+    ),
+  );
+
+  // NOTHING WAS SENT, which is the half the sentence cannot say. The enable above is the only ask
+  // this test makes, and the values never left.
+  expect(asksMade()).toEqual([`ensureAuthConfig:${consentToolkit}/consent`]);
+  expect(valuesSent).toEqual([]);
+  expect(schemesSent).toEqual([]);
+  // And no row was written, so nothing on any screen claims this person has an account here.
+  expect(await connectedToolkitsFor(askerId)).toEqual([]);
+});
+
+/**
  * CONNECTING WITH A KEY SOMEBODY TYPED: THE VALUES REACH COMPOSIO AND NOTHING ELSE.
  *
  * CRITERION. After a connection made from typed values, the secret is in the vendor's hands and in
@@ -2624,6 +2747,9 @@ test("the values reach Composio and nothing else", async () => {
     `connectWithFields:${enabledToolkit}/${askerId}`,
   ]);
   expect(valuesSent).toEqual([{ generic_api_key: typedKey }]);
+  // And told what it was being handed, which decides what Composio does with it. See
+  // {@link schemesSent}: this is the scheme `addBrokeredApp` recorded on the app's row above.
+  expect(schemesSent).toEqual(["API_KEY"]);
 
   /*
    * THE TRAIL, READ OUT OF THE TABLE RATHER THAN OFF THE RECORDING STORE. The rows are what a

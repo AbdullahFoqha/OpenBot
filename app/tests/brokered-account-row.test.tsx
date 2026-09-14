@@ -21,6 +21,7 @@ import userEvent from "@testing-library/user-event";
 import {
   type BrokeredAccount,
   BrokeredAccountRow,
+  useBrokeredAccount,
 } from "@/components/plugins/brokered-account-row";
 import type { BrokerField } from "@/lib/plugins/mutations";
 import type { PluginServer, PluginsPage } from "@/lib/plugins/queries";
@@ -1699,4 +1700,164 @@ test("a typed key is gone from the mutation's own state once the request has set
   expect(retainedInputs(refused)).not.toContain(TYPED_SECRET);
   // And the form still holds what was typed, because a mistyped key is corrected, not retyped.
   expect(input.value).toBe(TYPED_SECRET);
+});
+
+/**
+ * The three fields the hook answers about a check, read from the hook rather than off a row.
+ *
+ * WHY A PROBE AND NOT THE SCREEN. `useBrokeredAccount` hands `verified`, `verifiedAt` and `probe` to
+ * ANY reader, and the row is one reader that happens to hide all three the moment `connected` goes
+ * false. So a stale answer surviving a disconnect is invisible on the screen and perfectly visible
+ * here — which is the distinction the hook's own comment draws when it says the reset is "rather
+ * than a guard at the drawing", because a guard in the render "would leave the hook handing
+ * `verified: true` to any other reader".
+ *
+ * ITS INPUTS ARE FIXED, which is what makes the assertion sharp. They stand for the connections
+ * read, and they never move: everything that changes between the two assertions below is the
+ * mutation state the hook holds, so a difference can only be the hook's own doing.
+ */
+function AccountProbe() {
+  const account = useBrokeredAccount({
+    serverId: APP_KEY,
+    brokered: true,
+    configured: true,
+    // Recorded connected, unverified, and with nothing ever spent on the key — the row a press of
+    // Re-check below is made against, and the row it must fall back to once that press is undone.
+    recorded: true,
+    verified: false,
+    verifiedAt: null,
+    probe: null,
+    checkable: true,
+    authScheme: "API_KEY",
+    returnTo: "settings",
+    report: () => {},
+  });
+
+  return (
+    <div>
+      <span data-testid="verified">{String(account.verified)}</span>
+      <span data-testid="verified-at">{String(account.verifiedAt)}</span>
+      <span data-testid="probe">{String(account.probe)}</span>
+      <button onClick={account.recheck} type="button">
+        Re-check
+      </button>
+      <button onClick={account.disconnect} type="button">
+        Disconnect
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A DISCONNECT THROWS THE RE-CHECK'S VERDICT AWAY, AND NOT ONLY WHERE THE ROW WOULD HAVE DRAWN IT.
+ *
+ * CRITERION. After a re-check answers and the account is then disconnected, the hook reports the
+ * read's own record again — unverified, undated, nothing spent — rather than the answer to a press
+ * about an account that no longer exists.
+ *
+ * REASON. `forgetRecheck()` is called from three places and the screen tests can only see two of
+ * them: the connect and the submission clear the same answer on their way past, so deleting the
+ * line in the DISCONNECT left all twenty-seven of them green. That line is not redundant. The
+ * verdict it drops is about an account that has just been ended, and the hook goes on handing it to
+ * whoever asks — the row hides all three fields behind `connected`, so what the deletion costs is
+ * invisible exactly where it is cheapest to look and real everywhere else.
+ *
+ * READ THROUGH {@link AccountProbe} FOR THAT REASON, which is the hook's own argument for resetting
+ * rather than guarding at the drawing: an answer about a thing that no longer exists should stop
+ * existing, not merely stop being painted.
+ */
+test("a disconnect drops the re-check's verdict for every reader, not just the row", async () => {
+  installDeployment({
+    authScheme: "API_KEY",
+    checkable: true,
+    composioConfigured: true,
+    confirms: true,
+    recorded: true,
+  });
+
+  const view = render(
+    <QueryClientProvider client={queryClient()}>
+      <AccountProbe />
+    </QueryClientProvider>,
+  );
+
+  // The record, before anything has been pressed: the three fields as the read carries them.
+  expect(view.getByTestId("verified").textContent).toBe("false");
+  expect(view.getByTestId("verified-at").textContent).toBe("null");
+  expect(view.getByTestId("probe").textContent).toBe("null");
+
+  await userEvent.click(view.getByRole("button", { name: "Re-check" }));
+  await waitFor(() =>
+    expect(view.getByTestId("verified").textContent).toBe("true"),
+  );
+  expect(view.getByTestId("verified-at").textContent).toBe(RECHECKED_AT);
+  expect(view.getByTestId("probe").textContent).toBe(PROBE);
+
+  await userEvent.click(view.getByRole("button", { name: "Disconnect" }));
+
+  // And back to the record, because the account the verdict was about has been ended.
+  await waitFor(() =>
+    expect(view.getByTestId("verified").textContent).toBe("false"),
+  );
+  expect(view.getByTestId("verified-at").textContent).toBe("null");
+  expect(view.getByTestId("probe").textContent).toBe("null");
+});
+
+/**
+ * A RE-CHECK THAT SPENT NOTHING SAYS SO, AND OVERRULES THE NAME THE LAST ONE WROTE DOWN.
+ *
+ * CRITERION. On a row recording a key the vendor refused, a re-check answering a null probe leaves
+ * the row saying the key was accepted without being checked — the answer's null replacing the
+ * record's name, though the recorded row still carries that name.
+ *
+ * REASON. `probe` is the only field of the three that takes its answer from EITHER mutation — a
+ * re-check or a key just handed over — and the rule is `answered ? answered.probe : probe`: an
+ * answer beats the record. Nothing pinned it. Every other case here has the deployment write the
+ * answer's probe into the row it then re-reads, so the two agree by the time anything is asserted
+ * and reading the record alone passes every one of them.
+ *
+ * AND THIS IS THE ONE CASE WHERE THEY CANNOT AGREE. `recheckBrokeredConnection` returns early on a
+ * null probe and writes NOTHING — the app published nothing safe to spend the key on, so there is
+ * no verdict to record and the row keeps the name of the last check that did spend something. The
+ * press still happened and still learned something, and what it learned is the sentence the hook's
+ * own comment spells out: "its null is the server saying that check spent nothing, exactly as an
+ * answer's null is". Read off the record instead, the person presses a button, is told nothing
+ * changed, and goes on reading an accusation about a key that nothing has just tried.
+ */
+test("a re-check that spent nothing overrules the action the record still names", async () => {
+  installDeployment({
+    authScheme: "API_KEY",
+    // The app still publishes something, which is what puts the button on the row at all.
+    checkable: true,
+    composioConfigured: true,
+    confirms: true,
+    fields: [PERPLEXITY_KEY],
+    recorded: true,
+    verified: false,
+    verifiedAt: null,
+    // What the LAST check spent, and the vendor refused it. This is the record the press below
+    // arrives at, and the one the deployment leaves standing.
+    probe: PROBE,
+    // And what THIS press finds: the action it would have spent is no longer callable — a version
+    // the listing recorded has gone, or the app stopped publishing it — so nothing was tried.
+    recheckAnswer: { verified: false, verifiedAt: null, probe: null },
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  // The accusation, as the record leaves it.
+  expect(
+    await view.findByText(/was checked against Gmail and rejected/),
+  ).toBeTruthy();
+
+  await userEvent.click(view.getByRole("button", { name: "Re-check" }));
+
+  // The answer, which is newer than the record and about the same thing.
+  await waitFor(() =>
+    expect(
+      view.queryByText(/accepted without being checked against Gmail/),
+    ).toBeTruthy(),
+  );
+  // And the sentence the record alone would still be drawing is gone with it.
+  expect(view.queryByText(/was checked against Gmail and rejected/)).toBeNull();
 });

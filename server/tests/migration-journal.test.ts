@@ -20,12 +20,22 @@ import { readdir, readFile } from "node:fs/promises";
 
 type Entry = { idx: number; tag: string; when: number };
 
+/**
+ * A column as a snapshot describes it, which is more than its name.
+ *
+ * `type` and `notNull` are here because they are what `generate` DIFFS: a snapshot that names the
+ * right column under the wrong type has the next migration emit an `ALTER COLUMN` nobody wrote, or
+ * emit nothing where one was needed, and `notNull` decides whether the statement it emits can run
+ * against rows that already exist. Both were read by nobody until the check below.
+ */
+type SnapshotColumn = { name: string; type?: string; notNull?: boolean };
+
 type Snapshot = {
   tables?: Record<
     string,
     {
       name: string;
-      columns?: Record<string, unknown>;
+      columns?: Record<string, SnapshotColumn>;
       indexes?: Record<string, unknown>;
     }
   >;
@@ -94,6 +104,36 @@ const columnNames = (snapshot: Snapshot, name: string) =>
 const indexNames = (snapshot: Snapshot, name: string) =>
   new Set(Object.keys(tableIn(snapshot, name)?.indexes ?? {}));
 
+const columnIn = (snapshot: Snapshot, table: string, column: string) =>
+  tableIn(snapshot, table)?.columns?.[column];
+
+/**
+ * What an `ADD COLUMN` actually declares, out of everything it says after the column's name.
+ *
+ * THE NAME IS NOT THE COLUMN. Matching only names let the snapshot call a column anything it liked
+ * — `probe_action` as a `boolean`, and `NOT NULL` where the statement adds it nullable — and every
+ * check here went on agreeing. Both halves are what `generate` diffs the next schema against, so a
+ * snapshot wrong about either has the next migration emit a statement nobody wrote: an `ALTER
+ * COLUMN ... TYPE` correcting a type no database ever had, or a `SET NOT NULL` against a table full
+ * of the nulls the real column has been collecting since.
+ *
+ * AND `NOT NULL` IS THE HALF THAT FAILS ON PRODUCTION AND NOT IN REVIEW. A column added nullable
+ * and snapshotted `notNull` makes the next `generate` emit the constraint, which passes on an empty
+ * development database and stops dead on the first deployment holding a row that never filled it in.
+ *
+ * The default is dropped rather than compared: drizzle records it in its own spelling — `false` for
+ * the SQL `false`, `"now()"` for `now()`, a quoted string for a quoted string — and a comparison
+ * against the SQL literal would be a comparison of two notations rather than of two schemas.
+ */
+const declared = (tail: string): { type: string; notNull: boolean } => ({
+  type: tail
+    .replace(/\bNOT NULL\b/gi, " ")
+    .replace(/\bDEFAULT\s+(?:'(?:[^']|'')*'|[^\s;]+)/gi, " ")
+    .trim()
+    .replace(/\s+/g, " "),
+  notNull: /\bNOT NULL\b/i.test(tail),
+});
+
 const everyIndexName = (snapshot: Snapshot) =>
   new Set(
     Object.values(snapshot.tables ?? {}).flatMap((table) =>
@@ -118,9 +158,14 @@ const disagreements = (sql: string, before: Snapshot, after: Snapshot) => {
   const dropped = quoted(sql, /DROP TABLE (?:IF EXISTS )?"([^"]+)"/gi).map(
     ([table]) => table!,
   );
+  /*
+   * The third capture is everything the statement says after the name — the type, and whatever
+   * `DEFAULT` and `NOT NULL` follow it. See {@link declared}: the name alone says a column arrived
+   * and nothing about what arrived.
+   */
   const columnsAdded = quoted(
     sql,
-    /ALTER TABLE "([^"]+)" ADD COLUMN (?:IF NOT EXISTS )?"([^"]+)"/gi,
+    /ALTER TABLE "([^"]+)" ADD COLUMN (?:IF NOT EXISTS )?"([^"]+)"([^;]*)/gi,
   );
   const columnsDropped = quoted(
     sql,
@@ -190,6 +235,26 @@ const disagreements = (sql: string, before: Snapshot, after: Snapshot) => {
         problems.push(
           `the migration drops "${table}"."${column}", the snapshot does not drop it`,
         );
+
+    /*
+     * AND WHAT THE ADDED COLUMN IS, not merely that it is there. See {@link declared}. Only columns
+     * the snapshot really holds are asked — one it does not is already reported above, and asking
+     * twice would name a single mistake in two sentences.
+     */
+    for (const [on, column, tail] of columnsAdded) {
+      if (on !== table) continue;
+      const added = columnIn(after, table, column!);
+      if (!added) continue;
+      const statement = declared(tail ?? "");
+      if (added.type !== statement.type)
+        problems.push(
+          `the migration adds "${table}"."${column}" as ${statement.type}, the snapshot calls it ${added.type}`,
+        );
+      if ((added.notNull ?? false) !== statement.notNull)
+        problems.push(
+          `the migration adds "${table}"."${column}" ${statement.notNull ? "NOT NULL" : "nullable"}, the snapshot says the opposite`,
+        );
+    }
 
     const indexesWas = indexNames(before, table);
     const indexesIs = indexNames(after, table);

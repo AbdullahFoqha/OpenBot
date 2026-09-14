@@ -327,3 +327,116 @@ test("an app publishing no no_auth flag is read as one that needs authenticating
     }),
   ).toEqual({ kind: "consent" });
 });
+
+/**
+ * THE FLAG ON ITS OWN, WHICH IS THE HALF OF THE RECOGNITION THE FIXTURES ABOVE CANNOT REACH.
+ *
+ * Both no_auth cases above publish `NO_AUTH` in `auth_schemes` AND carry the flag, which is how the
+ * live rows really look — and it means either half of `flagged || offered.includes(NO_AUTH_SCHEME)`
+ * satisfies them alone. Deleting the flag read left every one of them green, and the flag is the
+ * half with no other reader: `flagOf` refuses a `no_auth` it cannot understand precisely because
+ * that field decides the whole flow, and a deployment that then never acted on the value it went to
+ * the trouble of refusing over would send an app Composio REFUSES a config for down the form flow
+ * or the consent flow instead.
+ *
+ * SO THE ROWS BELOW CARRY THE FLAG AND NOT THE SCHEME, which is the shape a catalogue reaches the
+ * day Composio stops listing `NO_AUTH` beside the boolean — it is an optional member of an optional
+ * list, and nothing in the vendor's publication holds the two together. The pair at "an app
+ * publishing NO_AUTH without the flag" is this the other way round, and between them the two halves
+ * of the recognition are each asserted alone.
+ */
+test("the flag alone needs no authentication, whatever key the app lists beside it", () => {
+  expect(
+    connectionOf({
+      slug: "flagged",
+      no_auth: true,
+      auth_schemes: ["API_KEY"],
+      composio_managed_auth_schemes: [],
+    }),
+  ).toEqual({ kind: "no-auth" });
+});
+
+test("the flag alone beats a managed consent, with no NO_AUTH scheme to say so twice", () => {
+  expect(
+    connectionOf({
+      slug: "flagged_managed",
+      no_auth: true,
+      auth_schemes: ["OAUTH2"],
+      composio_managed_auth_schemes: ["OAUTH2"],
+    }),
+  ).toEqual({ kind: "no-auth" });
+});
+
+/**
+ * AND THE UNSUPPORTED SENTENCE NAMES THE MANAGED WORDS, WHICH ARE THE ONES NOTHING ELSE READS.
+ *
+ * A managed list of schemes that do not redirect is the commonest way to reach `unsupported`, and
+ * the app's own `auth_schemes` may be empty beside it — so a reason built from that list alone tells
+ * an administrator Composio published NO authentication scheme for an app that published one this
+ * deployment simply cannot drive. Every other unsupported fixture here offers the same word in both
+ * lists, so dropping the managed half of the reason changed no sentence any of them read, and the
+ * one sentence an administrator is given about this app said the opposite of what the row holds.
+ */
+test("the reason for an unsupported app names what only the managed list published", () => {
+  const connection = connectionOf({
+    slug: "managed_only",
+    auth_schemes: [],
+    composio_managed_auth_schemes: ["ZZZ"],
+  });
+
+  expect(connection.kind).toBe("unsupported");
+  expect(connection.kind === "unsupported" && connection.reason).toContain(
+    "ZZZ",
+  );
+  // And not the sentence written for an app that published nothing at all, which this is not.
+  expect(connection.kind === "unsupported" && connection.reason).not.toContain(
+    "published no authentication scheme",
+  );
+});
+
+/**
+ * A SCHEME IS THE TRIMMED WORD, BECAUSE EVERY DECISION ABOVE IS A COMPARISON AGAINST A LITERAL.
+ *
+ * `textOf` trims and nothing asserted that the trimmed value is what `labelsOf` hands back rather
+ * than the raw entry it was read from. Returning the raw one keeps every fixture above green — they
+ * are all spelled without padding — and turns a `" OAUTH2 "` the wire wrapped into a word matching
+ * no literal at all: the app falls out of the consent arm, out of the field arm and out of the
+ * no-auth arm, and lands in `unsupported`, which `routes.ts` hides from the picker entirely. The
+ * scheme is also RECORDED on the app's row when somebody enables it, so the padded word would
+ * outlive the read that let it through.
+ *
+ * ONE CASE PER ARM, because each arm compares against a different list and a trim that survived in
+ * one of them would leave the other two reading an app nobody can connect.
+ */
+const PADDED_SCHEMES: {
+  what: string;
+  row: Record<string, unknown>;
+  connection: unknown;
+}[] = [
+  {
+    what: "a key",
+    row: { auth_schemes: ["  API_KEY  "], composio_managed_auth_schemes: [] },
+    connection: { kind: "fields", authScheme: "API_KEY" },
+  },
+  {
+    what: "a managed consent",
+    row: {
+      auth_schemes: [" OAUTH2 "],
+      composio_managed_auth_schemes: [" OAUTH2 "],
+    },
+    connection: { kind: "consent" },
+  },
+  {
+    what: "no authentication at all",
+    row: { auth_schemes: [" NO_AUTH "], composio_managed_auth_schemes: [] },
+    connection: { kind: "no-auth" },
+  },
+];
+
+for (const padded of PADDED_SCHEMES) {
+  test(`${padded.what} Composio padded is still ${padded.what}`, () => {
+    expect(connectionOf({ slug: "padded", ...padded.row })).toEqual(
+      padded.connection,
+    );
+  });
+}

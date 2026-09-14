@@ -379,15 +379,36 @@ function grantsApp(
     return agentId !== "at-an-endpoint";
   },
 ) {
-  const calls: Array<{ verb: string; kind: string; ref: string }> = [];
+  /**
+   * Every write that reached the store, in the shape the store really takes.
+   *
+   * ALL FOUR ARGUMENTS, WHICH IS NOT A TIDINESS. `grant` and `revoke` take `(kind, ref, agentId,
+   * by)`, and this stub used to drop the second half: the row is written against the BOT, so a
+   * route that passed the wrong `agentId` would put one Bot's capability on another's row — the
+   * grant tested here lets one Bot spend another's model calls and reach whatever that Bot may
+   * reach — and `by` is the only name the audit trail has for who did it. Neither was asserted
+   * anywhere, so a route that granted the right thing to the wrong Bot under nobody's name passed
+   * every test in this file.
+   *
+   * `by` IS THE SESSION'S AND NEVER THE REQUEST'S, which is the point of asserting it at all: the
+   * body below carries a Bot and a ref and no actor, and the trail has to name the administrator
+   * whose session made the call.
+   */
+  const calls: Array<{
+    verb: string;
+    kind: string;
+    ref: string;
+    agentId: string;
+    by: string;
+  }> = [];
   const store = pluginStore({
     listServers: async () => [],
     listSkills: async () => [],
-    grant: async (kind: string, ref: string) => {
-      calls.push({ verb: "grant", kind, ref });
+    grant: async (kind: string, ref: string, agentId: string, by: string) => {
+      calls.push({ verb: "grant", kind, ref, agentId, by });
     },
-    revoke: async (kind: string, ref: string) => {
-      calls.push({ verb: "revoke", kind, ref });
+    revoke: async (kind: string, ref: string, agentId: string, by: string) => {
+      calls.push({ verb: "revoke", kind, ref, agentId, by });
     },
     skillOwner: async () => null,
     agentOwner: async () => null,
@@ -428,7 +449,18 @@ describe("granting one Bot to another", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(calls).toEqual([{ verb: "grant", kind: "bot", ref: "knowledge" }]);
+    // The Bot named in the body got it, and the trail names the session's administrator: the row is
+    // written against the Bot, and `by` is all anybody reading the trail later has. See
+    // {@link calls}.
+    expect(calls).toEqual([
+      {
+        verb: "grant",
+        kind: "bot",
+        ref: "knowledge",
+        agentId: "assistant",
+        by: ADMIN.email,
+      },
+    ]);
   });
 
   /*
@@ -444,7 +476,17 @@ describe("granting one Bot to another", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(calls).toEqual([{ verb: "revoke", kind: "bot", ref: "knowledge" }]);
+    // Off the Bot the query names, under the session's administrator — the same two facts the grant
+    // above asserts, and here they arrive in a query string rather than a body.
+    expect(calls).toEqual([
+      {
+        verb: "revoke",
+        kind: "bot",
+        ref: "knowledge",
+        agentId: "assistant",
+        by: ADMIN.email,
+      },
+    ]);
   });
 
   /*
@@ -565,7 +607,18 @@ describe("granting a hop to a Bot that runs somewhere else", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(calls).toEqual([{ verb: "grant", kind: "bot", ref: "knowledge" }]);
+    // A DIFFERENT BOT FROM THE TEST ABOVE, and the assertion says so: this case is about which Bot
+    // the route acted on, so a stub that recorded only the kind and the ref would make its two
+    // expectations identical and neither of them about the name that differs.
+    expect(calls).toEqual([
+      {
+        verb: "grant",
+        kind: "bot",
+        ref: "knowledge",
+        agentId: "general-assistant",
+        by: ADMIN.email,
+      },
+    ]);
   });
 });
 
@@ -1590,6 +1643,43 @@ function brokeredApp(
       // Null is not an older brokered row; it is a row that is not brokered at all.
       authScheme: null,
     },
+    /*
+     * A BROKERED ROW WITH NO SCHEME RECORDED ON IT, which is what every brokered row in a
+     * deployment older than migration 0030 looks like.
+     *
+     * The three rows above each name a scheme, so the connect fork was only ever entered by
+     * DECISION — and its consent arm is reached by ELIMINATION: `NO_AUTH` is answered, a field
+     * scheme is answered, and everything else falls through to minting a link. "Everything else"
+     * is the arm with no fixture behind it, and the row shape that lands there most often is this
+     * one: `auth_scheme` was added as a nullable column and backfilled for nobody, so every app
+     * connected before that migration carries a null to this day.
+     *
+     * AND IT IS THE RIGHT ANSWER FOR IT, which is why this is a fixture rather than a bug report.
+     * Consent was the only kind this deployment had when those rows were written, so a null means
+     * consent — and it means it by elimination, which is exactly the reading nothing checked.
+     */
+    {
+      id: "composio-slack",
+      title: "Slack",
+      url: "composio://slack",
+      authScheme: null,
+    },
+    /*
+     * AND A SCHEME THIS DEPLOYMENT HAS NEVER HEARD OF, which is the same arm entered the other way.
+     *
+     * `OAUTH1` is a real Composio scheme — `connectionOf` resolves it to `consent` and Composio
+     * itself calls it redirectable — and it is neither `NO_AUTH` nor a member of `isFieldScheme`'s
+     * list. So the row is recorded with a word this route never names, and reaches the consent arm
+     * because nothing above it claimed it. Any scheme the vendor adds tomorrow arrives the same
+     * way, and the answer has to be a link rather than a 500 or a form drawn for a flow that has
+     * none.
+     */
+    {
+      id: "composio-trello",
+      title: "Trello",
+      url: "composio://trello",
+      authScheme: "OAUTH1",
+    },
   ];
 
   const store = pluginStore({
@@ -1749,6 +1839,23 @@ function brokeredApp(
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         },
       ),
+    /**
+     * The same route aimed at whichever row a test names, with nothing else moved.
+     *
+     * Its own helper beside {@link connect}, which is fixed on the consent app: the two cases below
+     * are about a row whose scheme this route never names, and the only thing that can express them
+     * is the id. The body is empty because these are first presses and nothing about them is about
+     * what a caller sends.
+     */
+    connectAt: (serverId: string) =>
+      app.request(
+        `http://openbot.test/api/plugins/servers/${serverId}/connect`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      ),
     connect: (
       body: unknown,
       query = "",
@@ -1863,6 +1970,66 @@ describe("connecting a brokered app", () => {
     const body = await (await connect({})).json();
 
     expect(body.authorizationUrl).toBe(AUTHORIZATION_URL);
+  });
+
+  /**
+   * THE ARM REACHED BY ELIMINATION, AGAINST THE TWO ROW SHAPES THAT ACTUALLY REACH IT.
+   *
+   * CRITERION. A brokered row recorded with NO scheme, and one recorded with a scheme this route
+   * never names, are both answered a consent link minted for the session's own person.
+   *
+   * REASON. The fork decides `NO_AUTH` first and a field scheme second, and consent is what is left
+   * — so the consent arm is the one arm no row here was ever chosen FOR. Every brokered fixture
+   * above carries a word this route reads by name, which means the tests about minting a link all
+   * enter the arm from the one row shape that would still work if the fall-through were replaced by
+   * an explicit `authScheme === "OAUTH2"`. The two shapes below are the ones that would then stop
+   * working, and both exist in live databases: `auth_scheme` arrived as a nullable column with no
+   * backfill, so every app connected before migration 0030 carries a null, and the catalogue is the
+   * vendor's, so a scheme this deployment has never heard of is one Composio release away.
+   *
+   * AND WHAT THE WRONG ANSWER WOULD BE IS WHY THIS IS WORTH A TEST. Neither row can be answered a
+   * form — there is nothing typed at a consent screen — so a fork that refused what it could not
+   * name would leave every pre-0030 brokered app with a Connect button that reports the app is not
+   * one this deployment can connect. The person's remedy for that sentence is to have an
+   * administrator remove the app and add it again, which takes every grant on it with it.
+   *
+   * THE PERSON IS THE SESSION'S HERE TOO, which is the other half of what `authorized` carries: a
+   * link is a capability, and one minted under the wrong name attaches the wrong account.
+   */
+  test("a brokered row whose scheme this route cannot name is still sent to consent", async () => {
+    const { authorized, connectAt } = brokeredApp();
+
+    // The pre-0030 row: brokered, connected, and carrying no scheme at all.
+    const held = await connectAt("composio-slack");
+    expect(held.status).toBe(200);
+    expect(await held.json()).toEqual({
+      authorizationUrl: AUTHORIZATION_URL,
+    });
+
+    // And a scheme the vendor names that this deployment does not.
+    const drifted = await connectAt("composio-trello");
+    expect(drifted.status).toBe(200);
+    expect(await drifted.json()).toEqual({
+      authorizationUrl: AUTHORIZATION_URL,
+    });
+
+    // Both for the session's own person, at each app's own page — the app read out of the url and
+    // the return address built from this deployment and the row, as the consent tests above assert
+    // for a row that was chosen by name.
+    expect(authorized).toEqual([
+      {
+        userId: ADMIN.id,
+        toolkit: "slack",
+        returnUrl:
+          "http://localhost:3001/settings/connected-accounts/composio-slack",
+      },
+      {
+        userId: ADMIN.id,
+        toolkit: "trello",
+        returnUrl:
+          "http://localhost:3001/settings/connected-accounts/composio-trello",
+      },
+    ]);
   });
 
   test("a second connection is refused with the step to take", async () => {
