@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { createAuditStore } from "../src/audit";
 import type { ActionPolicy } from "../src/computer/policy";
 import type {
@@ -108,35 +108,74 @@ const twinId = `duplicate-${suite}`;
  */
 const schemeTwinId = `zz-twin-${suite}`;
 /**
- * THE APP WHOSE TWO ROWS THE DATABASE AND JAVASCRIPT ORDER DIFFERENTLY, which is the only fixture
- * here that can tell one rule from the other.
+ * THE APPS WHOSE TWO ROWS THE DATABASE AND JAVASCRIPT ORDER DIFFERENTLY, which are the only
+ * fixtures here that can tell one rule from the other.
  *
- * Every other pair above is spelled in ASCII, and for ASCII the two orderings agree: PostgreSQL's
- * `C` collation compares the UTF-8 BYTES and JavaScript's `<` compares UTF-16 CODE UNITS, and below
- * U+0080 those are the same numbers in the same order. So a pair like `duplicate-`/`revocable-`
- * proves a rule was applied and cannot say WHICH of the two rules it was — a reading that picks the
- * lower id in SQL and a reading that picks it in JavaScript both answer `duplicate-`.
+ * Every other pair above is spelled in lower-case ASCII, and for those the two orderings agree:
+ * PostgreSQL's `C` collation compares the UTF-8 BYTES and JavaScript's `<` compares UTF-16 CODE
+ * UNITS, and below U+0080 those are the same numbers in the same order, while a linguistic collation
+ * has nothing to reorder in a pair that differs only in its letters. So a pair like
+ * `duplicate-`/`revocable-` proves a rule was applied and cannot say WHICH of the two rules it was —
+ * a reading that picks the lower id in SQL and a reading that picks it in JavaScript both answer
+ * `duplicate-`.
  *
- * The two disagree the moment a character above the BMP is involved. `U+FFFD` encodes as the bytes
- * `EF BF BD` and as the single code unit `FFFD`; `U+1F600` encodes as the bytes `F0 9F 98 80` and
- * as the surrogate pair `D83D DE00`. By bytes the first is smaller — `EF` precedes `F0` — and by
- * code units the second is, because `D83D` precedes `FFFD`. So these two ids are ordered one way by
- * the database and the other way by the language, and a listing that answers with either one of
- * them is saying which rule it used.
+ * TWO PAIRS AND NOT ONE, BECAUSE WHERE THE TWO RULES PART COMPANY DEPENDS ON THE COLLATION, AND A
+ * TEST OF THIS PROPERTY MAY NOT DEPEND ON WHICH COLLATION IS RUNNING. A byte-ordering collation and
+ * a linguistic one disagree with the language in two different places, and each pair below is the
+ * disagreement one family produces:
  *
- * WHICH IS THE DEFECT, AND NOT A CURIOSITY ABOUT EMOJI. A deployment is free to run a collation
- * that is not `C` — a linguistic one reorders case and punctuation against code-point order for
- * perfectly ordinary ASCII ids — and the same disagreement follows. The pair below is simply one
- * that is guaranteed to expose it on the collation this suite actually runs against, so the
- * assertion does not quietly become vacuous on a development machine. The test asserts the
- * disagreement itself before asserting the answer, so a database that ordered this pair the way
- * JavaScript does says so out loud rather than passing on a fixture that has stopped distinguishing.
+ * - ABOVE THE BMP, which is where byte order and code-unit order part. `U+FFFD` encodes as the bytes
+ *   `EF BF BD` and as the single code unit `FFFD`; `U+1F600` encodes as the bytes `F0 9F 98 80` and
+ *   as the surrogate pair `D83D DE00`. By bytes the first is smaller — `EF` precedes `F0` — and by
+ *   code units the second is, because `D83D` precedes `FFFD`. A linguistic collation weighs the two
+ *   as symbols instead and happens to answer as the language does, so this pair says nothing there.
+ * - IN THE CASE OF A LETTER, which is where a linguistic collation parts from both of them. `a-` and
+ *   `B-` are ordered `B-` first by bytes and by code units alike, because every capital precedes
+ *   every lower-case letter in ASCII, and `a-` first under any collation that weighs the letter
+ *   before the case. A byte-ordering collation answers as the language does, so this pair says
+ *   nothing there.
+ *
+ * MEASURED RATHER THAN REASONED ABOUT. Both pairs inserted at one url on PostgreSQL 17 and asked for
+ * with `order by id`, against a database created under each collation:
+ *
+ * | collation                   | above the BMP  | the cased pair |
+ * | --------------------------- | -------------- | -------------- |
+ * | `C` (a Homebrew cluster)    | SEPARATES      | agrees with JS |
+ * | `C.UTF-8`                   | SEPARATES      | agrees with JS |
+ * | `en_US.utf8` (the CI image) | agrees with JS | SEPARATES      |
+ * | ICU `en-US`                 | agrees with JS | SEPARATES      |
+ *
+ * WHICH IS WHY THERE ARE TWO, AND NOT A CURIOSITY ABOUT EMOJI. The pair above the BMP was the whole
+ * fixture once, and the test asserted that the database and the language disagreed about it before
+ * asserting which of the two the listing had followed. That guard was right and the fixture was not:
+ * it separates the rules on a developer's `C` cluster, and CI runs `pgvector/pgvector:pg17`, whose
+ * image locale is `en_US.utf8` — so the suite passed locally and the guard refused, correctly, in
+ * CI. A property that holds under every collation cannot be pinned by a fixture that separates under
+ * one, so the roster covers both families and the test needs ONE of them to separate, not this one.
  */
 const orderedToolkit = `ordered-${suite}`;
-/** The row the DATABASE orders first at that app's url: fewer bytes, and a larger first code unit. */
+/** The row a BYTE-ORDERING collation puts first there: fewer bytes, and a larger first code unit. */
 const byteFirstId = `a\uFFFD-${suite}`;
-/** The row JAVASCRIPT orders first at the same url: a surrogate pair, and larger bytes. */
+/** The row JAVASCRIPT puts first at the same url: a surrogate pair, and larger bytes. */
 const unitFirstId = `a\u{1F600}-${suite}`;
+/** The same question asked of a collation that weighs a letter before its case. */
+const casedToolkit = `cased-${suite}`;
+/** The row a LINGUISTIC collation puts first there: `a` precedes `b` before case is read at all. */
+const letterFirstId = `a-${suite}`;
+/** The row JAVASCRIPT puts first at the same url: every capital precedes every lower-case letter. */
+const upperFirstId = `B-${suite}`;
+/**
+ * The two of them, each with the row its url's ordering is asked about.
+ *
+ * `unitFirst` is what a JavaScript `<` over that pair answers — the rule this test exists to tell
+ * apart from the database's — and `other` is the row standing beside it. Which of the two the
+ * DATABASE answers is written down nowhere here: the test asks it, because that is the half of this
+ * the collation decides.
+ */
+const ORDERING_FIXTURES = [
+  { toolkit: orderedToolkit, unitFirst: unitFirstId, other: byteFirstId },
+  { toolkit: casedToolkit, unitFirst: upperFirstId, other: letterFirstId },
+] as const;
 /**
  * THE APP ENABLED OVER A ROW THAT ALREADY ANSWERS FOR IT, which is what a write has to find.
  *
@@ -370,6 +409,7 @@ const ownedToolkits = [
   undoneToolkit,
   recheckedToolkit,
   orderedToolkit,
+  casedToolkit,
   answeringToolkit,
   refreshedToolkit,
   unschemedToolkit,
@@ -780,6 +820,8 @@ async function clean() {
         recheckedId,
         byteFirstId,
         unitFirstId,
+        letterFirstId,
+        upperFirstId,
         answeringId,
         answeringTwinId,
         refreshedId,
@@ -811,6 +853,8 @@ async function clean() {
         recheckedId,
         byteFirstId,
         unitFirstId,
+        letterFirstId,
+        upperFirstId,
         answeringId,
         answeringTwinId,
         refreshedId,
@@ -2943,49 +2987,88 @@ test("a key typed at a consent app is refused before the vendor is handed anythi
  * every one of them about the OTHER row — which is the precise defect the single read was
  * introduced to end, arrived at through the collation instead of through the query.
  *
- * THE FIXTURE IS A PAIR THE TWO REALLY DISAGREE ABOUT, and the disagreement is asserted before the
- * answer is. See {@link byteFirstId}: an ASCII pair cannot fail this test under either rule, so a
- * test written with one would have passed before the fix and after it.
+ * THE FIXTURE IS TWO PAIRS THE TWO RULES REALLY DISAGREE ABOUT, and the disagreement is asserted
+ * before the answer is. See {@link ORDERING_FIXTURES}: a lower-case ASCII pair cannot fail this test
+ * under either rule, so a test written with one would have passed before the fix and after it.
+ *
+ * WHICH of the two pairs disagrees is the collation's business and not this test's — a byte-ordering
+ * collation separates the rules on one of them and a linguistic collation on the other, and that is
+ * exactly the difference between a developer's cluster and the CI image. So the guard is that AT
+ * LEAST ONE pair separates them, and the answer is then asserted for both: the property under test
+ * is the same one either way round, and nothing about it depends on which collation is running.
  */
 test("a connection is listed under the row the database orders first", async () => {
-  // Inserted in the order that puts JavaScript's answer physically first as well, so neither the
-  // scan order nor the language's order is the one the assertion expects.
-  await database.insert(mcpServers).values([
-    {
-      id: unitFirstId,
-      title: "Ordered App, as one row spells it",
-      vendor: "Composio",
-      url: `composio://${orderedToolkit}`,
-      provenance: "composio",
-    },
-    {
-      id: byteFirstId,
-      title: "Ordered App, as the other spells it",
-      vendor: "Composio",
-      url: `composio://${orderedToolkit}`,
-      provenance: "composio",
-    },
-  ]);
-  await database
-    .insert(composioConnections)
-    .values({ toolkit: orderedToolkit, userId: askerId });
+  for (const fixture of ORDERING_FIXTURES) {
+    // Inserted in the order that puts JavaScript's answer physically first as well, so neither the
+    // scan order nor the language's order is the one the assertion expects.
+    await database.insert(mcpServers).values([
+      {
+        id: fixture.unitFirst,
+        title: `Ordered App at ${fixture.toolkit}, as one row spells it`,
+        vendor: "Composio",
+        url: `composio://${fixture.toolkit}`,
+        provenance: "composio",
+      },
+      {
+        id: fixture.other,
+        title: `Ordered App at ${fixture.toolkit}, as the other spells it`,
+        vendor: "Composio",
+        url: `composio://${fixture.toolkit}`,
+        provenance: "composio",
+      },
+    ]);
+    await database
+      .insert(composioConnections)
+      .values({ toolkit: fixture.toolkit, userId: askerId });
+  }
 
-  // THE DATABASE'S OWN ANSWER, asked the way `brokeredAppRow` asks it. Read rather than written
-  // down, so this expectation is the rule under the collation actually running and not a guess
-  // about one.
-  const [answering] = await database
-    .select({ id: mcpServers.id })
-    .from(mcpServers)
-    .where(eq(mcpServers.url, `composio://${orderedToolkit}`))
-    .orderBy(asc(mcpServers.id))
-    .limit(1);
-  // And the two rules disagree about this pair, which is what gives the assertion below its teeth.
-  // `sort` with no comparator is the JavaScript ordering the listing used to apply.
-  const [unitFirst] = [byteFirstId, unitFirstId].sort();
-  expect(answering?.id).not.toBe(unitFirst);
+  // THE DATABASE'S OWN ANSWER FOR EACH URL, asked the way `brokeredAppRow` asks it. Read rather than
+  // written down, so these expectations are the rule under the collation actually running and not a
+  // guess about one.
+  const answering: string[] = [];
+  // And the pairs the two rules really disagree about. `sort` with no comparator is the JavaScript
+  // ordering the listing used to apply, so a fixture whose SQL answer is not that one is a fixture
+  // that can tell the two rules apart.
+  const separating: string[] = [];
+  for (const fixture of ORDERING_FIXTURES) {
+    const [row] = await database
+      .select({ id: mcpServers.id })
+      .from(mcpServers)
+      .where(eq(mcpServers.url, `composio://${fixture.toolkit}`))
+      .orderBy(asc(mcpServers.id))
+      .limit(1);
+    if (!row) throw new Error(`no row answers for ${fixture.toolkit}`);
+    answering.push(row.id);
+    if (row.id !== fixture.unitFirst) separating.push(fixture.toolkit);
+  }
+
+  /*
+   * THE TEETH, AND A REFUSAL RATHER THAN A QUIET PASS. If this database orders every pair exactly as
+   * JavaScript does then nothing here can tell the two rules apart any more: the assertion below
+   * would hold for a listing that picked its row in SQL and for one that picked it in JavaScript,
+   * and would have passed before the fix as well as after it.
+   *
+   * THE REPAIR IS A THIRD PAIR THIS COLLATION SEPARATES, NOT A SHORTER TEST — which is why the
+   * collation is named here rather than left to be guessed at from a failing expectation.
+   */
+  if (separating.length === 0) {
+    const [running] = await database.execute<{ collation: string }>(
+      sql`select datcollate as collation from pg_database where datname = current_database()`,
+    );
+    throw new Error(
+      `This database (collation ${running?.collation ?? "unknown"}) orders every fixture pair the ` +
+        "way JavaScript's `<` does, so none of them can say whether the listing resolved its row " +
+        "in SQL or in JavaScript, and the assertion below has nothing left to prove. Add a pair " +
+        "this collation orders differently to ORDERING_FIXTURES. Do not delete this guard: the " +
+        "defect it protects — a page drawing an app under one server id while every read behind " +
+        "its buttons is about another — is invisible to a fixture the two rules agree about.",
+    );
+  }
 
   const listed = await store.brokeredConnectionsFor(askerId);
-  expect(listed.map((row) => row.serverId)).toEqual([answering?.id]);
+  // In the order the listing puts its own rows in, which is a plain string comparison over the ids
+  // it ends up naming — so the expectation is the database's answers, sorted the same way.
+  expect(listed.map((row) => row.serverId)).toEqual([...answering].sort());
 });
 
 /**
