@@ -470,19 +470,39 @@ describe("deployment configuration", () => {
 
   // Refused rather than defaulted, for the same reason a malformed policy is: an operator who meant
   // to write a boundary and mistyped it would otherwise get a deployment enforcing something else.
-  test.each(["two minutes", "-1", "1.5", ""])(
+  test.each(["two minutes", "-1", "1.5"])(
     "refuses to start on AGENT_STALL_TIMEOUT_MS=%p",
     (value) => {
-      const attempt = () =>
-        loadConfig({ ...baseEnvironment, AGENT_STALL_TIMEOUT_MS: value });
-      if (value === "") {
-        // An empty value is an absent one, which is the off case rather than a malformed one.
-        expect(attempt().agentStallTimeoutMs).toBe(0);
-        return;
-      }
-      expect(attempt).toThrow("AGENT_STALL_TIMEOUT_MS");
+      expect(() =>
+        loadConfig({ ...baseEnvironment, AGENT_STALL_TIMEOUT_MS: value }),
+      ).toThrow("AGENT_STALL_TIMEOUT_MS");
     },
   );
+
+  /*
+   * AND THE EMPTY STRING IS NOT ONE OF THEM, which is why it is not a row of the list above.
+   *
+   * It rode along in that `test.each` behind an `if` that returned early, so the generated case was
+   * named "refuses to start on AGENT_STALL_TIMEOUT_MS=\"\"" over a body asserting that it STARTS.
+   * A reader picking a failure out of a run would have been told the opposite of what was checked,
+   * and either half could have been changed to agree with the other — a config that began refusing
+   * an empty value would have gone on passing under a name that said it should.
+   *
+   * OFF RATHER THAN REFUSED IS THE BEHAVIOUR, and it is the same one `PORT` has for the same
+   * reason: `optional` trims and coerces empty to undefined, so an unset variable declared in a
+   * compose file or left as `AGENT_STALL_TIMEOUT_MS=` in a `.env` arrives here as absent, which it
+   * is. Refusing it would fail a deployment for writing down the default.
+   */
+  test("reads an empty AGENT_STALL_TIMEOUT_MS as the absent one, and starts", () => {
+    expect(
+      loadConfig({ ...baseEnvironment, AGENT_STALL_TIMEOUT_MS: "" })
+        .agentStallTimeoutMs,
+    ).toBe(0);
+    expect(
+      loadConfig({ ...baseEnvironment, AGENT_STALL_TIMEOUT_MS: "   " })
+        .agentStallTimeoutMs,
+    ).toBe(0);
+  });
 
   test("listens on 3001 when neither PORT nor SERVER_PORT is set", () => {
     expect(loadConfig(baseEnvironment).port).toBe(3001);

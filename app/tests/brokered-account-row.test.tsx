@@ -1033,6 +1033,17 @@ test("a connected consent app offers no Re-check at all", () => {
    */
   const view = renderRow(
     accountState({
+      /*
+       * TRUE, AND THE ONLY REASON THIS CASE PINS ANYTHING. `checkable` is the app's own question —
+       * has it published a read a key could be spent on — and `brokeredConnectionsFor` answers it
+       * per APP, off `probeActionFor(serverId)`, with no idea which scheme the asker connected by.
+       * So a consent row on a Gmail that publishes reads is listed `checkable: true` by the server
+       * exactly like a key row is, and `kind` is the only thing left that can withhold the button.
+       * Left false, this case is satisfied by the other half of the gate and the `kind` half could
+       * be deleted without a word from anybody — which is the whole regression, since a consent
+       * connection has no key to spend and the press could only reach a refusal.
+       */
+      checkable: true,
       connected: true,
       kind: "consent",
       verified: true,

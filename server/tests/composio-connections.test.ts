@@ -144,6 +144,21 @@ const rekeyedToolkit = `rekeyable-${suite}`;
 /** What `addBrokeredApp` spells that app's row, so {@link clean} can take it back. */
 const rekeyedId = `composio-${rekeyedToolkit}`;
 /**
+ * The app CONNECTED AND THEN DISCONNECTED ONCE PER SCHEME, which is what a revocation claim needs.
+ *
+ * Its own name rather than {@link enabledToolkit}'s, for {@link rekeyedToolkit}'s reason and not a
+ * different one. The disconnect test below connects with a key FOR REAL, so it files an
+ * `mcp.account_connected` row of its own — and the secrecy test, which owns {@link enabledToolkit},
+ * asserts there is EXACTLY ONE such row under the app it connects. `audit_events` is append-only
+ * and no cleanup here can reach it, so sharing a slug had each of the two reading the other's row,
+ * and the pair passed or failed on whichever order the runner happened to walk them in. It passed,
+ * on declaration order alone; moving the disconnect test above the secrecy test answered
+ * `Received length: 2`.
+ */
+const reschemedToolkit = `reschemed-${suite}`;
+/** What `addBrokeredApp` spells that app's row, so {@link clean} can take it back. */
+const reschemedId = `composio-${reschemedToolkit}`;
+/**
  * THE APP WHOSE TYPED KEY IS ACTUALLY SPENT ON A CALL, which no other fixture here is.
  *
  * Its own name rather than {@link enabledToolkit}'s, because that app is the one the secrecy test
@@ -220,6 +235,7 @@ const ownedToolkits = [
   secondToolkit,
   enabledToolkit,
   rekeyedToolkit,
+  reschemedToolkit,
   probedToolkit,
   renamedProbedToolkit,
   decoyToolkit,
@@ -598,6 +614,7 @@ async function clean() {
         renamedId,
         enabledId,
         rekeyedId,
+        reschemedId,
         probeAppId,
         probedId,
         renamedProbedId,
@@ -615,6 +632,7 @@ async function clean() {
         renamedId,
         enabledId,
         rekeyedId,
+        reschemedId,
         probeAppId,
         probedId,
         renamedProbedId,
@@ -2613,6 +2631,14 @@ test("the values reach Composio and nothing else", async () => {
    * `auditStore` keeps a copy of the input beside it, not instead of it. Narrowed to this app
    * because `audit_events` is append-only: no cleanup here can reach it, so the other tests in this
    * run have already written `mcp.account_connected` rows under {@link toolkit}.
+   *
+   * AND THE ONE IS AN ASSERTION RATHER THAN AN ACCIDENT OF ORDER, which it has to be said out loud
+   * to stay: `enabledToolkit` is connected for real by THIS TEST AND NO OTHER in the file, so the
+   * count is this test's own act and nobody else's. Any test that needs a second real connect takes
+   * a slug of its own — {@link rekeyedToolkit} and {@link reschemedToolkit} both exist for this and
+   * nothing else. Sharing one here does not redden anything on the spot; it makes this number the
+   * runner's answer rather than the implementation's, and it reads as passing until somebody moves
+   * a test.
    */
   const trail = await database
     .select()
@@ -3429,20 +3455,20 @@ test("a re-check against a consent connection refuses rather than spending its d
 test("disconnecting a key claims no revocation", async () => {
   useAnsweringClient();
   await store.addBrokeredApp({
-    slug: enabledToolkit,
+    slug: reschemedToolkit,
     title: "Enablable App",
     by: admin,
     connection: { kind: "fields", authScheme: "API_KEY" },
   });
   await store.connectBrokeredWithFields({
-    toolkit: enabledToolkit,
+    toolkit: reschemedToolkit,
     userId: askerId,
     values: { generic_api_key: typedKey },
   });
 
   expect(
     await store.disconnectBrokered({
-      toolkit: enabledToolkit,
+      toolkit: reschemedToolkit,
       userId: askerId,
       by: askerId,
       reason: "self",
@@ -3457,9 +3483,9 @@ test("disconnecting a key claims no revocation", async () => {
    * and left somebody's key attached at the vendor with no row here pointing at it.
    */
   expect(asksMade()).toEqual([
-    `ensureAuthConfig:${enabledToolkit}/fields`,
-    `connectWithFields:${enabledToolkit}/${askerId}`,
-    `revoke:${enabledToolkit}/${askerId}`,
+    `ensureAuthConfig:${reschemedToolkit}/fields`,
+    `connectWithFields:${reschemedToolkit}/${askerId}`,
+    `revoke:${reschemedToolkit}/${askerId}`,
   ]);
   expect(vendorHolds).toEqual([]);
   expect(await connectedToolkitsFor(askerId)).toEqual([]);
@@ -3467,18 +3493,18 @@ test("disconnecting a key claims no revocation", async () => {
   // THE SAME APP AND THE SAME ACT, with the scheme moved underneath it. Re-enabling may rewrite the
   // column because the disconnect above left nobody connected to be stranded by it.
   await store.addBrokeredApp({
-    slug: enabledToolkit,
+    slug: reschemedToolkit,
     title: "Enablable App",
     by: admin,
     connection: { kind: "consent" },
   });
   await database
     .insert(composioConnections)
-    .values({ toolkit: enabledToolkit, userId: askerId });
+    .values({ toolkit: reschemedToolkit, userId: askerId });
 
   expect(
     await store.disconnectBrokered({
-      toolkit: enabledToolkit,
+      toolkit: reschemedToolkit,
       userId: askerId,
       by: askerId,
       reason: "self",
