@@ -202,6 +202,44 @@ export type BrokerField = {
 };
 
 /**
+ * The keys of {@link BrokerField} as a ROSTER, which is what anything enumerating them is checked
+ * against.
+ *
+ * A TYPE IS NOT A THING A BROWSER TEST CAN COUNT. `BrokerField` is erased, and the browser holds a
+ * SECOND declaration of this shape in `app/src/lib/plugins/mutations.ts` because the two processes
+ * share no module. The drift test in `app/tests/connection-fields.test.tsx` therefore needs a value
+ * at runtime, and for two rounds it had one it wrote itself — a literal in the test file compared
+ * against another literal in the same file, which a key added here passed without a word. This is
+ * the value it now imports, so the count is against this declaration rather than against a copy of
+ * it somebody remembered to make.
+ *
+ * PINNED TO THE TYPE IN BOTH DIRECTIONS, for `BROKERED_PROBE_OUTCOMES`' reason one vocabulary along
+ * in `./store.ts`. `satisfies` holds this list inside the shape, so a key misspelled here fails;
+ * {@link _BrokerFieldKeysNameTheWholeShape} holds the shape inside this list, so a key added to
+ * `BrokerField` and not to this roster fails. `Required<…>` is what makes the optional key count —
+ * `default` is a key the vendor publishes and the form has to read, and a roster that let optional
+ * keys go unnamed would be a roster with a hole in exactly the place a new key is likeliest to land.
+ *
+ * SO A SEVENTH KEY COSTS TWO STEPS AND CANNOT SKIP EITHER. Adding it to the type fails `tsc` here;
+ * adding it here to satisfy that then fails the browser's count, which has no entry for the new name
+ * in either its sample field or its list of what the form is observed to DO with a key.
+ */
+export const BROKER_FIELD_KEYS = [
+  "name",
+  "label",
+  "help",
+  "required",
+  "secret",
+  "default",
+] as const satisfies readonly (keyof Required<BrokerField>)[];
+
+/** The other direction of {@link BROKER_FIELD_KEYS}' pin. Type-only; erased entirely. */
+type _BrokerFieldKeysNameTheWholeShape = Decides<
+  keyof Required<BrokerField>,
+  Record<(typeof BROKER_FIELD_KEYS)[number], string>
+>;
+
+/**
  * How this deployment would connect somebody to an app — the one fact everything else reads.
  *
  * Derived once from the catalogue, recorded on the app's row at enable time, and read by the

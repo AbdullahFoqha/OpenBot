@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConnectionFields } from "@/components/plugins/connection-fields";
 import type { BrokerField } from "@/lib/plugins/mutations";
+import { BROKER_FIELD_KEYS } from "../../server/src/plugins/broker";
 
 beforeAll(() => GlobalRegistrator.register());
 afterEach(cleanup);
@@ -205,24 +206,25 @@ test("a box named __proto__ nobody touched takes the default the app publishes n
 });
 
 /**
- * Every key the SERVER publishes on one of these fields, as `BrokerField` in
- * `server/src/plugins/broker.ts` declares them and `ComposioBroker.connectionFields` builds them.
+ * Every key the SERVER publishes on one of these fields, READ OFF THE SERVER'S OWN DECLARATION.
  *
- * A HAND COPY, AND DELIBERATELY ONE, for the reason `SERVER_FIELD_SCHEMES` in
- * `brokered-account-row.test.tsx` is: the two processes share no module, so the browser's
- * `BrokerField` in `lib/plugins/mutations.ts` is a SECOND declaration of this shape, and the only
- * thing holding the two copies level is that somebody remembered to change both. An imported copy
- * could never disagree with itself, which is precisely the disagreement worth expressing here — a
- * key the vendor's form gains at the server is a failure below rather than a reviewer's catch.
+ * `BROKER_FIELD_KEYS` in `server/src/plugins/broker.ts` is pinned to `BrokerField` in both
+ * directions — `satisfies` holds the list inside the shape and a `Decides<…>` witness holds the
+ * shape inside the list — so this import is the server's key set and not a reading of it.
+ *
+ * IT WAS A HAND COPY FOR TWO ROUNDS AND THAT IS WHY IT IS NOT ONE NOW. The copy was defended as
+ * `SERVER_FIELD_SCHEMES` in `brokered-account-row.test.tsx` is defended, and the defence does not
+ * carry: that roster earns its copy by deliberately holding a scheme the screen has NEVER heard of,
+ * which is a disagreement only a copy can state. This one stated no disagreement. It was a literal
+ * compared against `EVERY_KEY`, a second literal in this same file, so a key added to the real
+ * `BrokerField` at the server passed both sides of a test whose own prose claimed to count the
+ * server's declaration against the browser's.
+ *
+ * IMPORTING IT COSTS THIS FILE NOTHING AT RUNTIME. `broker.ts` imports nothing — not the vendor's
+ * package, not a type from elsewhere in the tree — which is a property that module's own header
+ * declares and keeps, so crossing the seam here pulls in one file of names.
  */
-const SERVER_BROKER_FIELD_KEYS = [
-  "name",
-  "label",
-  "help",
-  "required",
-  "secret",
-  "default",
-] as const;
+const SERVER_BROKER_FIELD_KEYS = BROKER_FIELD_KEYS;
 
 /**
  * One field carrying a value for every key on that roster, as an app publishing the lot would.
@@ -231,7 +233,9 @@ const SERVER_BROKER_FIELD_KEYS = [
  * rather than a guarantee HERE — `app/tsconfig.json` covers `src` and not `app/tests`, and
  * `bun test` does not typecheck, which the sibling file records at its own `accountState` — so the
  * bite is the pair of counts at the end of the test: the keys of this object against the server's
- * roster, and that roster against the list of things the form is observed to DO with a key.
+ * roster, and that roster against the list of things the form is observed to DO with a key. Both
+ * counts run against {@link SERVER_BROKER_FIELD_KEYS}, which is the server's own value and not a
+ * copy of it, so neither is satisfied by this file agreeing with itself.
  */
 const EVERY_KEY: Required<BrokerField> = {
   name: "firecrawl_api_key",

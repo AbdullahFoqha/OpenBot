@@ -27,6 +27,7 @@ import type { BrokerField } from "@/lib/plugins/mutations";
 import type { PluginServer, PluginsPage } from "@/lib/plugins/queries";
 import { Route as AdminAppRoute } from "@/routes/_authed/admin/plugins/$key";
 import { Route as ConnectedAccountRoute } from "@/routes/_authed/settings/connected-accounts/$key";
+import { BROKERED_PROBE_OUTCOMES } from "../../server/src/plugins/store";
 
 /**
  * The brokered account row, on both screens that draw it.
@@ -1357,12 +1358,23 @@ test("a key the vendor rejected says so, and that the account still stands", () 
  * EVERY OUTCOME ONE CHECK OF A BROKERED ACCOUNT CAN HAVE, as the SERVER names them — `BrokeredProbe`
  * in `server/src/plugins/store.ts` — beside the row each one leaves for this screen to read.
  *
- * A HAND COPY FOR `SERVER_FIELD_SCHEMES`' REASON, and the same seam one vocabulary further along.
- * The server added a fourth outcome (`unreachable`) after this screen was written, and nothing in
- * either process is in a position to notice: the two share no module, the outcome never travels as
- * a word, and what reaches the browser is the PAIR `{ verified, probe }` the writers leave on
- * `composio_connections`. So this roster is the mapping itself — four server outcomes onto the row
- * shapes a page load reads — and the test below drives the real row through each of them.
+ * THE MAPPING IS THIS FILE'S; THE LIST OF OUTCOMES IS THE SERVER'S. The server added a fourth
+ * outcome (`unreachable`) after this screen was written, and nothing in either process was in a
+ * position to notice: the two share no module, the outcome never travels as a word, and what
+ * reaches the browser is the PAIR `{ verified, probe }` the writers leave on `composio_connections`.
+ * So this roster is the mapping itself — server outcomes onto the row shapes a page load reads —
+ * and the test below drives the real row through each of them.
+ *
+ * WHICH IS WHY THE COMPLETENESS TEST NO LONGER COUNTS THIS AGAINST A LIST OF ITS OWN. For two
+ * rounds it did: `["nothing", "answered", "refused", "unreachable"]` written out at the assertion,
+ * in this file, compared to the `outcome` fields above it — a fifth member on the server's real
+ * `BrokeredProbe` passed that, which is exactly the drift the test was added to catch. It now
+ * counts against `BROKERED_PROBE_OUTCOMES`, imported from `server/src/plugins/store.ts`, which that
+ * module pins to the union in both directions with `satisfies` and a `Decides<…>` witness.
+ *
+ * `SERVER_FIELD_SCHEMES` ABOVE IS STILL A COPY AND STILL SHOULD BE, which is not the same case: it
+ * earns its copy by carrying a scheme the screen has never heard of, and a disagreement is the one
+ * thing an import cannot state. This roster claimed that defence and never used it.
  *
  * THE ROW SHAPES ARE THE WRITERS' OWN. `connectBrokeredWithFields` derives `verified` from
  * `outcome === "answered"` and records `probed.probe`, which `BrokeredProbe` withholds on both
@@ -1448,15 +1460,18 @@ for (const probed of SERVER_PROBE_OUTCOMES) {
 
 test("the probe roster covers every outcome the server has, and names the one that shares another's sentence", () => {
   /*
-   * THE COUNT, which is the lever. A fifth outcome added to `BrokeredProbe` is an outcome with no
-   * row here, and this is where that is said — rather than in a review of the screen that was never
-   * asked to change.
+   * THE COUNT, which is the lever, AND IT IS AGAINST THE SERVER'S OWN VALUE. A fifth outcome added
+   * to `BrokeredProbe` is an outcome with no row here, and this is where that is said — rather than
+   * in a review of the screen that was never asked to change. Written out as a literal here, as it
+   * was for two rounds, it said nothing at all: the list and the roster were both this file's, so
+   * the only drift it could detect was drift between two things one edit changes together.
+   *
+   * ORDER INCLUDED, DELIBERATELY. `BROKERED_PROBE_OUTCOMES` is declared in the order the union
+   * declares its members, this table is written in that order, and the entries below index into it
+   * by position — so a `toEqual` that tolerated reordering would let those indices drift silently.
    */
   expect(SERVER_PROBE_OUTCOMES.map((probed) => probed.outcome)).toEqual([
-    "nothing",
-    "answered",
-    "refused",
-    "unreachable",
+    ...BROKERED_PROBE_OUTCOMES,
   ]);
 
   // Exactly one cell is declared rather than endorsed, and it is named beside what it collides with.
