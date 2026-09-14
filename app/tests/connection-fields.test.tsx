@@ -92,3 +92,114 @@ test("a newly published box named toString is filled with its default, not with 
     { api_key: "fc-live-a-secret", toString: "plain" },
   ]);
 });
+
+/**
+ * A name every object already answers for, published with no default, so a keystroke is all it has.
+ *
+ * `__proto__` FAILS THE OTHER WAY FROM `toString`, AND ONLY ONE OF THE TWO PROTECTIONS CATCHES IT.
+ * Reading `toString` off a plain object hands back a function, which the reconcile below refuses by
+ * going through a `Map`; assigning `__proto__` on a plain object reaches the prototype setter,
+ * which ignores a string — so the value is dropped between the keystroke and the request, and no
+ * read anywhere can recover it. Only the bag having no prototype keeps it.
+ */
+const PROXY: BrokerField = {
+  name: "__proto__",
+  label: "Proxy",
+  help: "The gateway this account is reached through.",
+  required: false,
+  secret: false,
+};
+
+test("what somebody types into a box named __proto__ is what gets submitted", async () => {
+  /*
+   * THE PROTECTION THIS PINS ON ITS OWN IS `bagOf`'s NULL PROTOTYPE. The test above covers both
+   * protections at once and passes with either one of them removed — a name answered off
+   * `Object.prototype` is refused by the bag having no prototype AND by {@link reconcile} reading
+   * through maps, so neither was held by anything on its own. Nothing is re-published here, so
+   * `reconcile` never runs and cannot answer for this one: a plain object silently drops this
+   * assignment, and what the person typed never leaves the form.
+   */
+  const submissions: Record<string, string>[] = [];
+  const submit = (values: Record<string, string>) => {
+    submissions.push(values);
+  };
+
+  const { container, getByLabelText } = render(
+    <ConnectionFields
+      busy={false}
+      fields={[API_KEY, PROXY]}
+      onSubmit={submit}
+    />,
+  );
+
+  await userEvent.type(getByLabelText("API key"), "fc-live-a-secret");
+  await userEvent.type(getByLabelText("Proxy"), "gateway.example.test");
+
+  // The box itself, because a value the bag dropped is also a box that stays empty under a cursor.
+  expect((getByLabelText("Proxy") as HTMLInputElement).value).toBe(
+    "gateway.example.test",
+  );
+
+  const form = container.querySelector("form");
+  if (form === null) throw new Error("the form was not drawn");
+  fireEvent.submit(form);
+
+  /*
+   * READ AS ENTRIES RATHER THAN COMPARED WITH A LITERAL, because `__proto__` written as a key in an
+   * object literal is the prototype rather than a key — the expectation would decide what it means
+   * to assert. `Object.entries` asks the submitted bag what it actually holds.
+   */
+  expect(submissions).toHaveLength(1);
+  expect(Object.entries(submissions[0])).toEqual([
+    ["api_key", "fc-live-a-secret"],
+    ["__proto__", "gateway.example.test"],
+  ]);
+});
+
+test("a box named __proto__ nobody touched takes the default the app publishes now", async () => {
+  /*
+   * AND THIS IS THE PROTECTION THE ONE ABOVE CANNOT ANSWER FOR: {@link reconcile} reading both
+   * sides through maps. "Nobody typed this" is decided by comparing what is held against what the
+   * PREVIOUS list seeded, and that second lookup is by field name — so a plain object holding the
+   * previous defaults answers `Object.prototype` for this name rather than the default it was
+   * given. Nothing then equals anything, the field reads as somebody's own typing, and a default
+   * the vendor has just changed is pinned to yesterday's value with nothing to notice it.
+   */
+  const submissions: Record<string, string>[] = [];
+  const submit = (values: Record<string, string>) => {
+    submissions.push(values);
+  };
+
+  const { container, getByLabelText, rerender } = render(
+    <ConnectionFields
+      busy={false}
+      fields={[API_KEY, { ...PROXY, default: "gateway.example.test" }]}
+      onSubmit={submit}
+    />,
+  );
+
+  await userEvent.type(getByLabelText("API key"), "fc-live-a-secret");
+
+  // The same dialog a moment later, with the app publishing a different gateway.
+  rerender(
+    <ConnectionFields
+      busy={false}
+      fields={[API_KEY, { ...PROXY, default: "edge.example.test" }]}
+      onSubmit={submit}
+    />,
+  );
+
+  expect((getByLabelText("Proxy") as HTMLInputElement).value).toBe(
+    "edge.example.test",
+  );
+
+  const form = container.querySelector("form");
+  if (form === null) throw new Error("the form was not drawn");
+  fireEvent.submit(form);
+
+  expect(submissions).toHaveLength(1);
+  expect(Object.entries(submissions[0])).toEqual([
+    ["api_key", "fc-live-a-secret"],
+    ["__proto__", "edge.example.test"],
+  ]);
+});

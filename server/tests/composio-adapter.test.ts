@@ -15,6 +15,11 @@ import {
   buildComposioClient,
   createComposioClient,
 } from "../src/plugins/composio-adapter";
+import {
+  A_CRASH,
+  expectOnlyRefusal,
+  type RefusalName,
+} from "./helpers/refusals";
 
 /**
  * The three facts about the adapter that a type checker cannot settle, asserted with no network.
@@ -281,22 +286,14 @@ async function failureOf(work: Promise<unknown>): Promise<Error> {
   return outcome.raised;
 }
 
-/**
- * What a failure must never read like: the name of a method that was not there.
- *
- * AT MODULE SCOPE BECAUSE IT IS THE SAME QUESTION EVERYWHERE, and it is asked of every refusal this
- * file added after the shape sweep: a guard that is missing does not answer politely, it reads a
- * field off `undefined` and hands an administrator a sentence naming a vendor method. A message
- * matching this is a crash wearing a refusal's place in the code.
- *
- * "IS NOT AN OBJECT" IS ANCHORED TO `undefined` AND `null` RATHER THAN LEFT BARE, because the
- * adapter's own sentence for a malformed input schema says "a thing that is not an object cannot be
- * shown as one" — the correct refusal, flagged as a crash by a pattern looking for a fragment of
- * one. The runtime's phrasings are "undefined is not an object (evaluating ...)" and the same with
- * null, so the anchor keeps every crash this caught and stops it catching an authored sentence.
+/*
+ * {@link A_CRASH} IS IMPORTED RATHER THAN DECLARED HERE, and it is asked of every refusal this file
+ * added after the shape sweep: a guard that is missing does not answer politely, it reads a field
+ * off `undefined` and hands an administrator a sentence naming a vendor method. It moved to
+ * `./helpers/refusals` because {@link expectOnlyRefusal} asks it of every sentence it grades, and
+ * two copies of one judgement about what a crash reads like is the drift this file legislates
+ * against everywhere else.
  */
-const A_CRASH =
-  /is not a function|(?:undefined|null) is not an object|is not iterable|cannot read propert/i;
 
 /**
  * The envelope guard's own sentence, so a test about a ROW can say it was not this one.
@@ -1338,9 +1335,18 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     );
 
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
-    expect(refusal.message).not.toMatch(A_CRASH);
-    expect(refusal.message).not.toMatch(NO_CONFIG_REMEDY);
-    expect(refusal.message).not.toMatch(DISABLED_REMEDY);
+    /*
+     * THE THIRD SENTENCE IS ASSERTED AND NOT ONLY THE OTHER TWO'S ABSENCE. This named what the
+     * refusal must not be — an app with no config, a config Composio calls disabled — and left
+     * what it IS to any third sentence, including one prescribing an act nobody on that page can
+     * perform. Its twin one method over (`connectWithFields`, in "a listing this deployment cannot
+     * read is not an app that publishes nothing") already asserts its own remedy, so the pair now
+     * reads the one condition the one way.
+     */
+    expectOnlyRefusal(refusal.message, "unreadableNobodySent");
+    expect(refusal.message).toMatch(
+      /upgrading this deployment's @composio\/core/,
+    );
     // And nobody was sent anywhere: a link is a lasting attachment to one config, so it is never
     // minted off a listing this deployment could not read.
     expect(linked).toEqual([]);
@@ -2077,10 +2083,21 @@ describe("withdrawing one person's grants", () => {
     // that row is the only thing in this deployment naming which app this person connected.
     expect(failure).toBeInstanceOf(BrokerRefusalError);
     expect(failure.message).toMatch(/2 of this person's 3 accounts/);
-    // And the reason the third could not be asked about is named, because "try again" is not the
-    // remedy for it and the reader would otherwise be given a count with no way to read it.
-    expect(failure.message).not.toMatch(A_CRASH);
-    expect((failure.cause as Error).message).toMatch(/id/);
+    /*
+     * And the reason the third could not be asked about is named, because "try again" is not the
+     * remedy for it and the reader would otherwise be given a count with no way to read it.
+     *
+     * THE ROW AND THE LISTING RATHER THAN THE WORD. This asked `/id/` of `cause`, and `/id/` is
+     * inside "invalid", "considered", "provided" and "identifier" — so it asserted almost nothing
+     * about which reading produced the cause, and would not have noticed this sentence being
+     * rewritten in the neighbouring listing's words. `withdrawableAccounts` and `readableConfigs`
+     * raise the same fault over two different listings one function apart.
+     */
+    expectOnlyRefusal(
+      everythingSaidBy(failure).join("\n"),
+      "accountId",
+      "row 2 of its gmail accounts for this person",
+    );
   });
 
   /**
@@ -2127,9 +2144,20 @@ describe("withdrawing one person's grants", () => {
     expect(failure.message).not.toMatch(A_CRASH);
     expect(failure.message).toMatch(/withdrew 1 of this person's 1 accounts/);
     expect(failure.message).toMatch(/authorization configs for gmail/);
-    // And the reason that row could not be sorted travels as `cause`, because the sentence above is
-    // deliberately a count and leaves the reasons nowhere else to live.
-    expect((failure.cause as Error).message).toMatch(/name/);
+    /*
+     * And the reason that row could not be sorted travels as `cause`, because the sentence above is
+     * deliberately a count and leaves the reasons nowhere else to live.
+     *
+     * ASKED AS THE NAME GUARD'S OWN CLAUSE AND NOT AS THE WORD "name". `readableConfigs` has two
+     * row guards and the id guard's sentence carries the word too — "the id is the whole of what a
+     * deletion NAMES" — so `/name/` matched either of them, and the two guards reading each
+     * other's field left this test green. Measured, not supposed.
+     */
+    expectOnlyRefusal(
+      everythingSaidBy(failure).join("\n"),
+      "configName",
+      "row 1 of Composio's authorization configs for gmail",
+    );
   });
 
   /**
@@ -4344,7 +4372,15 @@ describe("a vendor answer that is one object rather than a listing", () => {
     );
 
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
-    expect(refusal.message).not.toMatch(A_CRASH);
+    /*
+     * AND IT IS THE SHAPE REFUSAL RATHER THAN THE ONE A LINE BELOW IT. `authorize` writes two
+     * sentences one line apart — this one and the `!redirectUrl` "connected by entering a
+     * credential rather than by visiting a page" — and a test asserting only "it refused, and not
+     * in a crash's words" cannot tell them apart: replacing this sentence with that one verbatim
+     * left this test green. The remedies are different acts by different people, so the sentence
+     * is named.
+     */
+    expectOnlyRefusal(refusal.message, "redirectPage", "linear");
   });
 });
 
@@ -4358,7 +4394,21 @@ describe("a vendor answer that is one object rather than a listing", () => {
  * watching this test fail.
  */
 describe("what a malformed field of a row actually costs", () => {
-  const CATALOGUE_ROWS: { fault: string; row: unknown; names: RegExp }[] = [
+  const CATALOGUE_ROWS: {
+    fault: string;
+    row: unknown;
+    /*
+     * THE REFUSAL BY NAME, AND THE ROW IT WAS RAISED OVER, RATHER THAN A WORD OUT OF ITS PROSE.
+     * This column held a bare `RegExp` and the loop asserted presence only, so the six patterns
+     * were not mutually exclusive: `/slug/` matched the NAME fault's sentence ("gmail is a slug
+     * rather than a title") and `/name/` matched the SLUG fault's ("the slug is the only name this
+     * deployment has for an app"), and swapping which field the two guards read left all six green.
+     * {@link expectOnlyRefusal} asserts the named sentence AND the absence of every sibling in the
+     * registry, which is the cross-check this table was the one place in the file to go without.
+     */
+    says: RefusalName;
+    at?: string;
+  }[] = [
     {
       fault: "a slug that arrived as null",
       // The slug is the only name this deployment has for an app: it is what enabling one writes
@@ -4374,7 +4424,8 @@ describe("what a malformed field of a row actually costs", () => {
        * discriminates is the position the value was sent in, which is the phrase both refusals are
        * built on and the only part of either that a swap moves.
        */
-      names: /where the slug of row 1/,
+      says: "catalogueSlug",
+      at: "row 1 of Composio's app catalogue",
     },
     {
       fault: "a logo that is not an address",
@@ -4385,7 +4436,8 @@ describe("what a malformed field of a row actually costs", () => {
         name: "Gmail",
         meta: { logo: { url: "https://example.test/gmail.png" } },
       },
-      names: /logo/,
+      says: "catalogueLogo",
+      at: "gmail",
     },
     {
       fault: "a name that arrived as null",
@@ -4393,12 +4445,14 @@ describe("what a malformed field of a row actually costs", () => {
       // is a slug rather than a title.
       row: { slug: "gmail", name: null, meta: {} },
       // The position rather than the word, for the reason the slug row above gives at length.
-      names: /where the name of row 1/,
+      says: "catalogueName",
+      at: "row 1 of Composio's app catalogue",
     },
     {
       fault: "a description that is not text",
       row: { slug: "gmail", name: "Gmail", meta: { description: 12 } },
-      names: /description/,
+      says: "catalogueDescription",
+      at: "gmail",
     },
     {
       fault: "a category with no name",
@@ -4409,18 +4463,20 @@ describe("what a malformed field of a row actually costs", () => {
         name: "Gmail",
         meta: { categories: [{ id: "productivity" }] },
       },
-      names: /categor/,
+      says: "catalogueCategoryName",
+      at: "gmail's category 1",
     },
     {
       fault: "an action count that arrived as a string",
       // `Number("63")` is the defect this whole sweep is about: a vendor change turned into a
       // plausible figure, shown BEFORE anybody enables an app, that nobody would think to question.
       row: { slug: "gmail", name: "Gmail", meta: { tools_count: "63" } },
-      names: /count/,
+      says: "catalogueActionCount",
+      at: "gmail",
     },
   ];
 
-  for (const { fault, row, names } of CATALOGUE_ROWS) {
+  for (const { fault, row, says, at } of CATALOGUE_ROWS) {
     test(`a catalogue row with ${fault} stops the directory`, async () => {
       const { broker } = buildComposioClient(
         fakeVendor({ toolkits: { list: async () => ({ items: [row] }) } }),
@@ -4430,8 +4486,7 @@ describe("what a malformed field of a row actually costs", () => {
       const refusal = await failureOf(broker.listApps());
 
       expect(refusal).toBeInstanceOf(BrokerRefusalError);
-      expect(refusal.message).not.toMatch(A_CRASH);
-      expect(refusal.message).toMatch(names);
+      expectOnlyRefusal(refusal.message, says, at);
     });
   }
 
@@ -4717,11 +4772,11 @@ describe("what a malformed field of a row actually costs", () => {
      * read from — and the other field's sentence is asserted absent, which is the half that makes
      * the assertion discriminating rather than merely more specific.
      */
-    const said = everythingSaidBy(refusal).join("\n");
-    expect(said).toMatch(
-      /where the name of row 2 of Composio's authorization configs for linear belongs/,
+    expectOnlyRefusal(
+      everythingSaidBy(refusal).join("\n"),
+      "configName",
+      "row 2 of Composio's authorization configs for linear",
     );
-    expect(said).not.toMatch(/where the id of row/);
     /*
      * AND THE CONFIG THAT WAS READABLE IS GONE, WHICH THIS ASSERTED THE OPPOSITE OF ON PURPOSE AND
      * IS CHANGED ON PURPOSE. It required `[]` — not even the row that WAS readable — on the ground
@@ -4764,11 +4819,15 @@ describe("what a malformed field of a row actually costs", () => {
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
     // Asked of the sentence that established it and not of the shared "with no id or no name"
     // clause, for the reason the test above gives: that phrase carries both words.
-    const said = everythingSaidBy(refusal).join("\n");
-    expect(said).toMatch(
-      /where the id of row 1 of Composio's authorization configs for linear belongs/,
+    expectOnlyRefusal(
+      everythingSaidBy(refusal).join("\n"),
+      "configId",
+      "row 1 of Composio's authorization configs for linear",
+      // Every row of this listing is one nothing could sort, so the top sentence is that state's
+      // own and the id fault is what hangs off it. Named rather than tolerated, because a chain
+      // carrying a sibling nobody declared is the shape this helper exists to redden.
+      ["unreadableNothingRemoved"],
     );
-    expect(said).not.toMatch(/where the name of row/);
     expect(deleted).toEqual([]);
   });
 
@@ -6092,7 +6151,14 @@ describe("the fields an app asks a person to fill in", () => {
      * against the vendor changing rather than a routine case.
      */
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
-    expect(refusal.message).toMatch(/cannot be filled in here/);
+    /*
+     * AND IT IS THE TYPE FAULT RATHER THAN ITS TWIN. One guard raises this sentence for two faults
+     * — a type that is not a string, and a name that did not arrive — and both tests over it
+     * asserted the clause they SHARE, so neither could tell a correct classification from a wrong
+     * one. What moves between them is the field position: the type fault names a box that has a
+     * name, and its twin names one published "under the name nothing".
+     */
+    expectOnlyRefusal(refusal.message, "fieldTypeNotDrawable");
   });
 
   test("a field named for the word the connection state uses is refused, not drawn", async () => {
@@ -6498,8 +6564,9 @@ describe("the fields an app asks a person to fill in", () => {
     );
 
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
-    expect(refusal.message).not.toMatch(A_CRASH);
-    expect(refusal.message).toMatch(/cannot be filled in here/);
+    // The absence rather than the shared clause, for the reason the type fault above gives: this
+    // is the half of that one guard that says the box could not be named at all.
+    expectOnlyRefusal(refusal.message, "fieldNameMissing");
     // And never the coercion itself, which is what the form used to be handed.
     expect(refusal.message).not.toMatch(/"undefined"/);
   });
