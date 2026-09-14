@@ -41,7 +41,7 @@ import {
   type BrokeredProbe,
   createPluginStore,
 } from "../src/plugins/store";
-import { TEST_POOL } from "./support/database";
+import { TEST_POOL, testDatabaseUrl } from "./support/database";
 
 /**
  * Which flow an app gets, decided from what Composio's own catalogue publishes.
@@ -525,14 +525,10 @@ for (const padded of PADDED_SCHEMES) {
  * the thing under test.
  *
  * EVERY ID CARRIES THIS RUN'S SUFFIX, for `composio-connections.test.ts`' reason: these tests run
- * against the shared development database, so a fixture at a fixed id cannot coexist with a real
- * row at that id, and a run that died before its cleanup would redden the file for everybody.
+ * against whatever database TEST_DATABASE_URL names, so a fixture at a fixed id cannot coexist with
+ * a real row at that id, and a run that died before its cleanup would redden the file for everybody.
  */
-const database = createDatabase(
-  process.env.DATABASE_URL ??
-    "postgres://openbot:openbot@localhost:5432/openbot",
-  TEST_POOL,
-);
+const database = createDatabase(testDatabaseUrl(), TEST_POOL);
 
 const suite = randomUUID().slice(0, 8);
 const person = `user_kinds_${suite}`;

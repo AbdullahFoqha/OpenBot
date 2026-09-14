@@ -32,7 +32,7 @@ import { testEnvironment } from "./support/environment";
  * green test.
  *
  * AND THE FILLERS BELOW HAD TO GO WITH IT, which is the half that looks unrelated and is not.
- * `createApp` takes twenty-six positional stores, and the spread that skipped to the fifteenth was
+ * `createApp` takes thirty positional stores, and the spread that skipped to the fifteenth was
  * an array of unknown LENGTH — so TypeScript had no idea which parameter the store landed on and
  * checked it against the next one in the signature. Typing the store without fixing that only moves
  * the silence: see {@link UP_TO_PLUGIN_STORE}.
@@ -65,8 +65,12 @@ const UP_TO_PLUGIN_STORE = [
   undefined,
 ] as const;
 
-/** `createApp`'s positions 16-25, between the plugin store and the broker. See {@link UP_TO_PLUGIN_STORE}. */
+/** `createApp`'s positions 16-29, between the plugin store and the broker. See {@link UP_TO_PLUGIN_STORE}. */
 const UP_TO_BROKER = [
+  undefined,
+  undefined,
+  undefined,
+  undefined,
   undefined,
   undefined,
   undefined,
@@ -854,7 +858,7 @@ function directoryApp(
     // Positions 4-14 are the other stores; `store` is 15, pluginStore.
     ...UP_TO_PLUGIN_STORE,
     store,
-    // Positions 16-25 are the stores after it; the broker is 26, `composio`.
+    // Positions 16-29 are the stores after it; the broker is 30, `composio`.
     ...UP_TO_BROKER,
     listApps ? ({ broker: { listApps } } as never) : undefined,
   );
@@ -1771,7 +1775,7 @@ function brokeredApp(
     // Positions 4-14 are the other stores; `store` is 15, pluginStore.
     ...UP_TO_PLUGIN_STORE,
     store,
-    // Positions 16-25 are the stores after it; the broker is 26, `composio`.
+    // Positions 16-29 are the stores after it; the broker is 30, `composio`.
     ...UP_TO_BROKER,
     redirectUrl
       ? ({

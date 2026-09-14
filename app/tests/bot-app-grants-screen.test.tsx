@@ -62,8 +62,14 @@ const originalFetch = global.fetch;
 beforeEach(() => {
   // Every read in this app goes through `client()` in `lib/client.ts`, which throws once the
   // response is not `ok`. A 500 with no body is the shape a broken server actually sends.
-  global.fetch = (async () =>
-    new Response(null, { status: 500 })) as typeof fetch;
+  // `preconnect` carried over from the real one rather than cast away: `typeof fetch` has it, and a
+  // cast to that type is a claim about a stub that does not.
+  global.fetch = Object.assign(
+    async () => new Response(null, { status: 500 }),
+    {
+      preconnect: originalFetch.preconnect,
+    },
+  );
 });
 
 afterEach(() => {
@@ -123,6 +129,8 @@ function server(overrides: Partial<PluginServer> & { id: string }) {
     lastError: null,
     addedBy: null,
     dynamicClient: false,
+    // Not brokered unless a case says otherwise, which is what a null means here.
+    authScheme: null,
     tools: [],
     withdrawn: [],
     ...overrides,

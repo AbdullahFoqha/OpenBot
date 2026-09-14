@@ -6,12 +6,14 @@ import {
 import { serve } from "bun";
 import { eq } from "drizzle-orm";
 import { COMPUTER_GUIDANCE } from "../../shared/bot-prompt";
+import { workOwner } from "../../shared/work-owner";
 import { mintRunAssertion, readRunAssertion } from "./agents/callback-token";
 import { createAgentFetch } from "./agents/endpoint";
 import { askTheirOwnPerson, escalationTool } from "./agents/escalation";
 import { createHandoffDesk, HANDOFF_KIND } from "./agents/handoff";
 import { createHandoffDelivery } from "./agents/handoff-delivery";
 import { createHandoffRunner } from "./agents/handoff-runner";
+import { signHandoffDeliveryRun } from "./agents/handoff-signing";
 import { handoffTool } from "./agents/handoff-tool";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
@@ -31,6 +33,10 @@ import { DEV_ACTOR, initializeDevActorUser } from "./auth/dev-actor";
 import { createRoleRepository } from "./auth/guards";
 import { createIdentityProviderStore } from "./auth/identity-provider-store";
 import type { OpenBotRole } from "./auth/roles";
+import {
+  loadAttachmentForTurn,
+  markAttachmentsSent,
+} from "./channels/attachments";
 import {
   createChannelEventHub,
   startChannelActivityListener,
@@ -65,6 +71,7 @@ import {
   type IdentifyUser,
   mountCopilotRuntime,
   resolveRuntimeAgents,
+  runtimeModelForEnvironment,
   type ToolSelection,
 } from "./copilot";
 import {
@@ -74,6 +81,8 @@ import {
 } from "./credentials";
 import { createDatabase } from "./db/client";
 import { intelligenceChannelMappings } from "./db/schema";
+import { createHostAccessBroker } from "./host-access/broker";
+import { hostAccessTools } from "./host-access/tools";
 import { createOnboardingStore } from "./people/onboarding";
 import { createPeopleStore } from "./people/store";
 import { useRoutineTools } from "./plugins/builtin-routines";
@@ -81,7 +90,7 @@ import { useComposioClient } from "./plugins/composio";
 import { createComposioClient } from "./plugins/composio-adapter";
 import { redirectUriFor } from "./plugins/oauth";
 import { createPluginStore } from "./plugins/store";
-import { grantedSkills, grantedTools } from "./plugins/tools";
+import { grantedSkills, grantedTools, REFUSAL_MARKER } from "./plugins/tools";
 import { createTurnRunner } from "./routines/run-turn";
 import { createRoutineRunner } from "./routines/runner";
 import { createRoutineStore } from "./routines/store";
@@ -99,7 +108,6 @@ import {
   startWorkOfferedListener,
   type WorkOfferedListener,
 } from "./work/queue";
-import { workOwner } from "../../shared/work-owner";
 
 /**
  * Who is asking, for a CopilotKit request.
@@ -498,9 +506,11 @@ const stallGuard = createStallGuard({
   auditStore: bootAuditStore,
 });
 
+const runtimeModel = runtimeModelForEnvironment(tenantPackage.model);
+
 const intentRouter = createIntentRouter({
   complete: createModelCompleter({
-    model: tenantPackage.model,
+    model: runtimeModel,
     resolveApiKey: () =>
       resolveModelApiKey({
         encryptionKey: config.keyEncryptionKey,
@@ -519,7 +529,7 @@ const intentRouter = createIntentRouter({
  * on every call, so a credential rotated a moment ago is used by the next run.
  */
 const chooseSkills = createModelCompleter({
-  model: tenantPackage.model,
+  model: runtimeModel,
   resolveApiKey: () =>
     resolveModelApiKey({
       encryptionKey: config.keyEncryptionKey,
@@ -551,12 +561,24 @@ const resolveRuntimeModelApiKey = () =>
     environment: process.env,
   });
 
-// Tools run here, not in the browser. Each one still executes through the plugin store, so the
-// grant, the policy and the audit row are exactly where they were.
+const hostAccessBroker = createHostAccessBroker();
+
+// Tools run here, not in the browser. Each connector still executes through the plugin store, so the
+// grant, the policy and the audit row are exactly where they were. Host-folder tools are also
+// server-dispatched: the selected Bot and the signed-in owner are bound here, then the desktop worker
+// receives only opaque grant ids and relative paths.
 const loadToolsForActor =
   (actorId: string, initiator: AuditInitiator = PERSON_INITIATOR) =>
-  (botId: string) =>
-    grantedTools({ store: pluginStore, botId, actorId, initiator });
+  async (botId: string) => [
+    ...(await grantedTools({ store: pluginStore, botId, actorId, initiator })),
+    ...hostAccessTools({
+      broker: hostAccessBroker,
+      botId,
+      actorId,
+      auditStore: bootAuditStore,
+      initiator,
+    }),
+  ];
 
 /** One person's standing instructions, for both the /api/settings routes and every run they start. */
 const userInstructionsStore = createUserInstructionsStore(database);
@@ -571,6 +593,62 @@ const userInstructionsStore = createUserInstructionsStore(database);
  */
 const loadInstructionsForActor = (actorId: string) => () =>
   userInstructionsStore.read(actorId);
+
+/*
+ * The file behind an attachment reference, read when a turn turns out to name one.
+ *
+ * Read per turn rather than held, for the reason the bytes are in the database at all: a message
+ * carries a `/api/attachments/<id>` URL, and a model provider is not going to go and fetch it. The
+ * row is fetched here and the bytes go up inline, so the Bot sees the file the person attached
+ * instead of a link it cannot follow.
+ *
+ * Built per actor and passed to both turn paths — the request path through `mountCopilotRuntime` and
+ * a routine's turn through `buildAgentFor` — so a routine firing at three in the morning inlines
+ * exactly as a person's chat turn does, on exactly the same footing.
+ *
+ * NARROWED BY ACTOR AND BY CONVERSATION, and not silent. The reference reaches the loader out of
+ * browser-supplied message content, so a turn can name an attachment in a channel the asker was
+ * never in — or in one they ARE in but which is not the channel this turn is running in.
+ * `loadAttachmentForTurn` answers both with the same membership join the fetch route uses plus the
+ * run's own thread, and null when there is no row this person may see here.
+ * `resolveAttachmentParts` fails the turn on that null rather than letting a Bot read a file back
+ * to somebody who cannot open it.
+ *
+ * The thread is the CLOSURE'S ARGUMENT rather than something baked in beside the actor, because one
+ * of these is built per actor per request and then used for however many runs that request makes;
+ * a thread captured here would be the first run's, silently, for all of them.
+ *
+ * A PURE READ. `attachedAt` is written by the send rather than by anything here; see
+ * `markAttachmentsSentForActor` below.
+ */
+const loadAttachmentForActor =
+  (actorId: string) => (id: string, threadId: string) =>
+    loadAttachmentForTurn(database, { actorId, threadId }, id);
+
+/**
+ * That the files on a message went out in it, recorded when a turn turns out to be a send.
+ *
+ * Bound per actor and handed to the same two turn paths as the reader above, so a routine's send at
+ * three in the morning is recorded exactly as a person's chat turn is. `inlineAttachments`
+ * (copilot.ts) calls it with the ids on the message being asked about and no others: history is
+ * replayed on every turn and by whoever is running it, so nothing behind that message is evidence
+ * of a send.
+ *
+ * NARROWED BY ACTOR, and more strictly than the reader is. Reading is scoped to channel
+ * membership, because members are meant to see each other's sent files; recording a send is scoped
+ * to the UPLOADER, because `attachedAt` is what the sweeper, the upload cap and the withdrawal
+ * route all read as "this file rode in a message somebody sent" — and a member who could write it
+ * on a colleague's staged row would freeze that colleague's own withdrawal at 409 and leave the row
+ * unsweepable. See `markAttachmentsSent` in channels/attachments.ts.
+ *
+ * AND NARROWED BY CONVERSATION, taking the thread as an argument for the reason the reader does.
+ * A stamp written against a channel that never saw the file freezes the row the same way, and is
+ * reached without any colleague being involved: one person, two channels of their own, a file
+ * named from the wrong one.
+ */
+const markAttachmentsSentForActor =
+  (actorId: string) => (ids: readonly string[], threadId: string) =>
+    markAttachmentsSent(database, { actorId, threadId }, ids);
 
 /*
  * What the deployment tells a remote Bot about the run it is starting.
@@ -596,16 +674,11 @@ const signRunForActor =
  * Google's sign-in page and asked a person to sign in to an account the deployment had already
  * connected. Naming them lets it say which one it has not been granted instead.
  *
- * Read per request rather than held, because a connector added a minute ago has to count, and
- * failing is the same as having none: a Bot that cannot be told loses a sentence, not a run.
+ * Read per request rather than held, because a connector added a minute ago has to count.
+ * Let failures reach buildAgents, which reports the missing guidance once and keeps the run usable.
  */
-const loadVendors = async () => {
-  try {
-    return (await pluginStore.listServers()).map((server) => server.id);
-  } catch {
-    return [];
-  }
-};
+const loadVendors = async () =>
+  (await pluginStore.listServers()).map((server) => server.id);
 
 /*
  * How a run's tools are narrowed to the ones it is about.
@@ -715,7 +788,7 @@ const buildAgentFor = async ({
   const actor = await actorFor(ownerUserId);
   const agents = await resolveRuntimeAgents(
     () => loadAgentsForActor(actor),
-    tenantPackage.model,
+    runtimeModel,
     resolveRuntimeModelApiKey,
     stallGuard,
     loadToolsForActor(actor.id, initiator),
@@ -733,6 +806,13 @@ const buildAgentFor = async ({
     // it is written the way they asked for it to be written, exactly as their chat turn would be.
     loadInstructionsForActor(actor.id),
     initiator,
+    // The same reader the request path gets, bound to the owner the routine runs as, so a file
+    // attached in a channel reads the same way on a routine's turn as it does on the person's own —
+    // and is refused the same way when the owner is not in that channel.
+    loadAttachmentForActor(actor.id),
+    // And the same recorder, so the files on a routine's own message stop counting as staged the
+    // moment it sends them, exactly as a person's do.
+    markAttachmentsSentForActor(actor.id),
   );
   const agent = agents[agentId];
   if (!agent) {
@@ -798,7 +878,7 @@ const routineRunner = createRoutineRunner({
  */
 const copilotRuntime = mountCopilotRuntime(
   config,
-  tenantPackage.model,
+  runtimeModel,
   loadAgentsForActor,
   resolveRuntimeModelApiKey,
   identifyUser,
@@ -895,6 +975,12 @@ const copilotRuntime = mountCopilotRuntime(
   },
   // What this person has told every coworker of theirs, in every channel. See user-instructions.ts.
   loadInstructionsForActor,
+  // The files on a message, put in front of the model rather than left as links it cannot follow —
+  // and only the ones the person whose run this is could open themselves.
+  loadAttachmentForActor,
+  // And that those files went out in a send, written by the person who sent them and only for rows
+  // they uploaded. See markAttachmentsSentForActor.
+  markAttachmentsSentForActor,
 );
 
 /**
@@ -932,17 +1018,7 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
      * The signed statement of the run the addressed Bot is about to start, carrying how deep the
      * chain has gone. Minted here, where the key lives, and one deeper than the run that asked.
      */
-    sign: (work) =>
-      mintRunAssertion(
-        {
-          botId: work.toBotId,
-          actorId: work.actorId,
-          runId: randomUUID(),
-          threadId: work.threadId,
-          depth: work.depth,
-        },
-        config.keyEncryptionKey,
-      ),
+    sign: (work) => signHandoffDeliveryRun(work, config.keyEncryptionKey),
     delivery: createHandoffDelivery({
       /*
        * Built as the person, WITH THEIR ROLE. The desk resolved it to decide the hop was allowed; a
@@ -1113,7 +1189,7 @@ const channelSummaries = {
   queue: createWorkQueue(database),
   transcript: routineIntelligence,
   title: createChannelTitler({
-    model: tenantPackage.model.defaultModel,
+    model: runtimeModel.defaultModel,
     resolveApiKey: resolveRuntimeModelApiKey,
   }),
   owner: workOwner("summariser"),
@@ -1189,6 +1265,31 @@ const app = createApp(
   // The same store every run reads through `loadInstructionsForActor`, so the screen a person edits
   // and the prompt their coworker is built from can never be two different pieces of text.
   userInstructionsStore,
+  // The same database every other store here is built from, so a channel's staged and sent files
+  // live behind the same connection as the messages that reference them.
+  database,
+  // Native host-folder sessions are session-only: grants disappear with this server process and the
+  // desktop worker must authenticate with a fresh token for this run.
+  hostAccessBroker,
+  process.env.OPENBOT_DESKTOP_HOST_TOKEN,
+  async ({ name, args, botId, actorId, initiator }) => {
+    if (!name.startsWith("host_")) return null;
+    const tool = hostAccessTools({
+      broker: hostAccessBroker,
+      botId,
+      actorId,
+      auditStore: bootAuditStore,
+      ...(initiator ? { initiator } : {}),
+    }).find((candidate) => candidate.name === name);
+    if (!tool) {
+      return {
+        text: `${REFUSAL_MARKER} That host tool is not available for this Bot right now.`,
+        isError: true,
+      };
+    }
+    const text = await tool.execute(args);
+    return { text, isError: text.startsWith(REFUSAL_MARKER) };
+  },
   // The app directory, behind the same client the plugin store and the transport already share.
   // Absent without a key, which leaves the routes reporting no broker rather than listing apps
   // nobody could connect.
@@ -1364,4 +1465,4 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 
-console.info(`OpenBot server listening on http://localhost:${port}`);
+console.info(`OpenBot server listening on http://127.0.0.1:${port}`);

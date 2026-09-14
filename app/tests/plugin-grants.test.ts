@@ -45,6 +45,17 @@ function invalidationRecorder() {
   return { queryClient, invalidated };
 }
 
+/*
+ * The context TanStack Query hands a mutation callback alongside its variables. These tests drive
+ * the callbacks directly rather than through a MutationObserver, so they have to supply it. Both
+ * fields are the real thing rather than a stand-in: `meta` is undefined exactly as it is for a
+ * mutation declared without one, and `mutationKey` is optional and genuinely absent, because none
+ * of these options factories sets one.
+ */
+function mutationContext(queryClient: QueryClient) {
+  return { client: queryClient, meta: undefined };
+}
+
 test("one grant is one POST of the three things it joins", async () => {
   const seen = capturingFetch(200, {});
 
@@ -95,12 +106,7 @@ test("granting one on its own still carries its refetch", async () => {
       kind: "mcp",
       ref: "notion/search",
     },
-    /*
-     * The context react-query hands every `mutationFn`, which this one does not read. Passed because
-     * `app/tests` sits outside `app/tsconfig.json` and `bun test` does not typecheck, so a call
-     * written to the wrong arity is a green test against a signature that does not exist.
-     */
-    { client: queryClient, meta: undefined },
+    mutationContext(queryClient),
   );
   /*
    * ON SETTLE RATHER THAN ON SUCCESS, which is where this refetch lives now and why this call
@@ -120,7 +126,7 @@ test("granting one on its own still carries its refetch", async () => {
       ref: "notion/search",
     },
     undefined,
-    { client: queryClient, meta: undefined },
+    mutationContext(queryClient),
   );
 
   expect(seen).toHaveLength(1);

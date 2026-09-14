@@ -163,7 +163,7 @@ type TenantAgent = {
   title: string;
   roleDescription: string;
   avatarSeed?: string;
-  type: "built_in" | "remote_ag_ui";
+  type: "built_in" | "remote_ag_ui" | "remote_mastra";
   configuration: Record<string, unknown>;
   /**
    * The package skills this coworker is given, by slug.
@@ -193,6 +193,8 @@ export type TenantPackage = {
   productName: string;
   stylesheet: string | null;
   agents: TenantAgent[];
+  /** Remote agents explicitly disabled by a blank endpoint, not arbitrary removed YAML rows. */
+  omittedAgentIds: string[];
   channels: TenantChannel[];
   model: {
     provider: "openai";
@@ -354,9 +356,16 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
           ? "built_in"
           : agent.type === "remote-ag-ui"
             ? "remote_ag_ui"
-            : undefined;
+            : // A Mastra server, dialled through `@ag-ui/mastra` rather than an AG-UI route of its
+              // own. Seedable like the others: it is an address, and the same one this deployment
+              // would have been given by hand.
+              agent.type === "remote-mastra"
+              ? "remote_mastra"
+              : undefined;
       if (!type) {
-        throw new Error("agent.type must be built-in or remote-ag-ui");
+        throw new Error(
+          "agent.type must be built-in, remote-ag-ui or remote-mastra",
+        );
       }
       const id = requiredString(agent.id, "agent.id");
       /*
@@ -373,7 +382,7 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
           `agent.id "${id}" is reserved for a deployment route and cannot name a Bot`,
         );
       }
-      if (type === "remote_ag_ui") {
+      if (type === "remote_ag_ui" || type === "remote_mastra") {
         const endpoint =
           typeof agent.endpoint === "string" ? agent.endpoint.trim() : "";
         if (!endpoint) {
@@ -405,6 +414,19 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
                 }
               : {
                   endpoint: requiredString(agent.endpoint, "agent.endpoint"),
+                  /*
+                   * Which agent on that server, when the server is a roster.
+                   *
+                   * Optional, and only meaningful for Mastra: a package naming one gets that one,
+                   * and a package naming none gets the only agent there or a refusal. Carried here
+                   * so a seeded Mastra Bot is as specific as one added by hand. See
+                   * `pickFromRoster`.
+                   */
+                  ...(type === "remote_mastra" &&
+                  typeof agent.remote_agent_id === "string" &&
+                  agent.remote_agent_id.trim().length > 0
+                    ? { remoteAgentId: agent.remote_agent_id.trim() }
+                    : {}),
                 },
           skills:
             agent.skills === undefined || agent.skills === null
@@ -486,6 +508,7 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
       ? requiredString(skin.stylesheet, "skin.stylesheet")
       : null,
     agents,
+    omittedAgentIds: [...omittedAgentIds],
     channels,
     model: {
       provider: "openai",
@@ -647,6 +670,34 @@ export async function synchronizeTenantPackage(
       throw new Error("Tenant package could not be synchronized");
     }
 
+    // Disable only explicitly unconfigured agents still owned by this package. Keep canonical
+    // rows and conversation memberships: runtime tombstones preserve their readable history.
+    // Normal seeding below clears deletedAt if an endpoint is configured again.
+    if (tenantPackage.omittedAgentIds.length > 0) {
+      const now = new Date();
+      await transaction
+        .update(agentProfiles)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(
+          and(
+            isNull(agentProfiles.ownerUserId),
+            isNull(agentProfiles.deletedAt),
+            inArray(
+              agentProfiles.agentId,
+              transaction
+                .select({ id: agentTable.id })
+                .from(agentTable)
+                .where(
+                  and(
+                    eq(agentTable.packageId, deploymentPackage.id),
+                    inArray(agentTable.id, tenantPackage.omittedAgentIds),
+                  ),
+                ),
+            ),
+          ),
+        );
+    }
+
     for (const agent of tenantPackage.agents) {
       const updatedAt = new Date();
       const [canonicalAgent] = await transaction
@@ -712,7 +763,7 @@ export async function synchronizeTenantPackage(
     }
 
     for (const channel of tenantPackage.channels) {
-      await transaction
+      const [ownedChannel] = await transaction
         .insert(channelTable)
         .values({
           id: channel.id,
@@ -723,6 +774,7 @@ export async function synchronizeTenantPackage(
         })
         .onConflictDoUpdate({
           target: channelTable.id,
+          setWhere: eq(channelTable.packageId, deploymentPackage.id),
           set: {
             name: channel.name,
             description: channel.description,
@@ -730,7 +782,15 @@ export async function synchronizeTenantPackage(
             packageId: deploymentPackage.id,
             updatedAt: new Date(),
           },
-        });
+        })
+        .returning({ id: channelTable.id });
+
+      if (!ownedChannel) {
+        throw new Error(
+          `Tenant package channel "${channel.id}" collides with a channel this package does not own`,
+        );
+      }
+
       await transaction
         .delete(channelAgents)
         .where(eq(channelAgents.channelId, channel.id));
@@ -777,6 +837,13 @@ export async function synchronizeTenantPackage(
         and(
           eq(pluginGrants.kind, "skill"),
           eq(pluginGrants.grantedBy, PACKAGE_GRANT),
+          inArray(
+            pluginGrants.agentId,
+            transaction
+              .select({ id: agentTable.id })
+              .from(agentTable)
+              .where(eq(agentTable.packageId, deploymentPackage.id)),
+          ),
         ),
       );
 

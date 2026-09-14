@@ -25,7 +25,7 @@ import {
   CustomServerRefusedError,
   createPluginStore,
 } from "../src/plugins/store";
-import { TEST_POOL } from "./support/database";
+import { TEST_POOL, testDatabaseUrl } from "./support/database";
 
 /**
  * What ends a brokered connection, and what the trail says when nobody was asking.
@@ -59,11 +59,7 @@ import { TEST_POOL } from "./support/database";
  * reach another run's rows either.
  */
 
-const database = createDatabase(
-  process.env.DATABASE_URL ??
-    "postgres://openbot:openbot@localhost:5432/openbot",
-  TEST_POOL,
-);
+const database = createDatabase(testDatabaseUrl(), TEST_POOL);
 
 const suite = randomUUID().slice(0, 8);
 /** The app: its `mcp_servers.id`, and the slug in its url, which is what a connection is keyed on. */
@@ -506,7 +502,7 @@ const auditStore = {
  * the anonymous actor, whose half of the key names nobody and is therefore the one pair another run
  * legitimately holds too. A read filtered on the person alone would take in every app's anonymous
  * row at once, and a run that died before its cleanup would leave one standing that no cleanup here
- * can reach: these tests run against the shared development database, so that row would redden this
+ * can reach: these tests run against whatever TEST_DATABASE_URL names, so that row would redden this
  * file for everybody until somebody edited the database by hand. The ordering is the same argument
  * one step down — Postgres promises none without one, so an unordered read of several rows is
  * compared against whichever order the plan happened to produce.
@@ -990,7 +986,7 @@ async function addRenamedApp() {
  * so `(toolkit, "")` is a legal pair and every run of this file inserts one — and the only half of
  * it that is this run's is the app. Asking what `""` has connected across the whole table therefore
  * reads every other run's anonymous row too, including one left behind by a run that was
- * interrupted before its cleanup; against the shared development database that row is permanent,
+ * interrupted before its cleanup; against a database somebody reuses that row is permanent,
  * unreachable by the cleanup here, and reddens this file for everybody until the database is edited
  * by hand. Narrowing to named apps is what makes the assertion about this run.
  *

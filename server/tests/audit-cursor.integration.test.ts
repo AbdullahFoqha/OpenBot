@@ -3,7 +3,7 @@ import { createApp } from "../src/app";
 import { createAuditReader } from "../src/audit";
 import { loadConfig } from "../src/config";
 import { createDatabase } from "../src/db/client";
-import { TEST_POOL } from "./support/database";
+import { TEST_POOL, testDatabaseUrl } from "./support/database";
 import { testEnvironment } from "./support/environment";
 
 /**
@@ -24,9 +24,7 @@ import { testEnvironment } from "./support/environment";
 
 const config = loadConfig({ ...testEnvironment() });
 
-const databaseUrl =
-  process.env.DATABASE_URL ??
-  "postgres://openbot:openbot@localhost:5432/openbot";
+const databaseUrl = testDatabaseUrl();
 const database = createDatabase(databaseUrl, TEST_POOL);
 
 const adminAuth = {

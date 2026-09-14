@@ -10,7 +10,7 @@ import {
 import { createDatabase } from "../src/db/client";
 import { auditEvents, credentials } from "../src/db/schema";
 import { deploymentFaultSentence } from "../src/plugins/store";
-import { TEST_POOL } from "./support/database";
+import { TEST_POOL, testDatabaseUrl } from "./support/database";
 
 /**
  * What a refused rotation is allowed to write down, against a real vault.
@@ -25,11 +25,7 @@ import { TEST_POOL } from "./support/database";
  * secret written here is not one anybody can take back out.
  */
 
-const database = createDatabase(
-  process.env.DATABASE_URL ??
-    "postgres://openbot:openbot@localhost:5432/openbot",
-  TEST_POOL,
-);
+const database = createDatabase(testDatabaseUrl(), TEST_POOL);
 
 const ENCRYPTION_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const store = createCredentialStore(database);
