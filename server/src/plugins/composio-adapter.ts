@@ -673,7 +673,24 @@ async function pageOf<Row>(
   ask: () => Promise<{ items?: unknown; next_cursor?: unknown } | null>,
 ): Promise<{ items: Row[]; nextCursor?: unknown }> {
   const answered = await ask();
-  if (answered === null || typeof answered !== "object") {
+  /*
+   * A BARE LIST IS EXCLUDED HERE AND NOT LEFT TO THE `items` GUARD, which is the same correction
+   * every other container in this file has already had. `typeof [] === "object"` and `[] !== null`,
+   * so a page that arrived as a bare list satisfied this test, fell through to the one below, and
+   * was refused with "Composio sent nothing where the rows of the app catalogue belong" — a sentence
+   * about an envelope whose rows did not arrive, told of an answer that held no envelope at all. An
+   * operator reading it goes looking for a listing that came back short; there was no listing.
+   *
+   * AND IT IS THE LIKELIER OF THE TWO SHAPES RATHER THAN AN EXOTIC ONE. The SDK transformers these
+   * two listings stopped going through returned bare arrays, so "a list where a page belongs" is
+   * precisely what a drift back towards them would put on the wire — the one shape this guard's own
+   * sentence is written for and the one it could not see.
+   */
+  if (
+    answered === null ||
+    typeof answered !== "object" ||
+    Array.isArray(answered)
+  ) {
     throw new BrokerRefusalError(
       `Composio sent ${sent(answered)} where a page of ${listing.noun} belongs, so ${listing.consequence}: what came back is not a listing at all. ${VENDOR_SHAPE_REMEDY}`,
     );
@@ -1288,13 +1305,28 @@ function withdrawableAccounts(
  * document whose verdict is missing, and a document this deployment cannot read is a fact about the
  * package rather than an outcome — so it stays in the unreadable branch below. What is exempted
  * here is the narrower thing the client documents: no document.
+ *
+ * AND A BODY THAT IS NOT A DOCUMENT IS A THIRD THING AGAIN, WHICH THE LAST BRANCH USED TO SPEAK FOR.
+ * The same parse that hands over `{}` hands over whatever else the body held, so a reply that is a
+ * bare string or a list reaches this read too — and `("deleted").success` is `undefined`, not a
+ * throw. The refusal then said "Composio sent nothing where its verdict belongs, and that field is
+ * the only thing in the reply that says whether the account was deleted": a claim about a reply with
+ * one field missing, made about an answer that was not a reply. The shape is the whole finding, and
+ * it was the one part the sentence did not name. The parameter widens to `unknown` for the same
+ * reason — a declaration naming `{ success?: unknown }` over a wire value is the assertion this file
+ * refuses to make everywhere else.
  */
 function withdrawalDeclined(
-  answer: { success?: unknown } | null | undefined,
+  answer: unknown,
   toolkit: string,
 ): BrokerRefusalError | null {
   if (answer === null || answer === undefined) return null;
-  const verdict = answer.success;
+  if (typeof answer !== "object" || Array.isArray(answer)) {
+    return new BrokerRefusalError(
+      `Composio sent ${sent(answer)} where its reply to the withdrawal of one of this person's ${toolkit} accounts belongs, so there is no field in it saying whether the account was deleted at all. This deployment cannot tell a withdrawal that happened from one that did not, so the account is reported as still standing rather than counted as ended. ${VENDOR_SHAPE_REMEDY}`,
+    );
+  }
+  const verdict = (answer as { success?: unknown }).success;
   if (verdict === true) return null;
   if (verdict === false) {
     return new BrokerRefusalError(
@@ -3145,6 +3177,32 @@ export function buildComposioClient(
         );
       }
 
+      /*
+       * AND A LISTING WHOSE ONLY ROWS ARE UNREADABLE IS ITS OWN STATE, WHICH IS THE BRANCH THE
+       * OTHER THREE CALLERS HAVE AND THIS ONE DID NOT.
+       *
+       * `readableConfigs` sorts every row into one of two piles, so "nothing legible at all" is a
+       * listing where `held` is empty and `unreadable` is not — which the branch above cannot reach,
+       * because it requires `held.length > 0`. What was left to answer it was the partial-withdrawal
+       * throw at the end of this method, reached with an empty `ours`: "Composio removed 0 of this
+       * deployment's 0 authorization configs for linear and the app has not been fully withdrawn."
+       * Both figures are counts of a set nothing read, and "fully" asserts that some of it was
+       * withdrawn. Nothing was. The only finding is the rows, and their remedy is a reading in
+       * Composio's dashboard rather than the button that was just pressed — it will be exactly as
+       * unreadable next time.
+       *
+       * STILL A REFUSAL, WHICH IS THE HALF THAT DOES NOT MOVE. `removeServer` deletes the app's row
+       * only after this returns, so the app stays on its Plugins page and stays removable; a quiet
+       * return here would file the app away over rows that may be this deployment's own configs,
+       * holding live grants, under an answer it could not read.
+       */
+      if (ours.length === 0 && unreadable.length > 0) {
+        throw new BrokerRefusalError(
+          `Composio described ${unreadable.length} of its authorization configs for ${toolkit} in a way this deployment cannot read and none of the rest is one it made, so whether any of them is this deployment's own is not something it can tell and nothing was deleted. The app has not been withdrawn, rather than a config this deployment cannot show is its own being deleted along with every account connected against it: reading those rows in Composio's own dashboard is what says whether anything this deployment made is still standing. ${VENDOR_SHAPE_REMEDY}`,
+          { cause: everyRefusal(unreadable) },
+        );
+      }
+
       const refused = await askForEach(ours, (config) =>
         askVendor(
           {
@@ -3288,7 +3346,20 @@ export function buildComposioClient(
          * closed set of vendor enum names, it carries nobody's data, and it is the one fact an
          * operator can search a dashboard and a changelog for.
          */
-        const unreadable = ours.filter((held) => held.status !== "DISABLED");
+        /*
+         * `unsettled` RATHER THAN `unreadable`, WHICH IS A RENAME AND ALSO THE THIRD CLAUSE BELOW.
+         *
+         * This list was called `unreadable` and SHADOWED the one `configsFor` answers — the refusals
+         * for rows it could sort into neither pile — for the whole of this block. The two are not the
+         * same set and they are not about the same rows: this one holds configs of OURS whose status
+         * is a word neither ENABLED nor DISABLED, and the outer one holds rows whose id or name never
+         * arrived at all. So the outer set was unreachable from the only place its clause could have
+         * been written, and the clause is missing from this refusal while both siblings that collect
+         * the same list carry theirs. The identical block in
+         * {@link ComposioBroker.connectWithFields} already names its local `unsettled` for exactly
+         * this reason, and is the copy this one is now spelled like.
+         */
+        const unsettled = ours.filter((held) => held.status !== "DISABLED");
         /*
          * AND THE TWO STATES ARRIVE TOGETHER, SO NEITHER ONE TAKES THE OTHER'S TURN. These were a
          * chain — report the unsettled rows, otherwise report the disabled ones — and the paragraph
@@ -3307,16 +3378,16 @@ export function buildComposioClient(
          * it cannot show is enabled, whichever of the two is true.
          */
         const left: string[] = [];
-        const disabled = ours.length - unreadable.length;
+        const disabled = ours.length - unsettled.length;
         if (disabled > 0) {
           left.push(
             `Composio calls ${disabled} of this deployment's ${ours.length} authorization configs for ${toolkit} disabled, and an administrator can enable it in Composio's dashboard, or remove the app on its Plugins page and add it again.`,
           );
         }
-        if (unreadable.length > 0) {
+        if (unsettled.length > 0) {
           /*
            * EVERY STATUS THAT WAS ACTUALLY READ, AND NONE OF THEM SPEAKING FOR THE REST. The
-           * sentence counted the whole set and quoted `unreadable[0]` — "Composio describes 3 of
+           * sentence counted the whole set and quoted `unsettled[0]` — "Composio describes 3 of
            * this deployment's configs as PENDING" is a claim about three rows established of one,
            * and an operator searching their dashboard for the word they were handed would never
            * reach the two that say something else. Each distinct word once, so two configs wearing
@@ -3327,7 +3398,7 @@ export function buildComposioClient(
            * configs an app has is a refusal nothing downstream can hold.
            */
           const words = [
-            ...new Set(unreadable.map((held) => named(held.status))),
+            ...new Set(unsettled.map((held) => named(held.status))),
           ];
           const shown = words.slice(0, STATUSES_NAMED);
           const said =
@@ -3335,11 +3406,29 @@ export function buildComposioClient(
               ? `${shown.join(", ")} and ${words.length - shown.length} other words`
               : shown.join(", ");
           left.push(
-            `Composio describes ${unreadable.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether a connection begun against one could complete is not something this deployment can tell. ${VENDOR_SHAPE_REMEDY}`,
+            `Composio describes ${unsettled.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether a connection begun against one could complete is not something this deployment can tell. ${VENDOR_SHAPE_REMEDY}`,
+          );
+        }
+        /*
+         * AND THE ROWS NOTHING COULD SORT ARE THE THIRD CLAUSE, WHICH THE SHADOW HAD TAKEN AWAY.
+         *
+         * A row whose id or name never arrived may BE a config of this deployment's that Composio
+         * calls ENABLED, in which case "no config here could be shown to be enabled" is true of what
+         * was read and the remedy above it — go and enable the disabled one — is an act against the
+         * wrong object, or against nothing at all. It is a third fact about a third set of rows, so
+         * it is a third independent clause rather than a chain, for the reason the paragraph above
+         * gives: two facts about two different rows cannot take turns.
+         */
+        if (unreadable.length > 0) {
+          left.push(
+            `Composio described ${unreadable.length} of its authorization configs for ${toolkit} in a way this deployment cannot read, so whether one of THOSE is a config of this deployment's that Composio calls enabled is outside what either reading settles: reading those rows in Composio's own dashboard is what says whether there is one here to connect against at all. ${VENDOR_SHAPE_REMEDY}`,
           );
         }
         throw new BrokerRefusalError(
           `No authorization config this deployment holds at Composio for ${toolkit} could be shown to be enabled, so no link was made: consent spent against a config that turns out to be disabled attaches nothing and cannot be spent again without sending this person round the loop a second time. ${left.join(" ")}`,
+          unreadable.length > 0
+            ? { cause: everyRefusal(unreadable) }
+            : undefined,
         );
       }
 
@@ -3834,7 +3923,33 @@ export function buildComposioClient(
       ];
 
       return rows
-        .filter((row) => {
+        .filter((row, index) => {
+          /*
+           * THE ROW IS AN OBJECT BEFORE A FIELD IS READ OFF IT, WHICH IS THE ONE CONTAINER IN THIS
+           * FILE THAT WAS NOT ASKED.
+           *
+           * Every other one is: the catalogue row, its `meta`, each category, the action row, the
+           * toolkit detail, the list of modes, the mode itself, the `fields` object and the
+           * initiation block inside it. The rows hanging off that block were not, and nothing here
+           * throws for it — `("generic_api_key").user_visible` is `undefined`, so a row that arrived
+           * as a string passes the visibility read as an ordinary shown field and reaches the type
+           * guard below, which refuses it with "Connecting this app is not something this deployment
+           * can offer yet". That is a verdict about the APP, it carries no remedy at all, and the
+           * thing it describes is a package whose shape moved. The remedy for that is the one
+           * {@link unreadableForm} ends every other step of this read with.
+           *
+           * ABSENT IS NOT EXEMPTED HERE, WHICH IS WHERE THIS DIFFERS FROM THE MODE LIST ABOVE. A
+           * hole in THAT list is simply a mode the vendor left out and the `find` below it says the
+           * true thing about it; a hole in THIS one is a field the form would silently be one box
+           * short of, and there is no reading of `null` under which a person is being asked for
+           * nothing in particular.
+           */
+          if (typeof row !== "object" || row === null || Array.isArray(row)) {
+            throw unreadableForm(
+              row,
+              `field ${index + 1} of what ${toolkit}'s ${authScheme} connection asks a person to fill in`,
+            );
+          }
           /*
            * A FIELD COMPOSIO HIDES IS ONE COMPOSIO FILLS IN, AND `!== false` HID THE WRONG STATE.
            * An absent `user_visible` means show it, which is most of the catalogue and stays. A
@@ -4050,6 +4165,20 @@ export function buildComposioClient(
             `Composio describes ${unsettled.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether an account connected against one could work is not something this deployment can tell. ${VENDOR_SHAPE_REMEDY}`,
           );
         }
+        /*
+         * AND THE ROWS NOTHING COULD SORT ARE THE THIRD CLAUSE, for the reason
+         * {@link ComposioBroker.authorize} gives beside the identical one: a row whose id or name
+         * never arrived may be a config of this deployment's that Composio calls ENABLED, so the
+         * dashboard reading is a finding this sentence has and the disabled clause does not carry.
+         * No `cause`, which is this method's own standing rule — the count is the finding and the
+         * count is in the sentence, because the call frame this refusal is raised in holds somebody's
+         * API key.
+         */
+        if (unreadable.length > 0) {
+          left.push(
+            `Composio described ${unreadable.length} of its authorization configs for ${toolkit} in a way this deployment cannot read, so whether one of THOSE is a config of this deployment's that Composio calls enabled is outside what either reading settles: reading those rows in Composio's own dashboard is what says whether there is one here to connect against at all. ${VENDOR_SHAPE_REMEDY}`,
+          );
+        }
         throw new BrokerRefusalError(
           `No authorization config this deployment holds at Composio for ${toolkit} could be shown to be enabled, so nothing was sent and what was typed into the form did not leave this deployment. ${left.join(" ")}`,
         );
@@ -4165,7 +4294,19 @@ export function buildComposioClient(
       );
 
       if (answer === null || answer === undefined) return;
-      const verdict = answer.success;
+      /*
+       * AND A REPLY THAT IS NOT A DOCUMENT IS NOT A DOCUMENT WITH ITS VERDICT MISSING, which is the
+       * distinction {@link withdrawalDeclined} draws one method away and for the same reason. The
+       * generated client parses the body and hands it over, so a bare string or a list reaches this
+       * read; `("deleted").success` is `undefined`, and the last refusal below then reported a reply
+       * with one field absent about an answer that held no reply at all.
+       */
+      if (typeof answer !== "object" || Array.isArray(answer)) {
+        throw new BrokerRefusalError(
+          `Composio sent ${sent(answer)} where its reply to the withdrawal of the account this connection just made belongs, so there is no field in it saying whether the account was deleted at all. This deployment cannot tell a withdrawal that happened from one that did not, so the account is reported as still standing and the credential behind it as not withdrawn. ${VENDOR_SHAPE_REMEDY}`,
+        );
+      }
+      const verdict = (answer as { success?: unknown }).success;
       if (verdict === true) return;
       if (verdict === false) {
         throw new BrokerRefusalError(

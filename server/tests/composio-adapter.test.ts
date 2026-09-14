@@ -1748,6 +1748,39 @@ describe("withdrawing one person's grants", () => {
     expect(said).not.toMatch(/success: false/);
   });
 
+  /**
+   * AND NO DOCUMENT AT ALL IS NOT A DOCUMENT WITH ITS VERDICT MISSING.
+   *
+   * The delete comes off `@composio/client`, which parses the body and hands it over — the
+   * declaration on {@link ComposioVendor} says so, and the test above rests on it for `{}`. So an
+   * answer that is a bare string reaches this read as readily as the empty document does, and
+   * `("deleted").success` is `undefined`, not a throw: the refusal said "Composio sent nothing where
+   * its verdict belongs, and that field is the only thing in the reply", which asserts a reply with
+   * one field missing about an answer that was not a reply. The shape is the finding.
+   */
+  test("a withdrawal answered with something that is not a document names the answer, not a missing verdict", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: ourGmailConfig },
+        connectedAccounts: {
+          list: async () => ({ items: [{ id: "ca_1" }] }),
+          delete: async () => "deleted",
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    const said = everythingSaidBy(refusal).join(" ");
+    expect(said).toMatch(/sent a string where its reply to the withdrawal/);
+    expect(said).not.toMatch(/where its verdict/);
+    expect(said).toMatch(/upgrading this deployment's @composio\/core/);
+  });
+
   test("the listing asks about every state a grant can be hiding in", async () => {
     const asked: unknown[] = [];
     const { broker } = buildComposioClient(
@@ -4267,7 +4300,16 @@ describe("what a malformed field of a row actually costs", () => {
       // into a url and what every later call names, so a row without one is an app whose Add button
       // records something nothing can act on. Deleting this guard left the suite green.
       row: { slug: null, name: "Gmail", meta: {} },
-      names: /slug/,
+      /*
+       * THE WHOLE CLAUSE RATHER THAN THE WORD, BECAUSE THE TWO SENTENCES EACH CARRY THE OTHER'S
+       * WORD. This asked `/slug/` and its sibling two rows down asked `/name/`, and the slug's own
+       * refusal says "The slug is the only NAME this deployment has for an app" while the name's
+       * says "and gmail is a SLUG rather than a title" — so each matched the other's fault, and
+       * swapping which field the two guards read left all six of these tests green. What
+       * discriminates is the position the value was sent in, which is the phrase both refusals are
+       * built on and the only part of either that a swap moves.
+       */
+      names: /where the slug of row 1/,
     },
     {
       fault: "a logo that is not an address",
@@ -4285,7 +4327,8 @@ describe("what a malformed field of a row actually costs", () => {
       // `?? ""` here is an app in an administrator's picker with nothing written on it, and `gmail`
       // is a slug rather than a title.
       row: { slug: "gmail", name: null, meta: {} },
-      names: /name/,
+      // The position rather than the word, for the reason the slug row above gives at length.
+      names: /where the name of row 1/,
     },
     {
       fault: "a description that is not text",
@@ -4600,7 +4643,20 @@ describe("what a malformed field of a row actually costs", () => {
      */
     const refusal = await failureOf(broker.deleteAuthConfig("linear"));
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
-    expect(refusal.message).toMatch(/name/);
+    /*
+     * THE FIELD IS ASKED OF THE SENTENCE THAT ESTABLISHED IT, NOT OF THE ONE THAT SUMS BOTH UP.
+     * This asked `/name/` of `message`, whose whole clause about the leftover rows is "with no id
+     * or no name" — a phrase carrying both words, so this test and the one below it each passed on
+     * the other's fault, and swapping the two guards in `readableConfigs` left the pair green. The
+     * finding lives on `cause`, where one row's own reading is written down, so that is where it is
+     * read from — and the other field's sentence is asserted absent, which is the half that makes
+     * the assertion discriminating rather than merely more specific.
+     */
+    const said = everythingSaidBy(refusal).join("\n");
+    expect(said).toMatch(
+      /where the name of row 2 of Composio's authorization configs for linear belongs/,
+    );
+    expect(said).not.toMatch(/where the id of row/);
     /*
      * AND THE CONFIG THAT WAS READABLE IS GONE, WHICH THIS ASSERTED THE OPPOSITE OF ON PURPOSE AND
      * IS CHANGED ON PURPOSE. It required `[]` — not even the row that WAS readable — on the ground
@@ -4641,8 +4697,60 @@ describe("what a malformed field of a row actually costs", () => {
      */
     const refusal = await failureOf(broker.deleteAuthConfig("linear"));
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
-    expect(refusal.message).toMatch(/id/);
+    // Asked of the sentence that established it and not of the shared "with no id or no name"
+    // clause, for the reason the test above gives: that phrase carries both words.
+    const said = everythingSaidBy(refusal).join("\n");
+    expect(said).toMatch(
+      /where the id of row 1 of Composio's authorization configs for linear belongs/,
+    );
+    expect(said).not.toMatch(/where the name of row/);
     expect(deleted).toEqual([]);
+  });
+
+  /**
+   * NOTHING READABLE AT ALL IS NOT A REMOVAL THAT WENT HALF WAY, AND THE COUNT SAID IT WAS.
+   *
+   * Every one of this listing's rows is one `readableConfigs` could not sort, so there is nothing of
+   * this deployment's to delete and nothing of anybody else's to leave standing — `held` is empty,
+   * which is the branch above this one, and `ours` is empty, which is the delete loop's. The loop
+   * therefore ran over nothing and the partial-withdrawal sentence reported "Composio removed 0 of
+   * this deployment's 0 authorization configs for linear": two figures measured off a set that was
+   * never read, in the one sentence an operator is meant to act on. Its remedy is wrong with them —
+   * "the app has not been FULLY withdrawn" says a part of it was — and the reachable half of the
+   * finding is the rows themselves, which is a dashboard reading rather than a second press.
+   */
+  test("a listing whose only rows are unreadable is refused as that rather than as half a removal", async () => {
+    const deleted: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { name: "Linear (OpenBot)", status: "ENABLED" },
+              { id: "ac_b", status: "ENABLED" },
+            ],
+          }),
+          delete: async (...call: unknown[]) => {
+            deleted.push(call);
+          },
+        },
+      }),
+    );
+
+    const refusal = await failureOf(broker.deleteAuthConfig("linear"));
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    // No count of a set nothing read, in either position.
+    expect(refusal.message).not.toMatch(/removed \d+ of this deployment's \d+/);
+    // What actually happened, and what was actually found.
+    expect(refusal.message).toMatch(/nothing was deleted/);
+    expect(refusal.message).toMatch(/2 of its authorization configs/);
+    expect(deleted).toEqual([]);
+    // And both readings travel, because the count is deliberately the whole of the sentence.
+    const said = everythingSaidBy(refusal).join("\n");
+    expect(said).toMatch(/where the id of row 1/);
+    expect(said).toMatch(/where the name of row 2/);
   });
 
   test("an unreadable status names every config's own, not the first one's for all of them", async () => {
@@ -4677,6 +4785,91 @@ describe("what a malformed field of a row actually costs", () => {
     expect(refusal.message).toMatch(/"PENDING"/);
     expect(refusal.message).toMatch(/"SUSPENDED"/);
     expect(refusal.message).toMatch(/2 of this deployment's 2/);
+  });
+
+  /**
+   * A ROW NOTHING COULD SORT IS THE THIRD FACT THIS SENTENCE HAS, AND A SHADOWED NAME TOOK IT AWAY.
+   *
+   * `configsFor` answers three things, and one of them is the refusals for rows it could sort into
+   * neither pile. Inside the no-enabled-config branch of both `authorize` and `connectWithFields` a
+   * local list of the configs whose status is neither word was ALSO called `unreadable`, so the
+   * outer one was unreachable from the only place its clause could have been written — and an
+   * administrator holding one disabled config beside one row Composio described with no name was
+   * told to go and enable the disabled one, full stop. That instruction may not be the remedy at
+   * all: the row that could not be sorted may be a config of this deployment's that Composio calls
+   * ENABLED, in which case there was nothing to enable and the thing to read is the dashboard.
+   *
+   * THE DISABLED CLAUSE STAYS, WHICH IS THE POINT OF ASSERTING BOTH. These are two facts about two
+   * different rows, and the file's own rule for that shape — stated at length one method up — is two
+   * independent clauses rather than a chain, so that neither takes the other's turn.
+   */
+  test("a disabled config beside a row nothing could sort names both remedies", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_a", name: "Linear (OpenBot)", status: "DISABLED" },
+              { id: "ac_b", status: "ENABLED" },
+            ],
+          }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(
+      broker.authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: RETURN_URL,
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(
+      /calls 1 of this deployment's 1 authorization configs for linear disabled/,
+    );
+    expect(refusal.message).toMatch(
+      /1 of its authorization configs for linear in a way this deployment cannot read/,
+    );
+  });
+
+  /** The same block, one method over, because it is a copy of that one rather than a call to it. */
+  test("the typed-secret path names the row nothing could sort too", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_a", name: "Linear (OpenBot)", status: "DISABLED" },
+              { id: "ac_b", status: "ENABLED" },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectWithFields({
+        userId: "user_1",
+        toolkit: "linear",
+        authScheme: "API_KEY",
+        values: { generic_api_key: "pplx-secret" },
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(
+      /calls 1 of this deployment's 1 authorization configs for linear disabled/,
+    );
+    expect(refusal.message).toMatch(
+      /1 of its authorization configs for linear in a way this deployment cannot read/,
+    );
+    // And what they typed is nowhere in it, which is this method's own standing rule.
+    expect(refusal.message).not.toMatch(/pplx-secret/);
   });
 
   test("a status that is not a vendor enum name is described rather than repeated", async () => {
@@ -5585,6 +5778,49 @@ describe("listings Composio pages, read to the end", () => {
     expect(refusal.message).toMatch(/Composio's app catalogue/);
   });
 
+  /**
+   * A BARE LIST IS NOT AN ENVELOPE WITH ITS ROWS MISSING, AND THE ENVELOPE GUARD LET IT THROUGH.
+   *
+   * `typeof [] === "object"` and `[] !== null`, so a page that arrived as a bare list satisfied the
+   * test for being an envelope and fell to the one below it — which reads `answered.items`, finds
+   * `undefined`, and says "Composio sent nothing where the rows of Composio's app catalogue
+   * belong". That sentence sends an operator looking at a listing whose rows did not arrive, about
+   * an answer that contained no listing at all: the shape Composio sent is the finding, and it was
+   * the one part the refusal did not name. It is also the likeliest of the two shapes — the SDK's
+   * transformers used to hand bare arrays back, which is exactly what a version drift here would
+   * look like.
+   */
+  test("a catalogue page that arrived as a bare list is named as one rather than as missing rows", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({ toolkits: { list: async () => [] } }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(broker.listApps());
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/sent a list where a page of/);
+    expect(refusal.message).not.toMatch(/where the rows of/);
+    expect(refusal.message).toMatch(/Composio's app catalogue/);
+  });
+
+  /** The same shape on the other raw listing, whose consequence is a set of tools rather than a page. */
+  test("an action page that arrived as a bare list is named as one rather than as missing rows", async () => {
+    const { actions } = buildComposioClient(
+      fakeVendor({ tools: { list: async () => [] } }),
+    );
+
+    const refusal = await failureOf(
+      actions.listActions("gmail", { limit: WHOLE_LISTING }),
+    );
+
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/sent a list where a page of/);
+    expect(refusal.message).not.toMatch(/where the rows of/);
+    expect(refusal.message).toMatch(/gmail's actions/);
+  });
+
   test("an action page that is not a page of rows refuses", async () => {
     const { actions } = buildComposioClient(
       fakeVendor({ tools: { list: async () => null } }),
@@ -5792,6 +6028,93 @@ describe("the fields an app asks a person to fill in", () => {
      */
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
     expect(refusal.message).toMatch(/cannot be filled in here/);
+  });
+
+  /**
+   * A ROW THAT IS NOT A ROW IS A VENDOR SHAPE, AND IT WAS WEARING THE SENTENCE FOR AN APP.
+   *
+   * Every other container this file opens is tested for being one before a field is read off it —
+   * the catalogue row, its meta, each category, the action row, the toolkit detail, the mode. The
+   * field rows were not, and `("generic_api_key").type` is `undefined` rather than a throw, so a row
+   * that arrived as a string reached the type guard and was refused with "Connecting this app is not
+   * something this deployment can offer yet" — a verdict about the APP, carrying no remedy at all,
+   * for an answer whose only fault is a package that has changed shape. The two are not the same
+   * finding and they are not the same person's to fix.
+   */
+  test("a field row that is not an object is refused as a vendor shape rather than as an app nobody can connect", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: ["generic_api_key"],
+                    optional: [],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectionFields({
+        toolkit: "perplexityai",
+        authScheme: "API_KEY",
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(
+      /upgrading this deployment's @composio\/core/,
+    );
+    expect(refusal.message).toMatch(/sent a string where/);
+    expect(refusal.message).not.toMatch(
+      /not something this deployment can offer yet/,
+    );
+  });
+
+  /** And the same guard under the row that a `user_visible` read would have reached first. */
+  test("a field row that arrived as null is refused as a vendor shape too", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: "API_KEY",
+                fields: {
+                  connected_account_initiation: {
+                    required: [],
+                    optional: [null],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const refusal = await failureOf(
+      broker.connectionFields({
+        toolkit: "perplexityai",
+        authScheme: "API_KEY",
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(/sent null where/);
+    expect(refusal.message).toMatch(
+      /upgrading this deployment's @composio\/core/,
+    );
   });
 
   /**
@@ -6901,6 +7224,27 @@ describe("taking back the one account a verification just made", () => {
       /upgrading this deployment's @composio\/core/,
     );
     expect(refusal.message).not.toMatch(/success: false/);
+  });
+
+  /** The same distinction one method over: an answer that is no document is not a missing field. */
+  test("the one account's withdrawal answered with something that is not a document names the answer", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: { delete: async () => "deleted" },
+      }),
+    );
+
+    const refusal = await failureOf(broker.revokeAccount("ca_new"));
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    expect(refusal.message).not.toMatch(A_CRASH);
+    expect(refusal.message).toMatch(
+      /sent a string where its reply to the withdrawal/,
+    );
+    expect(refusal.message).not.toMatch(/where its verdict/);
+    expect(refusal.message).toMatch(
+      /upgrading this deployment's @composio\/core/,
+    );
   });
 
   /**
