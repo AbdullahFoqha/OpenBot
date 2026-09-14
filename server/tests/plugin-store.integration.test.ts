@@ -7284,3 +7284,207 @@ test("a destructive action says so in the list the screens read", async () => {
     gmail?.tools.map(() => "boolean"),
   );
 });
+
+/**
+ * A database fault on the vault read, which is not a withdrawn credential.
+ *
+ * CRITERION. When the read that fetches a server's token fails on a query of this deployment's own,
+ * the call is refused as a fault of ours — it is on the {@link isDeploymentFault} shelf, and it is
+ * NOT a {@link PluginRefusedError}. Neither the sentence the caller gets nor the row the trail keeps
+ * says a credential was withdrawn.
+ *
+ * REASON. `secretFor` used to tell a withdrawn credential from a broken query by looking for the
+ * words "revoked" and "not found" inside `error.message`. drizzle reports every failure as a
+ * `DrizzleQueryError` whose message opens `Failed query: select "encrypted_value", "revoked_at" from
+ * "credentials" …` — so the column name matched the substring, and EVERY database fault on that read
+ * became the one sentence that is certainly false about it: a Postgres that is down, an address that
+ * names no database, a statement the server cancelled, each reported as an administrator having
+ * taken the credential away.
+ *
+ * WHY THAT IS WORSE THAN A WRONG MESSAGE. The confident sentence is a {@link PluginRefusedError},
+ * which is the one class this codebase relays VERBATIM. It reaches the model as the reason the tool
+ * failed, a browser through the routes that pass a refusal straight out as a 400, and
+ * `mcp_servers.last_error` for whoever operates the deployment — and the step it names, add the
+ * credential again, is work against a credential that was never the problem while the real fault
+ * goes unreported. Told apart by class, all three audiences get "that did not work" instead, which
+ * is what a fault of ours is allowed to say.
+ *
+ * THE FAULT IS A REAL ONE, which is the point of the fixture. The production credential store
+ * issues its production statement over an address that resolves to no database, so what arrives at
+ * `secretFor` is drizzle's own wrapper around the driver's complaint. A hand-thrown `Error` would
+ * prove nothing here: the message is exactly what the bug was reading, so the message has to come
+ * from the same place production's does.
+ */
+describe("a vault read that fails on a query of this deployment's own", () => {
+  const faultServerId = `vault-fault-${suite}`;
+  const faultToolName = "do_something";
+  const faultRef = `${faultServerId}/${faultToolName}`;
+  const faultBotId = `agent_vault_fault_${suite}`;
+  const faultActorId = "someone@openbot.local";
+  /** The sentence a withdrawn credential earns, and the one a query fault must never be given. */
+  const WITHDRAWN = "An administrator has to add it again.";
+
+  let faultCredentialId: string | null = null;
+
+  /**
+   * The suite's own address, pointed at a database that is not there.
+   *
+   * Derived rather than written out, so the fixture fails the way the deployment would on whatever
+   * Postgres this run was given — including a scratch one — instead of only against localhost.
+   */
+  function unreachableVault() {
+    const address = new URL(
+      process.env.DATABASE_URL ??
+        "postgres://openbot:openbot@localhost:5432/openbot",
+    );
+    address.pathname = `/absent_vault_${suite}`;
+    return address.toString();
+  }
+
+  /**
+   * The vault on that address: `createCredentialStore`, unwrapped.
+   *
+   * Every other seam is the real one, because the fault under test is meant to arrive from the real
+   * read. Its own policy rather than the file's mutable `policy`, so a describe that ran earlier and
+   * left it somewhere else cannot decide whether this call gets as far as the vault.
+   */
+  const faultStore = createPluginStore({
+    database,
+    auditStore: createAuditStore(database),
+    credentials: createCredentialStore(
+      createDatabase(unreachableVault(), TEST_POOL),
+    ),
+    encryptionKey: "x".repeat(44),
+    policy: () => ({ mode: "enforce", deny: [], allow: ["true"] }),
+    // Loud rather than silent: the token is read before the vendor is dialled, so a call that gets
+    // this far means the vault read did not fail at all and the test is asserting nothing.
+    callVendor: async () => {
+      throw new Error(
+        "the vendor must not be reached when the vault read fails",
+      );
+    },
+  });
+
+  beforeAll(async () => {
+    await database
+      .insert(agents)
+      .values({
+        id: faultBotId,
+        name: faultBotId,
+        type: "remote_ag_ui",
+        configuration: {},
+      })
+      .onConflictDoNothing();
+
+    // A real vault row, on the real database. What breaks is the READ, not the pointer: the server
+    // is configured exactly as a working one is, which is what makes the fault a fault rather than
+    // a missing credential wearing one's clothes.
+    const [credential] = await database
+      .insert(credentialRows)
+      .values({
+        kind: "mcp",
+        provider: faultServerId,
+        keyId: `mcp-${faultServerId}`,
+        /*
+         * A placeholder rather than a real envelope: the read is what fails, so nothing here is
+         * ever decrypted, and an encrypted value would assert a step this test never reaches.
+         */
+        encryptedValue: "{}",
+        metadata: {},
+      })
+      .returning({ id: credentialRows.id });
+    if (!credential) throw new Error("the fixture credential was not stored");
+    faultCredentialId = credential.id;
+
+    /*
+     * Custom provenance and a suite-scoped id, so `accessFor` resolves it to the deployment-token
+     * path — which is the branch of `connectionTokenFor` that reads the vault for a server's own
+     * token, and the one whose refusal names an administrator.
+     */
+    await database.insert(mcpServers).values({
+      id: faultServerId,
+      title: "a server whose vault is unreachable",
+      vendor: "test",
+      url: "https://example.invalid/mcp",
+      credentialId: credential.id,
+      provenance: "custom",
+    });
+    await database.insert(mcpTools).values({
+      serverId: faultServerId,
+      name: faultToolName,
+      description: "Do something.",
+    });
+    await faultStore.grant("mcp", faultRef, faultBotId, "admin@openbot.local");
+  });
+
+  afterAll(async () => {
+    await database
+      .delete(pluginGrants)
+      .where(
+        and(
+          eq(pluginGrants.ref, faultRef),
+          eq(pluginGrants.agentId, faultBotId),
+        ),
+      );
+    // The tools go with the server row, which cascades; both ids carry this run's suffix, so
+    // neither can be a row the deployment configured.
+    await database.delete(mcpServers).where(eq(mcpServers.id, faultServerId));
+    await database.delete(agents).where(eq(agents.id, faultBotId));
+    if (faultCredentialId) {
+      await database
+        .delete(credentialRows)
+        .where(eq(credentialRows.id, faultCredentialId));
+    }
+  });
+
+  test("is refused as this deployment's own fault, never as a withdrawn credential", async () => {
+    const thrown = await faultStore
+      .callTool({
+        ref: faultRef,
+        args: {},
+        botId: faultBotId,
+        actorId: faultActorId,
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    /*
+     * The class is the assertion, not the wording. `PluginRefusedError` is what the relays key on:
+     * `grantedTools` hands its message to the model, and four routes hand it to a browser as a 400.
+     */
+    expect(thrown).not.toBeInstanceOf(PluginRefusedError);
+    expect(isDeploymentFault(thrown)).toBe(true);
+    expect(
+      thrown instanceof Error ? thrown.message : String(thrown),
+    ).not.toContain(WITHDRAWN);
+  });
+
+  test("does not write a withdrawn credential into the trail a failed call leaves", async () => {
+    await faultStore
+      .callTool({
+        ref: faultRef,
+        args: {},
+        botId: faultBotId,
+        actorId: faultActorId,
+      })
+      .catch(() => {});
+
+    const failures = (await auditRowsFor(faultRef)).filter(
+      (row) => row.eventType === "mcp.call_failed",
+    );
+    expect(failures.length).toBeGreaterThan(0);
+    const written = JSON.stringify(failures);
+    // The false accusation, which is what an operator would act on.
+    expect(written).not.toContain(WITHDRAWN);
+    expect(written).not.toContain("no longer holds");
+    /*
+     * And the true half is still recorded, without the statement or anything bound to it — the
+     * driver's own complaint is what `withoutStatement` keeps, and a credential id is what it drops.
+     */
+    expect(written).toContain(`absent_vault_${suite}`);
+    expect(written).not.toContain("Failed query:");
+    expect(written).not.toContain(faultCredentialId ?? "<none>");
+  });
+});

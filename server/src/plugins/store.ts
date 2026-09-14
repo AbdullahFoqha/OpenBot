@@ -13,6 +13,7 @@ import {
   type CredentialExecutor,
   type CredentialSecretReader,
   type CredentialStore,
+  CredentialUnusableError,
   decryptCredentialForUse,
   decryptSecret,
   encryptSecret,
@@ -1204,6 +1205,24 @@ export function createPluginStore(options: PluginStoreOptions) {
    * two reach a person very differently: an error becomes "that tool could not be called", which is
    * what a vendor being down looks like, while a withdrawn grant is nobody's fault and has an
    * obvious next step. `reconnect` says which of the two to name.
+   *
+   * WHICH OF THE TWO IS DECIDED BY CLASS. {@link CredentialUnusableError} is the one thing the vault
+   * raises that means the credential is gone, and everything else that can come out of this call is
+   * a fault: a query this database refused, a connection it would not open, an envelope that would
+   * not decrypt. Those are rethrown untouched, which puts a query failure on the
+   * {@link isDeploymentFault} shelf where the four audiences already agree about it.
+   *
+   * WHAT THIS USED TO BE, and why the difference is not cosmetic. It asked whether `error.message`
+   * CONTAINED "revoked" or "not found". drizzle's message for a failed query begins `Failed query:
+   * select "encrypted_value", "revoked_at" from "credentials" …` — the column this very read selects
+   * — so every database fault on the vault read matched the first substring and was converted into
+   * `onRevoked`: a `PluginRefusedError`, which is the one class this codebase relays VERBATIM. A
+   * Postgres that was down told the model the credential had been withdrawn, told a browser the same
+   * through the routes that pass a refusal out as a 400, and wrote it into `mcp_servers.last_error`
+   * for an operator to act on — sending somebody to re-add a credential that was never the problem
+   * while the real fault was reported nowhere. The same argument {@link TokenRefusedError} carries a
+   * `code` for: a decision that reads prose is one rewording away from being wrong in silence, and
+   * this one did not even need the rewording.
    */
   async function secretFor(
     credentialId: string,
@@ -1216,8 +1235,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         credentialId,
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("revoked") || message.includes("not found")) {
+      if (error instanceof CredentialUnusableError) {
         throw new PluginRefusedError(onRevoked, null);
       }
       throw error;

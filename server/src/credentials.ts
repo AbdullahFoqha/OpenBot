@@ -192,6 +192,35 @@ export async function decryptSecret(encodedKey: string, value: string) {
   return decoder.decode(plaintext);
 }
 
+/**
+ * The vault answered, and what it holds cannot be spent: the row is gone, or it is revoked.
+ *
+ * CRITERION. This is the ONLY thing {@link decryptCredentialForUse} raises that means "access was
+ * withdrawn". Everything else it can raise — a query this database refused, a connection it could
+ * not open, an envelope that would not decrypt — is a fault, and a caller must be able to tell the
+ * two apart without reading either message.
+ *
+ * REASON. The two used to be plain `Error`s and the only thing separating them from a fault was
+ * their wording, which `plugins/store.ts` matched on: a message containing "revoked" or "not found"
+ * was a withdrawal, anything else was an error. drizzle reports a failed query as a message that
+ * BEGINS `Failed query: select "encrypted_value", "revoked_at" from "credentials" …`, so the column
+ * this function reads put the substring into every database fault on this very read — Postgres
+ * down, a wrong address, a cancelled statement — and each was announced to the person, the model and
+ * the operator as an administrator having taken the credential away. A class cannot be produced by
+ * accident that way, and it survives a reworded sentence, which is the same argument
+ * `TokenRefusedError` carries a `code` for rather than a phrase in its prose.
+ *
+ * ONE CLASS FOR BOTH STATES, because no caller acts on the difference: the row being absent and the
+ * row being retired are both "this credential is not available and will not become available", and
+ * the step is the same. The messages stay distinct for whoever is reading a log.
+ */
+export class CredentialUnusableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CredentialUnusableError";
+  }
+}
+
 export async function decryptCredentialForUse(
   encodedKey: string,
   reader: CredentialSecretReader,
@@ -199,10 +228,10 @@ export async function decryptCredentialForUse(
 ) {
   const credential = await reader.readSecret(credentialId);
   if (!credential) {
-    throw new Error("Credential was not found");
+    throw new CredentialUnusableError("Credential was not found");
   }
   if (credential.revokedAt) {
-    throw new Error("Credential is revoked");
+    throw new CredentialUnusableError("Credential is revoked");
   }
 
   return decryptSecret(encodedKey, credential.encryptedValue);
