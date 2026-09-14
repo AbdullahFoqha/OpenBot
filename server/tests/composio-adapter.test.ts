@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Composio } from "@composio/core";
+import { Composio, telemetry } from "@composio/core";
 import {
   type BrokerConnection,
   BrokerRefusalError,
@@ -5116,6 +5116,182 @@ describe("the key becoming a vendor, and which delete that vendor carries", () =
       `the raw client's connectedAccounts.delete ["ca_1",{"revoke_on_delete":true}]`,
       `the raw client's authConfigs.delete ["${OUR_GMAIL.id}",{"revoke_on_delete":true}]`,
     ]);
+  });
+});
+
+/**
+ * WHAT CONSTRUCTING THE VENDOR IS ALLOWED TO DO TO THIS PROCESS, AND TO THE NETWORK, ON BOOT.
+ *
+ * `new Composio({ ... })` in {@link createComposioClient} carries three entries and every one of
+ * them is load-bearing, but none of them was visible to a test: the suite above drives
+ * {@link buildComposioClient}, which takes the vendor already assembled, so the construction
+ * literal could have any of its lines deleted and stay green. This describe is the only thing in
+ * the repository that reads that literal, and it reads it the way a deployment does — by watching
+ * what leaves the process.
+ *
+ * THE TWO FLAGS BOTH DEFAULT THE WRONG WAY FOR A SELF-HOSTED PRODUCT, which is why both are said
+ * rather than relied on. In `@composio/core` 0.18.1:
+ *
+ *   - `allowTracking` defaults to TRUE (`src/utils/config-defaults/ConfigDefaults.node.ts:5`), and
+ *     a true value runs `telemetry.setup(...)` (`src/composio.ts:380-390`). That does two separate
+ *     things in one call. It POSTs an `SDK_INITIALIZED` metric to
+ *     `https://telemetry.composio.dev/v1/metrics/invocations`
+ *     (`src/services/telemetry/TelemetryService.ts:4,38-46`) — a third party's analytics, which
+ *     the operator of a self-hosted install never opted into. And, first,
+ *     `registerExitHandlers()` (`src/telemetry/Telemetry.ts:66,315-356`) installs THREE
+ *     process-level listeners — `beforeExit`, `SIGINT` and `SIGTERM` — whose signal handlers flush
+ *     telemetry, then `process.removeListener` and `process.kill(process.pid, signal)` to re-raise.
+ *     That is a vendor library taking a hand in how this server shuts down, which is the part of
+ *     the consequence that no amount of firewalling would undo.
+ *   - `disableVersionCheck` defaults to FALSE (`src/composio.ts:113-120`), and a falsy value runs
+ *     `checkForLatestVersionFromNPM` (`src/composio.ts:399-402`), which `fetch`es
+ *     `https://registry.npmjs.org/@composio/core/latest` (`src/utils/version.ts:41-43`). A boot
+ *     that reaches npm is a boot that depends on the vendor's release feed and on egress to it.
+ *
+ * AND THE KEY IS THE THIRD ENTRY, pinned here for the same reason. `apiKey` is not merely
+ * forwarded: dropping it does not fail, it FALLS BACK — `getSDKConfig` reads `COMPOSIO_API_KEY`
+ * from the environment and then `api_key` out of `~/.composio/user_data.json`
+ * (`src/utils/sdk.ts:42-52`), so a deployment could go on working against whichever account a
+ * machine happened to be logged into, with `config.composioApiKey` silently unused. The same
+ * request pins the absence of `baseURL`, because the host it goes to is the SDK's default
+ * (`src/utils/constants.ts:7`) and a `baseURL` added to the literal would move it.
+ *
+ * HOW IT IS OBSERVED WITHOUT A NETWORK: `globalThis.fetch` is replaced for the duration by one
+ * that records the request and rejects, and `process.on` by one that records the event name and
+ * installs nothing. Both are restored in a `finally`. So the transport is the recorder, no socket
+ * is opened either way, and the assertions are lists of what the vendor TRIED — which is the fact
+ * worth pinning, since a flag flipped back would be a try that succeeded in production.
+ *
+ * THE HANDLER HALF WOULD HAVE BEEN A VACUOUS ASSERTION AND IS NOT, which is worth knowing before
+ * anybody simplifies it. `registerExitHandlers` guards on an `exitHandlersRegistered` flag held by
+ * a MODULE-LEVEL singleton (`src/telemetry/Telemetry.ts:46,315-321`), so it fires at most once per
+ * process — and this file constructs more than one client, so under a dropped `allowTracking` an
+ * EARLIER test is what would install the handlers and this one would see an empty list and pass.
+ * That was observed, not theorised: with the flag deleted, the telemetry POST showed up here and
+ * the handler list did not. The helper below therefore clears that memo for the duration, which is
+ * what turns "no handler is installed" into "no handler was attempted".
+ */
+describe("what constructing the vendor is allowed to do on boot", () => {
+  /** One request as the stubbed transport saw it, which is all a test needs of a request. */
+  type Attempt = { url: string; apiKey: string | null };
+
+  /**
+   * Runs `body` with the network and the process's own listener registry replaced by recorders.
+   *
+   * `NODE_ENV` is forced away from `test` for the duration because the SDK's own
+   * `shouldSendTelemetry()` short-circuits on `test` and `ci`
+   * (`src/telemetry/Telemetry.ts:173-180`) — under `bun test` the telemetry POST would be
+   * suppressed by the runner's environment rather than by the flag, and a test that cannot tell
+   * those two apart is not pinning the flag.
+   */
+  async function withRecordedTransport(
+    body: () => Promise<void> | void,
+  ): Promise<{ attempts: Attempt[]; events: string[] }> {
+    const attempts: Attempt[] = [];
+    const events: string[] = [];
+    const realFetch = globalThis.fetch;
+    const realOn = process.on;
+    const realNodeEnv = process.env.NODE_ENV;
+    const memo = telemetry as unknown as { exitHandlersRegistered: boolean };
+    const realMemo = memo.exitHandlersRegistered;
+
+    globalThis.fetch = ((input: unknown, init?: RequestInit) => {
+      const request = input as { url?: string; headers?: HeadersInit };
+      const headers = new Headers(init?.headers ?? request?.headers ?? {});
+      attempts.push({
+        url: String(request?.url ?? input),
+        apiKey: headers.get("x-api-key"),
+      });
+      // Rejected rather than answered: every caller here treats the vendor call as one it is
+      // allowed to fail, and an answer would only invite a test about a body nobody sent.
+      return Promise.reject(new Error("no network in this test"));
+    }) as typeof globalThis.fetch;
+
+    process.on = ((event: string) => {
+      events.push(event);
+      return process;
+    }) as typeof process.on;
+
+    process.env.NODE_ENV = "production";
+
+    /*
+     * THE VENDOR'S ONCE-PER-PROCESS MEMO, CLEARED SO THE OBSERVATION IS AN OBSERVATION.
+     * `registerExitHandlers` returns early forever after its first call
+     * (`src/telemetry/Telemetry.ts:46,315-321`), and the flag lives on a module-level singleton
+     * shared by every `Composio` in the process. So if any earlier test in this file had
+     * constructed a tracking-enabled vendor, the handler list below would come back empty for a
+     * reason that has nothing to do with the flag under test — the assertion would pass while the
+     * defect it exists for was present. Reaching the private field is deliberate: it is the
+     * difference between recording that nothing was installed and recording that nothing tried.
+     */
+    memo.exitHandlersRegistered = false;
+
+    try {
+      await body();
+      // One turn of the macrotask queue, because the SDK defers its initialisation metric through
+      // `queueMicrotask` (`src/telemetry/Telemetry.ts:241-257`) — a `setTimeout` lands after every
+      // microtask that defer could have queued, so the recorder sees the POST before it is undone.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      globalThis.fetch = realFetch;
+      process.on = realOn;
+      process.env.NODE_ENV = realNodeEnv;
+      memo.exitHandlersRegistered = realMemo;
+    }
+
+    return { attempts, events };
+  }
+
+  test("it reaches nothing and installs no process handler", async () => {
+    const { attempts, events } = await withRecordedTransport(() => {
+      createComposioClient("never-dialled");
+    });
+
+    /*
+     * BOTH CONSEQUENCES IN ONE ASSERTION, so that a diff shows the whole of what a dropped flag
+     * costs rather than whichever half happened to be checked first.
+     *
+     * `reached` is what the vendor tried to dial. Dropping `disableVersionCheck: true` puts
+     * `https://registry.npmjs.org/@composio/core/latest` in it; dropping `allowTracking: false`
+     * puts `https://telemetry.composio.dev/v1/metrics/invocations` in it. The whole list is
+     * asserted rather than each absence, so a third endpoint a version bump added fails here too.
+     *
+     * `installed` is what the vendor attached to THIS process, and it is the half that no firewall
+     * would undo. Dropping `allowTracking: false` puts `beforeExit`, `SIGINT` and `SIGTERM` in it;
+     * the two signal handlers flush telemetry and then re-raise the signal themselves, so that
+     * deployment would have a vendor library sitting between an operator's Ctrl-C, or a container
+     * runtime's shutdown, and this server's exit.
+     */
+    expect({
+      reached: attempts.map(({ url }) => url),
+      installed: events,
+    }).toEqual({
+      reached: [],
+      installed: [],
+    });
+  });
+
+  test("the key it was given is the key the vendor sends, to Composio's own host", async () => {
+    const { attempts } = await withRecordedTransport(async () => {
+      const { broker } = createComposioClient("never-dialled");
+      // It rejects because the transport above rejects; what is under test is the request that was
+      // built before it did, not the refusal that comes back.
+      await expect(broker.listApps()).rejects.toThrow();
+    });
+
+    /*
+     * EVERY attempt, not the first one, because the claim worth making is about all of them. The
+     * raw client retries a connection error, so there is more than one here and each carries the
+     * same key to the same host; and a client that had acquired a second destination — the
+     * telemetry endpoint being the one this SDK reaches for — would be a client for which this
+     * sentence had stopped being true, which is the failure this shape catches and an assertion
+     * about `attempts[0]` would not.
+     */
+    expect(attempts.length).toBeGreaterThan(0);
+    for (const attempt of attempts) {
+      expect(attempt.apiKey).toBe("never-dialled");
+      expect(new URL(attempt.url).origin).toBe("https://backend.composio.dev");
+    }
   });
 });
 

@@ -4184,10 +4184,19 @@ export function buildComposioClient(
 /**
  * The lines that turn this deployment's API key into a vendor client.
  *
- * Everything this file decides lives in {@link buildComposioClient}, which is why this function has
- * no decision worth testing: it constructs the vendor and hands it over. The key is a parameter here
- * and a private field of the vendor's client thereafter, and no path out of this module carries it
- * — see the module comment.
+ * Most of what this file decides lives in {@link buildComposioClient}, and this one used to say it
+ * therefore had "no decision worth testing". That sentence was wrong twice over and both times in
+ * the same way: this is where the SDK's DEFAULTS are accepted or refused, and a default accepted by
+ * omission looks exactly like a default nobody thought about. It cost the two deletes their
+ * `revoke_on_delete` once — see the describe about which delete the vendor carries — and it left
+ * the construction literal below unpinned, so that deleting a line from it phoned out on boot and
+ * broke no test. Both are now asserted; the construction literal carries its own note.
+ *
+ * The key is a parameter here and a private field of the vendor's client thereafter, and no path
+ * out of this module carries it — see the module comment. That is also why this returns the seam
+ * rather than the vendor: handing `composio` back would put the key on an object any caller could
+ * read, so the construction below is asserted by what it DOES, not by a config object a test could
+ * inspect.
  *
  * IT IS NO LONGER ONE LINE, AND THE REASON WAS THE TWO DELETES AND IS NOW ALSO THE TWO LISTINGS.
  * `Composio` used to satisfy {@link ComposioVendor} whole, passed straight in. It cannot any more,
@@ -4210,15 +4219,65 @@ export function createComposioClient(apiKey: string): {
   actions: ComposioActions;
   broker: ComposioBroker;
 } {
+  /*
+   * THREE ENTRIES, EVERY ONE OF THEM LOAD-BEARING, AND ALL THREE PINNED BY A TEST. What this
+   * literal settles is what a boot of this server is allowed to do before it has served anything:
+   * which host the key goes to, whether a third party hears about the start-up, and whether a
+   * vendor library gets a say in how the process shuts down. Those are deployment facts, not
+   * style, and none of them was visible to a test until one was written for them — see
+   * `server/tests/composio-adapter.test.ts`, "what constructing the vendor is allowed to do on
+   * boot", which watches a stubbed transport and a stubbed `process.on` and fails if any line here
+   * is deleted or flipped. Read that test before changing anything below.
+   *
+   * `apiKey` DOES NOT FAIL WHEN DROPPED, IT FALLS BACK. `getSDKConfig` reads `COMPOSIO_API_KEY`
+   * out of the environment and then `api_key` out of `~/.composio/user_data.json`
+   * (`@composio/core` 0.18.1, `src/utils/sdk.ts:42-52`), so a literal that lost this line would go
+   * on working against whichever account the machine was last logged into, with the configured
+   * `config.composioApiKey` silently unused. `baseURL` is deliberately NOT passed for the same
+   * reason read the other way: the default is `https://backend.composio.dev`
+   * (`src/utils/constants.ts:7`), and the test asserts the origin every request actually goes to,
+   * so adding one here is a change that has to be argued for rather than one that slips in.
+   */
   const composio = new Composio({
     apiKey,
-    // Their default telemetry installs its own interrupt handlers, and this is a self-hosted
-    // product whose operator never opted into a third party's analytics.
+    /*
+     * TRACKING OFF DOES TWO THINGS, AND THE SECOND IS THE ONE THAT IS HARD TO UNDO. It defaults to
+     * TRUE (`src/utils/config-defaults/ConfigDefaults.node.ts:5`), and a true value runs
+     * `telemetry.setup()` (`src/composio.ts:380-390`). That POSTs an `SDK_INITIALIZED` metric to
+     * `https://telemetry.composio.dev/v1/metrics/invocations`
+     * (`src/services/telemetry/TelemetryService.ts:4,38-46`) — a third party's analytics, which
+     * the operator of a self-hosted install never opted into. And, before that, it installs THREE
+     * process-level listeners — `beforeExit`, `SIGINT` and `SIGTERM`
+     * (`src/telemetry/Telemetry.ts:66,315-356`) — whose signal handlers flush telemetry, then
+     * `removeListener` and `process.kill(process.pid, signal)` to re-raise. Blocking the egress
+     * would not undo that half: it would leave a vendor library between an operator's Ctrl-C, or a
+     * container runtime's SIGTERM, and this server's exit.
+     */
     allowTracking: false,
-    // Both default the other way, so both have to be said. The version check reaches npm for the
-    // SDK's latest release as the client is constructed, and a deployment's boot must not depend
-    // on the vendor's release feed.
+    /*
+     * AND THE BOOT MUST NOT DEPEND ON THE VENDOR'S RELEASE FEED. This defaults to FALSE
+     * (`src/composio.ts:113-120`), and a falsy value runs `checkForLatestVersionFromNPM`
+     * (`src/composio.ts:399-402`), which fetches `https://registry.npmjs.org/@composio/core/latest`
+     * (`src/utils/version.ts:41-43`) as the client is constructed.
+     */
     disableVersionCheck: true,
+    /*
+     * NOTHING ELSE IS PASSED, AND THE REST OF `ComposioConfig` IS ACCEPTED AS IT COMES, which is
+     * safe only because of where each default lands — recorded here so the next reader does not
+     * have to re-derive it.
+     *
+     * `dangerouslyAllowAutoUploadDownloadFiles` defaults OFF (`ConfigDefaults.node.ts:4`) and is
+     * the premise `./composio`'s file filter is written on; that filter drops every action whose
+     * schema stages a file under EITHER setting, so the premise is defended by a tested guard
+     * rather than by this literal, and turning the flag on here would be a change to make against
+     * that filter. `sensitiveFileUploadProtection`, `fileUploadPathDenySegments`, `fileUploadDirs`
+     * and `fileDownloadDir` only bear on uploads and downloads that the same filter means never
+     * happen. `provider` defaults to the SDK's `OpenAIProvider`, which this adapter never asks to
+     * format anything — every read here goes through the raw client or the SDK's own models.
+     * `host` and `defaultHeaders` are telemetry and header cosmetics, and telemetry is off above.
+     * `toolkitVersions` defaults to "latest", which is the literal every listing in this file
+     * already passes explicitly; see {@link ComposioVendor.tools.list}.
+     */
   });
   const client = composio.getClient();
 
