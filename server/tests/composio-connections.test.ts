@@ -1723,6 +1723,126 @@ test("the chooser passes over a versionless read for the one it could call", asy
 });
 
 /**
+ * AND A ROW THAT SAYS READ AND ALSO SAYS DESTRUCTIVE IS NOT A READ THIS DEPLOYMENT WILL SPEND.
+ *
+ * CRITERION. Given an app whose alphabetically first argument-less READ is also marked destructive,
+ * the chosen probe is the plain read that sorts after it — and an app whose ONLY read is marked
+ * destructive has no probe at all.
+ *
+ * REASON. `effect` and `destructive` are two columns because the vendor can say two things, and the
+ * chooser checks both rather than treating either as implied by the other. The pair is the vendor's
+ * own words: `effectOf` answers `read` where Composio sent `readOnlyHint`, and `destructive` is
+ * recorded where it sent `destructiveHint` — which a vendor is free to send together, and which
+ * together describe an action nobody should call unasked on a stranger's account to find out
+ * whether their key works. Dropping the second clause type-checks, leaves `effect !== "read"`
+ * standing as a guard that still looks complete, and was invisible to every test here: the whole
+ * probe-choice suite above is written on rows that leave `destructive` at its column default of
+ * false, so the clause could be deleted with nothing to say so.
+ *
+ * BOTH HALVES, because either alone leaves the fault reachable from the other side. An app with a
+ * safe alternative proves the destructive row is PASSED OVER rather than merely not-first; an app
+ * with none proves it is not fallen back to when the search finds nothing else.
+ */
+test("the probe skips a read the vendor also calls destructive", async () => {
+  await database.insert(mcpServers).values({
+    id: probeAppId,
+    title: "Two Reads",
+    vendor: "Composio",
+    url: `composio://${probeAppId}`,
+    provenance: "composio",
+  });
+  await database.insert(mcpTools).values([
+    {
+      serverId: probeAppId,
+      // Sorts first, asks for nothing, and Composio itself says calling it destroys something.
+      name: "APP_ARCHIVE_EVERYTHING",
+      description: "Archives the lot.",
+      effect: "read",
+      destructive: true,
+      version: "20260903_00",
+    },
+    {
+      serverId: probeAppId,
+      name: "APP_LIST_PROJECTS",
+      description: "Lists the projects.",
+      effect: "read",
+      destructive: false,
+      version: "20260903_00",
+    },
+  ]);
+
+  expect(await store.probeActionFor(probeAppId)).toEqual({
+    name: "APP_LIST_PROJECTS",
+    version: "20260903_00",
+  });
+
+  // And with the safe alternative gone there is nothing to fall back to: the destructive row is not
+  // a candidate, rather than a last resort.
+  await database
+    .delete(mcpTools)
+    .where(
+      and(
+        eq(mcpTools.serverId, probeAppId),
+        eq(mcpTools.name, "APP_LIST_PROJECTS"),
+      ),
+    );
+
+  expect(await store.probeActionFor(probeAppId)).toBeNull();
+});
+
+/**
+ * AND WHERE SEVERAL READS SURVIVE, THE ONE THAT ASKS WHO THE KEY BELONGS TO IS PREFERRED.
+ *
+ * CRITERION. Given an app publishing two safe argument-less reads, the chosen probe is the identity
+ * read — `..._GET_ME` here — even though the other sorts first and would be `safe[0]`.
+ *
+ * REASON. Every candidate that reaches this point is safe and callable, so the preference is not
+ * about safety: it is about what the call MEANS when it comes back. An identity read answers "whose
+ * account is this key" and therefore answers the question the check is actually asking; a listing
+ * read answers "what is in this account", which an empty-but-valid account answers with nothing and
+ * which a key scoped away from that resource can fail for a reason that is not the key. Removing
+ * the preference leaves `safe[0]` — the alphabetical accident — and nothing above could see it,
+ * because every app in those fixtures publishes at most one surviving read: with one candidate,
+ * `identity ?? safe[0]` is the same value either way, so the ordering was asserted nowhere.
+ *
+ * THE NAMES ARE SORTED AGAINST THE PREFERENCE RATHER THAN WITH IT. `ZOO_GET_ME` sorts AFTER
+ * `ZOO_ALL_ANIMALS`, so the expected answer is the one the fallback would not have produced — a
+ * fixture where the identity read also happened to sort first would pass with the preference gone.
+ */
+test("the probe prefers the identity read over the read that sorts first", async () => {
+  await database.insert(mcpServers).values({
+    id: probeAppId,
+    title: "Two Safe Reads",
+    vendor: "Composio",
+    url: `composio://${probeAppId}`,
+    provenance: "composio",
+  });
+  await database.insert(mcpTools).values([
+    {
+      serverId: probeAppId,
+      // Sorts first and is perfectly safe, which is what makes it the wrong answer rather than an
+      // unsafe one: this is a test about which of two good candidates is chosen.
+      name: "ZOO_ALL_ANIMALS",
+      description: "Lists the animals.",
+      effect: "read",
+      version: "20260903_00",
+    },
+    {
+      serverId: probeAppId,
+      name: "ZOO_GET_ME",
+      description: "Says who the key belongs to.",
+      effect: "read",
+      version: "20260903_00",
+    },
+  ]);
+
+  expect(await store.probeActionFor(probeAppId)).toEqual({
+    name: "ZOO_GET_ME",
+    version: "20260903_00",
+  });
+});
+
+/**
  * AND THE LISTING CARRIES THE ACTION THE CHECK ACTUALLY SPENT, WHICH IS WHAT SURVIVES A RELOAD.
  *
  * CRITERION. A brokered connection whose row records an action is listed with that action's name in

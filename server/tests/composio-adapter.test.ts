@@ -299,6 +299,18 @@ const A_CRASH =
   /is not a function|(?:undefined|null) is not an object|is not iterable|cannot read propert/i;
 
 /**
+ * The envelope guard's own sentence, so a test about a ROW can say it was not this one.
+ *
+ * `pageOf` refuses an answer that is not `{ items: [...] }` before any row reader sees a row, and
+ * every listing in {@link ComposioVendor} now comes off the RAW client, whose answers are envelopes
+ * — `{ items, next_cursor }` — rather than the bare arrays the SDK's transformers used to return.
+ * A fixture written as a bare array therefore dies at this guard, and a test asserting only "it
+ * refused in a sentence" passes on a refusal about the container while its name promises one about
+ * a field. Asserting the absence of this sentence is what makes the fixture's SHAPE load-bearing.
+ */
+const NOT_A_LISTING = /is not a listing at all/i;
+
+/**
  * Every sentence one failure carries, its own first and then the ones hanging off it.
  *
  * A COUNT IS A SENTENCE WITH ITS REASONS SOMEWHERE ELSE, which is why a question about what a reader
@@ -3395,17 +3407,19 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
       answers: [
         {
           shape: "a row whose slug is null",
-          answer: [{ slug: null, name: "Gmail", meta: {} }],
+          answer: { items: [{ slug: null, name: "Gmail", meta: {} }] },
         },
         {
           shape: "a row whose name is null",
-          answer: [{ slug: "gmail", name: null, meta: {} }],
+          answer: { items: [{ slug: "gmail", name: null, meta: {} }] },
         },
         {
           shape: "a category the vendor named with nothing",
-          answer: [
-            { slug: "gmail", name: "Gmail", meta: { categories: [{}] } },
-          ],
+          answer: {
+            items: [
+              { slug: "gmail", name: "Gmail", meta: { categories: [{}] } },
+            ],
+          },
         },
       ],
       probe: (answer) => {
@@ -3520,7 +3534,7 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
         // what a later call sends back to Composio.
         {
           shape: "an action whose slug is empty",
-          answer: [{ slug: "", name: "Fetch emails" }],
+          answer: { items: [{ slug: "", name: "Fetch emails" }] },
         },
       ],
       probe: (answer) => {
@@ -3560,6 +3574,14 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
 
         expect(failure.message).not.toMatch(A_CRASH);
         expect(failure.message.trim()).not.toBe("");
+        // THE ROW READER ANSWERED AND NOT THE CONTAINER GUARD, which is the whole of what each of
+        // these cases is named after. Every answer above is a well-formed envelope carrying ONE bad
+        // row, so `pageOf`'s "what came back is not a listing at all" must not be the sentence:
+        // that sentence means the fixture never reached the slug, name, category or id reader whose
+        // fault the test claims to be about, and it is the exact way these tests rotted before —
+        // three catalogue answers and the action answer were bare arrays, every one of them refused
+        // at the envelope, and all four passed on the strength of a refusal they had not asked for.
+        expect(failure.message).not.toMatch(NOT_A_LISTING);
         if (listing.authored) {
           expect(brokerSentence(failure)).not.toBeNull();
         }
@@ -3991,7 +4013,14 @@ describe("a listing that arrived with a cursor still outstanding", () => {
     // caller here is a person waiting on a page they pressed disconnect from.
     expect(refusal).toBeInstanceOf(BrokerRefusalError);
     expect(refusal.message).not.toMatch(A_CRASH);
-    expect(calls).toBeLessThanOrEqual(3);
+    // EXACTLY TWO, AND `toBeLessThanOrEqual(3)` WAS THE SLACK THAT PINNED NOTHING. The first
+    // request carries no cursor; the second carries `page_2`; the third would carry `page_2` again,
+    // which is the repetition the guard exists to catch — so it is refused before it is made and
+    // two is the only count this guard can produce. A bound of three was green over a guard that
+    // allowed one repeat before refusing, which is a guard that has stopped answering the question
+    // "did following the cursor advance". It also read as an assertion about the CEILING, which is
+    // the other test, and which stops at 200.
+    expect(calls).toBe(2);
     expect(deleted).toEqual([]);
   });
 
@@ -5117,6 +5146,73 @@ describe("the key becoming a vendor, and which delete that vendor carries", () =
       `the raw client's authConfigs.delete ["${OUR_GMAIL.id}",{"revoke_on_delete":true}]`,
     ]);
   });
+
+  /**
+   * WHICH OF THE TWO IDENTIFIERS GOES FIRST WHEN A CONSENT LINK IS MINTED, asserted at the seam.
+   *
+   * `connectedAccounts.link(userId, authConfigId, options)` takes two strings in a row, so swapping
+   * them is the one mistake a type checker is structurally unable to see — both arguments are
+   * `string`, and the call compiles either way. What it produces is not an error either: Composio
+   * is asked to link the account of a "person" named `ac_gmail_ours` against an auth config named
+   * `user_1`, which is a request about two things that do not exist rather than a malformed one.
+   *
+   * AND EVERY OTHER TEST IN THIS FILE IS BLIND TO IT for the reason the deletes above are. They
+   * drive {@link buildComposioClient} with a double whose `link` records positionally, so they
+   * assert the order the ADAPTER passes — which is correct and stays correct — while the line that
+   * re-spells those parameters on the way to the real SDK, inside {@link createComposioClient},
+   * is reached by nothing. Swapping it there type-checks and leaves this suite green.
+   *
+   * So the order is asserted where it is actually spent: against the SDK's own prototype, with the
+   * argument list recorded as it arrived.
+   */
+  test("the consent link names this person first and the auth config second", async () => {
+    const seed = new Composio({
+      apiKey: "never-dialled",
+      allowTracking: false,
+      disableVersionCheck: true,
+    });
+    const sdkAccounts = methodsOf(seed.connectedAccounts);
+    const sdkConfigs = methodsOf(seed.authConfigs);
+
+    const restore: { on: Methods; name: string; was: Methods[string] }[] = [];
+    const replace = (on: Methods, name: string, answer: Methods[string]) => {
+      restore.push({ on, name, was: on[name] });
+      on[name] = answer;
+    };
+
+    const minted: unknown[][] = [];
+    let begun: { redirectUrl: string } | null = null;
+    try {
+      // The config listing is what carries the auth config's id to the link, so it answers with the
+      // one this deployment made — the id that must arrive SECOND.
+      replace(sdkConfigs, "list", async () => ({
+        items: [OUR_GMAIL],
+        nextCursor: null,
+      }));
+      replace(sdkAccounts, "link", async (...call: unknown[]) => {
+        minted.push(call);
+        return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+      });
+
+      const { broker } = createComposioClient("never-dialled");
+      begun = await broker.authorize({
+        userId: "user_1",
+        toolkit: "gmail",
+        returnUrl: RETURN_URL,
+      });
+    } finally {
+      for (const { on, name, was } of restore.reverse()) on[name] = was;
+    }
+
+    // The person, then the config, then the callback — and the whole list rather than a field of
+    // it, because the defect this is written for is an order and not a value.
+    expect(minted).toEqual([
+      ["user_1", OUR_GMAIL.id, { callbackUrl: RETURN_URL }],
+    ]);
+    expect(begun).toEqual({
+      redirectUrl: "https://backend.composio.dev/s/a-link",
+    });
+  });
 });
 
 /**
@@ -5509,6 +5605,15 @@ describe("listings Composio pages, read to the end", () => {
         toolkits: {
           list: async () => {
             pages += 1;
+            // THE TEST'S OWN STOP, which its sibling over the accounts listing has and this one did
+            // not. The cursor here is different on every page, so nothing in the fixture ever ends
+            // the listing — the adapter's ceiling is the only thing that does. Without this throw,
+            // an adapter that LOST its ceiling does not redden this test: it hangs the whole file
+            // for ever, which is a suite that never reports rather than a test that fails, and the
+            // difference matters most in CI where a hang is read as an infrastructure fault.
+            if (pages > PAGES_BEFORE_REFUSING) {
+              throw new Error("The paging did not terminate.");
+            }
             return {
               items: [app(`app_${pages}`)],
               next_cursor: `page_${pages}`,
