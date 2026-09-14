@@ -82,6 +82,18 @@ const RECHECKED_AT = "2026-09-13T09:00:00.000Z";
 const PROBE = "GMAIL_FETCH_EMAILS";
 
 /**
+ * What a re-check the vendor refused comes back as, in the store's own words.
+ *
+ * NOT A 200 SAYING `verified: false`, which is the shape this file used to pin and the server has
+ * never been able to produce. `recheckBrokeredConnection` writes the verdict and the action it
+ * spent, files the trail row, and then raises this; the route answers it as a 400. The row above the
+ * banner has to be redrawn from what that write left behind, because the refusal itself carries no
+ * verdict for the screen to read.
+ */
+const REFUSED_RECHECK =
+  "gmail would not answer with the key it is holding: Invalid credentials. Your connection here is recorded as unchecked until it does; nothing was disconnected, so fixing the key at gmail and pressing Re-check again is the whole of the retry.";
+
+/**
  * The schemes the SERVER answers a form for, which is the list `isFieldScheme` holds.
  *
  * The screen holds its own copy of this — `FIELD_SCHEMES` in `brokered-account-row.tsx` — because
@@ -234,14 +246,45 @@ type Deployment = {
    * `probe` travels with the verdict because the verdict alone is not an answer: the only
    * `verified: false` that arrives here as a 200 is the one carrying a null probe, and a re-check
    * the vendor refused is raised rather than answered.
+   *
+   * A NAMED PROBE BESIDE `verified: false` IS THEREFORE NOT A 200 AND THIS STUB NO LONGER MAKES ONE.
+   * `recheckBrokeredConnection` writes the row and then RAISES with Composio's own sentence in it,
+   * which `POST /servers/:id/connection/recheck` passes through as a 400 — so the shape a stub
+   * answering 200 here pinned is one no deployment can produce, and the screen defect underneath it
+   * could not be seen. See {@link REFUSED_RECHECK}.
    */
   recheckAnswer?: {
     verified: boolean;
     verifiedAt: string | null;
     probe: string | null;
   };
-  /** What Composio refuses a submitted key with, where this deployment refuses it at all. */
+  /**
+   * What Composio refuses a submitted key with, where nothing was saved.
+   *
+   * The clean undo: the probe failed, the account this call made was withdrawn at the vendor, and
+   * `connectBrokeredWithFields` raises with no row behind it. 400, because the store authored the
+   * sentence and the route passes a store-authored refusal through as one.
+   */
   rejects?: string;
+  /**
+   * And what it refuses one with where the account it made COULD NOT be taken back.
+   *
+   * THE THIRD STATE, AND THE ONE WITH A ROW BEHIND THE REFUSAL. Composio would not revoke the
+   * account this press created, so the store records it — unverified, with the action it spent — and
+   * files a trail row, and only then raises. The route answers that 400 over a deployment that now
+   * holds a live connection the person did not have a moment ago, which is why the screens this row
+   * is drawn on may not go on offering Connect for it.
+   */
+  rejectsAndKeeps?: string;
+  /**
+   * What the first press is refused with, where the app cannot be asked what it wants at all.
+   *
+   * A question about the app rather than about anybody's account, so nothing is written either way
+   * — but the sentence is the whole of what the person can act on, and it is the one the dialog used
+   * to replace with a line of its own. 502 is what the route answers a `connectionFields` failure it
+   * cannot explain; the authored refusals on that same press are 400, 409 and 503.
+   */
+  refusesFields?: { error: string; status: 400 | 409 | 502 | 503 };
 };
 
 type Server = {
@@ -279,6 +322,8 @@ function installDeployment(deployment: Deployment): Server {
     verified: false,
     verifiedAt: null as string | null,
     rejects: undefined as string | undefined,
+    rejectsAndKeeps: undefined as string | undefined,
+    refusesFields: undefined as Deployment["refusesFields"],
     probe: undefined as string | null | undefined,
     checkable: false,
     recheckAnswer: { verified: true, verifiedAt: RECHECKED_AT, probe: PROBE },
@@ -378,6 +423,32 @@ function installDeployment(deployment: Deployment): Server {
             status: 400,
           });
         }
+        /*
+         * AND THE REFUSAL THAT LEAVES A ROW BEHIND IT, which is the same 400 over a deployment that
+         * is no longer in the state the caller was in when they pressed.
+         *
+         * `connectBrokeredWithFields` tries to withdraw the account its own probe just condemned,
+         * and where Composio will not take it back it writes the connection anyway — unverified,
+         * carrying the action it spent — files the trail row, and only then raises. So the write
+         * below happens BEFORE the response, exactly as it does on the server, and a stub that
+         * refused without it could only ever test the half of this path that changes nothing.
+         */
+        if (state.rejectsAndKeeps) {
+          state.recorded = true;
+          state.confirms = true;
+          state.verified = false;
+          state.verifiedAt = null;
+          // The action that ran and that the vendor answered no to, which is the whole of what
+          // separates this row on a later read from a key nobody ever tried.
+          state.probe = PROBE;
+          return new Response(
+            JSON.stringify({ error: state.rejectsAndKeeps }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 400,
+            },
+          );
+        }
         state.recorded = true;
         state.confirms = true;
         // A fresh key, and the store writes every one of those unverified: nothing has been spent
@@ -403,6 +474,22 @@ function installDeployment(deployment: Deployment): Server {
        * form to every bodyless press would agree with the screen by construction, and the whole
        * question here is what the screen does when the two disagree.
        */
+      /*
+       * AND THE PRESS THAT CANNOT BE ANSWERED AT ALL. Asking the app what it wants is a call to
+       * Composio like any other, and the route has four refusals for it — an app that needs no
+       * account (400), an account this person already holds (409), a directory this deployment
+       * cannot reach (502) and a broker it is not configured for (503). None of them is a field
+       * list, and each one is a sentence naming what to do about it.
+       */
+      if (state.refusesFields) {
+        return new Response(
+          JSON.stringify({ error: state.refusesFields.error }),
+          {
+            headers: { "content-type": "application/json" },
+            status: state.refusesFields.status,
+          },
+        );
+      }
       if (SERVER_FIELD_SCHEMES.includes(state.authScheme)) {
         return json({ fields: state.fields });
       }
@@ -428,6 +515,24 @@ function installDeployment(deployment: Deployment): Server {
         state.verified = state.recheckAnswer.verified;
         state.verifiedAt = state.recheckAnswer.verifiedAt;
         state.probe = state.recheckAnswer.probe;
+      }
+      /*
+       * AND A CHECK THE VENDOR REFUSED IS A REFUSAL, NOT AN ANSWER — the correction that let the
+       * screen defect beneath it be seen at all.
+       *
+       * The store writes the row, files the trail and THEN raises with Composio's own sentence in
+       * it, and the route passes that through as a 400. This stub used to answer the same body as a
+       * 200, which is a shape no deployment can produce: `recheckBrokeredConnection` returns only
+       * `{ verified: true, … }` or the untouched row beside a null probe. Every assertion about a
+       * refused check was therefore made against a success the browser was never going to see, and
+       * a mutation that refetched only on success looked correct because nothing it was tested with
+       * ever failed.
+       */
+      if (!state.recheckAnswer.verified && state.recheckAnswer.probe !== null) {
+        return new Response(JSON.stringify({ error: REFUSED_RECHECK }), {
+          headers: { "content-type": "application/json" },
+          status: 400,
+        });
       }
       return json(state.recheckAnswer);
     }
@@ -795,6 +900,17 @@ test("a key app nobody has connected keeps the screen's own reassurance", async 
 /** Composio's own words for a key it would not take, which is the sentence worth carrying. */
 const REFUSED = "Composio rejected that key: invalid API key for perplexityai.";
 
+/**
+ * And its words for the same key where the account it made could not be withdrawn.
+ *
+ * THE REFUSAL WITH A ROW BEHIND IT, which is what separates it from {@link REFUSED} and is the whole
+ * reason the screens may not treat the two alike. Nothing was saved on that one; on this one a live
+ * connection exists that did not exist before the press, and the sentence names the button that ends
+ * it — on a page that has to be redrawn before that button is there to press.
+ */
+const STRANDED =
+  "What you entered for gmail did not work — Composio rejected that key: invalid API key for perplexityai. — and Composio would not take the account back either, so it is recorded here as unchecked rather than left somewhere nothing could name it. Disconnect it on the Plugins page and try again.";
+
 test("a key the broker refuses says so inside the dialog, not only behind it", async () => {
   installDeployment({
     authScheme: "API_KEY",
@@ -825,6 +941,58 @@ test("a key the broker refuses says so inside the dialog, not only behind it", a
   expect(view.getAllByText(REFUSED).length).toBe(2);
   // And the form stays up holding what was typed. A mistyped key is corrected, not retyped.
   expect(within(dialog).queryByLabelText("API Key")).toBeTruthy();
+});
+
+/**
+ * What Composio would not say when it was asked what the app wants typed in.
+ *
+ * The route's own generic sentence for a `connectionFields` call it cannot explain, which is one of
+ * the four refusals that press has — the others being an app that needs no account, an account this
+ * person already holds, and a deployment with no broker key. Each of them names a different thing to
+ * do about it, which is the whole reason none of them may be replaced by a line of the dialog's own.
+ */
+const UNASKABLE =
+  "Composio would not say what Gmail asks for, and said nothing about why. Try again, and ask an administrator to check this deployment's Composio key if it persists.";
+
+test("an app that could not be asked what it needs says why, inside the dialog", async () => {
+  /*
+   * THE TWIN OF THE TEST ABOVE, ON THE PRESS BEFORE IT.
+   *
+   * CRITERION. A first press the server refuses puts the SERVER's sentence in front of the person,
+   * in the dialog that press opened.
+   *
+   * REASON. The dialog opens on the press and the question goes out under it, so a refusal lands
+   * while the form's own placeholder is on screen — and that placeholder said "That app could not be
+   * asked what it needs. Close this and try again." to every one of the four refusals this route
+   * has. Each of those names a different remedy and three of them name one this line cannot: an app
+   * that needs no account at all, an account already attached that has to be disconnected first, a
+   * deployment whose Composio key an administrator has to look at. The real sentence went to the
+   * screen's banner, which is behind this dialog's backdrop — the identical defect the submission
+   * refusal above was fixed for, on the press a few lines earlier.
+   */
+  installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY],
+    recorded: false,
+    refusesFields: { error: UNASKABLE, status: 502 },
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  await userEvent.click(await view.findByRole("button", { name: "Connect" }));
+  const dialog = await view.findByRole("dialog");
+
+  await waitFor(() =>
+    expect(within(dialog).queryByText(UNASKABLE)).toBeTruthy(),
+  );
+  // Reported to the screen as well, not instead, exactly as a refused submission is.
+  expect(view.getAllByText(UNASKABLE).length).toBe(2);
+  // And never the line that stands in for a sentence nobody sent.
+  expect(
+    view.queryByText(/That app could not be asked what it needs/),
+  ).toBeNull();
 });
 
 test("a consent app's Connect leaves for the vendor's own page", async () => {
@@ -933,6 +1101,12 @@ function accountState(overrides: Partial<BrokeredAccount>): BrokeredAccount {
     disconnected: false,
     disconnecting: false,
     fields: null,
+    /*
+     * NULL BESIDE THE NULL `submissionError` BELOW, because these cases are about the sentences the
+     * ROW carries and neither refusal is one of them: both belong to the dialog, which is drawn only
+     * where a key app is not connected and is exercised against the stub above.
+     */
+    fieldsError: null,
     kind: "consent",
     /*
      * UNDEFINED IS THE DEFAULT BECAUSE IT IS THE COMMON STATE, not because the field is optional to
@@ -1375,6 +1549,117 @@ test("a re-check's verdict is still there after a reload, because the server wro
   // The way back out, which is withheld on exactly the render somebody would look for it.
   expect(
     await reloaded.findByRole("button", { name: "Re-check" }),
+  ).toBeTruthy();
+});
+
+test("a re-check the vendor refused stops saying when the key was last checked", async () => {
+  /*
+   * THE REFUSED CHECK, WITHOUT A RELOAD, WHICH IS THE RENDER THE PERSON IS ACTUALLY STANDING ON.
+   *
+   * CRITERION. The press lands, the banner carries Composio's refusal, and the row above it stops
+   * claiming a date that the same request has already taken away.
+   *
+   * REASON. `recheckBrokeredConnection` writes the verdict and the action it spent, files the trail
+   * row, and THEN raises — so by the time the 400 reaches the browser the connection this page is
+   * drawing no longer holds the date on screen. The mutation refetched only on success, so nothing
+   * re-read it: the banner said the key had just been refused while the line above went on reading
+   * "Connected with a key you provided, last checked 10/09/2026", which is a sentence about a
+   * verification the deployment had already withdrawn. Two readings of one row, both drawn in the
+   * same paint, and the false one is the one that looks reassuring.
+   *
+   * THE ROW STARTS VERIFIED AND DATED, because that is the state the stale sentence comes out of. A
+   * row that was already unverified would go on reading correctly by accident and prove nothing.
+   */
+  installDeployment({
+    authScheme: "API_KEY",
+    checkable: true,
+    composioConfigured: true,
+    confirms: true,
+    fields: [PERPLEXITY_KEY],
+    recorded: true,
+    verified: true,
+    verifiedAt: CHECKED_AT,
+    probe: PROBE,
+    // The check runs, the vendor says no, and the route answers 400 over a row it has just rewritten.
+    recheckAnswer: { verified: false, verifiedAt: null, probe: PROBE },
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  expect(
+    await view.findByText(
+      new RegExp(`last checked ${asDay(CHECKED_AT)}`.replace(/\//g, "\\/")),
+    ),
+  ).toBeTruthy();
+
+  await userEvent.click(view.getByRole("button", { name: "Re-check" }));
+
+  // Composio's own words, which is the half that was never in doubt.
+  await waitFor(() => expect(view.queryByText(REFUSED_RECHECK)).toBeTruthy());
+
+  // And the row, which is the half that was.
+  await waitFor(() =>
+    expect(
+      view.queryByText(/was checked against Gmail and rejected/),
+    ).toBeTruthy(),
+  );
+  expect(view.queryByText(/last checked/)).toBeNull();
+  // Still theirs to press again, because the key is what is wrong and it is fixable at the vendor.
+  expect(view.getByRole("button", { name: "Re-check" })).toBeTruthy();
+});
+
+test("a key refused with its account left standing stops offering Connect", async () => {
+  /*
+   * THE SAME DEFECT ON THE OTHER WRITE, WHERE WHAT IS STALE IS THE BUTTON RATHER THAN A DATE.
+   *
+   * CRITERION. A submission the server refuses AFTER recording the connection leaves a row that
+   * offers Disconnect, because there is now something to disconnect.
+   *
+   * REASON. `connectBrokeredWithFields` probes the key it was just handed, and where the probe
+   * fails it tries to withdraw the account it made. Where Composio will not take that account back,
+   * the store writes the connection anyway — unverified, carrying the action it spent — so that a
+   * live grant on somebody's mailbox is not left with nothing on any screen able to name it. Then it
+   * raises, and the sentence it raises with says "Disconnect it on the Plugins page".
+   *
+   * WHICH IS AN INSTRUCTION THE PAGE MADE IMPOSSIBLE TO FOLLOW. Refetching only on success left both
+   * screens reading the connections list they held before the press: no connection, so no Disconnect
+   * button, so the one act the refusal names is not on the page the refusal names. What was offered
+   * instead was Connect — for an app this person now has a live account at, where a second press is
+   * the 409 that says they already have one.
+   */
+  installDeployment({
+    authScheme: "API_KEY",
+    checkable: true,
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY],
+    recorded: false,
+    rejectsAndKeeps: STRANDED,
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  await userEvent.click(await view.findByRole("button", { name: "Connect" }));
+  const dialog = await view.findByRole("dialog");
+  await userEvent.type(await view.findByLabelText("API Key"), "pplx-mistyped");
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "Connect" }),
+  );
+
+  // In the dialog and in the banner both, which the press above already has its own test for.
+  await waitFor(() =>
+    expect(view.queryAllByText(STRANDED).length).toBeGreaterThan(0),
+  );
+
+  // The act the sentence names, on the page the sentence names.
+  await waitFor(() =>
+    expect(view.queryByRole("button", { name: "Disconnect" })).toBeTruthy(),
+  );
+  // And never the press that would only be refused again for an account that already exists.
+  expect(view.queryByRole("button", { name: "Connect" })).toBeNull();
+  // The row says which of the three states it is in, too: the key was tried and refused.
+  expect(
+    view.queryByText(/was checked against Gmail and rejected/),
   ).toBeTruthy();
 });
 

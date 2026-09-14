@@ -58,6 +58,36 @@ const FALLBACK = "That did not work.";
  *
  * Exported because a bulk grant has to say when: N of these in a row, each awaiting its own
  * refetch, is a dialog that spends most of a batch re-reading a list nobody has looked at yet.
+ *
+ * ON `onSettled` AND NEVER ON `onSuccess`, ON EVERY WRITE BELOW, AND IT IS ONE FACT ABOUT THE SERVER
+ * RATHER THAN A PREFERENCE. NOT ONE OF THESE ENDPOINTS IS ATOMIC. Every one of them writes something
+ * durable and then does something else that can fail, so a refusal is not evidence that nothing
+ * changed — it is very often the opposite, and the write it leaves behind is exactly the one the
+ * screen is drawing.
+ *
+ * THE SHAPE, IN THE SERVER'S OWN WORDS. `POST /servers` inserts the row and then refreshes the
+ * server's tools, answering 409 when that refresh faults over a row that is now there.
+ * `POST /composio/apps` creates the authorization config at Composio, writes the row, and says so in
+ * its own 409. `POST /grants`, `DELETE /grants`, `POST /skills` and `DELETE /skills/:slug` each
+ * commit and then file the trail row, and a failing audit insert is a 500 over a change that
+ * happened. `DELETE /servers/:id/connection` revokes the account at the vendor before it deletes
+ * anything here. And the two brokered writes the screens draw hardest on raise from inside the
+ * store AFTER recording what they found: `recheckBrokeredConnection` writes the verdict and the
+ * action it spent and then raises with Composio's refusal, and `connectBrokeredWithFields` records
+ * the account it could not withdraw and then raises with a sentence telling the person to disconnect
+ * it — on a page that, refetching only on success, went on offering them Connect.
+ *
+ * WHAT `onSuccess` COST, PRECISELY. It made the browser's copy of the deployment diverge on exactly
+ * the presses where a person is reading hardest: a banner carrying the server's refusal, over a row
+ * still drawn from the state before the request. Two readings of one screen in one paint, and the
+ * stale one is always the reassuring one. `onSettled` runs on both outcomes, so the screen is drawn
+ * from what the deployment holds NOW rather than from what the press was hoping for — which costs a
+ * refused write one refetch and is the only rule under which the row and the banner can agree.
+ *
+ * THE ONE WRITE-SHAPED PRESS THIS DOES NOT APPLY TO is {@link brokeredConnectionFieldsMutationOptions},
+ * which asks what an app wants typed in. That is a question about the app rather than about
+ * anybody's account, it writes nothing on either outcome, and it takes no `QueryClient` at all — so
+ * the exemption is structural rather than a decision this comment has to be trusted about.
  */
 export function invalidatePlugins(queryClient: QueryClient) {
   return queryClient.invalidateQueries({ queryKey: pluginKeys.all });
@@ -110,7 +140,7 @@ export function setPluginGrantMutationOptions(queryClient: QueryClient) {
         { method: "DELETE", fallback: "That Agent could not be changed." },
       );
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -123,7 +153,7 @@ export function addCuratedServerMutationOptions(queryClient: QueryClient) {
         fallback: FALLBACK,
       });
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -136,7 +166,7 @@ export function addCustomServerMutationOptions(queryClient: QueryClient) {
         fallback: FALLBACK,
       });
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -155,7 +185,7 @@ export function enableComposioAppMutationOptions(queryClient: QueryClient) {
         fallback: "That app could not be added.",
       });
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -169,7 +199,7 @@ export function refreshPluginServerMutationOptions(queryClient: QueryClient) {
         fallback: FALLBACK,
       });
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -181,7 +211,7 @@ export function removePluginServerMutationOptions(queryClient: QueryClient) {
         fallback: FALLBACK,
       });
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -203,7 +233,7 @@ export function saveSkillMutationOptions(queryClient: QueryClient) {
          */
         fallback: "The skill could not be saved.",
       }),
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -237,7 +267,7 @@ export function registerOAuthClientMutationOptions(queryClient: QueryClient) {
         },
       );
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -337,7 +367,7 @@ export function confirmBrokeredConnectionMutationOptions(
       );
       return response.json();
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -359,7 +389,7 @@ export function disconnectBrokeredMutationOptions(queryClient: QueryClient) {
         },
       );
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -371,7 +401,7 @@ export function removeSkillMutationOptions(queryClient: QueryClient) {
         fallback: FALLBACK,
       });
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -489,7 +519,7 @@ export function connectBrokeredWithFieldsMutationOptions(
         variables.values = {};
       }
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }
 
@@ -536,6 +566,6 @@ export function recheckBrokeredConnectionMutationOptions(
       );
       return response.json();
     },
-    onSuccess: () => invalidatePlugins(queryClient),
+    onSettled: () => invalidatePlugins(queryClient),
   });
 }

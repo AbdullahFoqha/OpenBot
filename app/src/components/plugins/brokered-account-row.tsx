@@ -187,6 +187,22 @@ export type BrokeredAccount = {
   /** Ask the app what it needs, which is the first press on a `fields` app. */
   requestFields: () => void;
   /**
+   * Why the app could not be asked what it needs, or null.
+   *
+   * THE TWIN OF {@link submissionError}, ON THE PRESS BEFORE IT AND FOR ITS EXACT REASON. This press
+   * is what OPENS the modal, so its refusal always lands with the dialog already up and the screen's
+   * banner already behind the backdrop — the one arrangement in which a sentence reported to the
+   * screen reaches nobody at all.
+   *
+   * AND THERE IS NO GENERIC LINE THAT COULD STAND IN FOR IT. The route refuses this press four ways
+   * and the four name four different remedies: an app that needs no account, so there is nothing to
+   * connect and nothing is wrong; an account this person already holds, which has to be disconnected
+   * before another can be made; a directory Composio would not answer with; and a deployment with no
+   * broker key at all, which is an administrator's to set. A dialog saying "that app could not be
+   * asked what it needs" is true of all four and useful about none.
+   */
+  fieldsError: string | null;
+  /**
    * Finish the connection with what the person typed.
    *
    * The values are handed straight to the request and held nowhere else: they are somebody's own
@@ -383,19 +399,47 @@ export function useBrokeredAccount(input: {
   });
 
   /*
-   * The mutation's own `onSuccess` is called rather than replaced: it is what invalidates every
-   * plugin query, and spreading these options and then declaring a second `onSuccess` would quietly
-   * drop it, leaving the recorded row on screen as stale as the confirmed answer.
+   * The two held answers, dropped whenever an act has been MADE against this account — which is not
+   * the same event as an act that succeeded.
+   *
+   * THE REFETCH ALONE CANNOT DO THIS, and that is why it is a function rather than a line in a
+   * callback. `confirmation.data` and `recheck.data` are mutation state: invalidating the plugin
+   * queries refetches the recorded row and leaves both of them exactly where they were, and they
+   * both win over the row by design — an answer from the vendor beats our own record. So a write
+   * that changed the account at Composio while these still hold what it said BEFORE leaves the row
+   * drawn from a stale answer over a freshly-correct read, which is the same defect the refetch
+   * fixes, one layer up and immune to it.
+   *
+   * ON BOTH OUTCOMES, FOR THE REASON `invalidatePlugins` SPELLS OUT: none of these endpoints is
+   * atomic, so a refusal is not evidence that the account is as it was. A submission refused because
+   * Composio would not take back the account it had just made is precisely a held "not connected"
+   * answer that has stopped being true, and a disconnect that revoked at the vendor and then failed
+   * is the same thing in the other direction.
    */
-  const disconnectOptions = disconnectBrokeredMutationOptions(queryClient);
+  const forgetAnswers = () => {
+    forgetConfirmation();
+    forgetRecheck();
+  };
+
+  /*
+   * The refetch is the mutation's own and is NOT declared here, which is what the `onSettled` on it
+   * buys this file.
+   *
+   * IT USED TO BE AN `onSuccess` AND THIS SPREAD HAD TO CHAIN IT BY HAND — `disconnectOptions
+   * .onSuccess?.(...args)` at the end of a second `onSuccess`, because declaring one over a spread
+   * silently replaces it. That is a refetch one careless edit away from being dropped, and it only
+   * ever ran on the outcome that needed it least. `onSettled` sits in a different slot from both
+   * callbacks below, so what this component declares cannot shadow it and cannot forget to call it —
+   * which is also why the forgetting above is spelled into both of them rather than into a third
+   * `onSettled` here, where it WOULD shadow the refetch.
+   */
   const disconnect = useMutation({
-    ...disconnectOptions,
-    onError: (thrown: Error) => report(thrown.message),
-    onSuccess: (...args) => {
-      forgetConfirmation();
-      forgetRecheck();
-      return disconnectOptions.onSuccess?.(...args);
+    ...disconnectBrokeredMutationOptions(queryClient),
+    onError: (thrown: Error) => {
+      report(thrown.message);
+      forgetAnswers();
     },
+    onSuccess: forgetAnswers,
   });
 
   /*
@@ -411,23 +455,28 @@ export function useBrokeredAccount(input: {
   });
 
   /*
-   * The second press, with the values on it. Its `onSuccess` is called rather than replaced, for
-   * the reason the disconnect above gives: that is what refetches the recorded row.
+   * The second press, with the values on it. The refetch rides on the mutation's own `onSettled`,
+   * for the reason the disconnect above gives.
    *
    * The confirmed answer is dropped here too. A row that connects this way arrived with a "not
    * connected" answer from the mount, and nothing about typing a key changes the dependencies of
    * the effect that asked — so without this the account would go on reading as not connected
    * however well the vendor accepted it.
+   *
+   * AND ON THE REFUSAL AS WELL, WHICH IS THE STATE THAT MADE THAT ANSWER DANGEROUS RATHER THAN
+   * MERELY STALE. Where the probe fails and Composio will not take back the account this press just
+   * made, the store RECORDS the connection — unverified, naming the action it spent — and then
+   * raises, telling the person to disconnect it. Keeping the mount's "not connected" answer over
+   * that leaves the row offering Connect for an app they now have a live account at, which is the
+   * one press guaranteed to be refused, and withholds the Disconnect button the sentence names.
    */
-  const submitOptions = connectBrokeredWithFieldsMutationOptions(queryClient);
   const submission = useMutation({
-    ...submitOptions,
-    onError: (thrown: Error) => report(thrown.message),
-    onSuccess: (...args) => {
-      forgetConfirmation();
-      forgetRecheck();
-      return submitOptions.onSuccess?.(...args);
+    ...connectBrokeredWithFieldsMutationOptions(queryClient),
+    onError: (thrown: Error) => {
+      report(thrown.message);
+      forgetAnswers();
     },
+    onSuccess: forgetAnswers,
   });
 
   /*
@@ -527,6 +576,7 @@ export function useBrokeredAccount(input: {
       fieldsRequest.mutate(serverId);
     },
     requestingFields: fieldsRequest.isPending,
+    fieldsError: fieldsRequest.error?.message ?? null,
     submitFields: (values: Record<string, string>) => {
       report(null);
       submission.mutate({ serverId, values });
@@ -873,11 +923,37 @@ export function BrokeredAccountRow({
                 fields={account.fields}
                 onSubmit={account.submitFields}
               />
-            ) : (
+            ) : account.requestingFields ? (
               <p className="text-muted-foreground text-sm">
-                {account.requestingFields
-                  ? "Asking the app what it needs…"
-                  : "That app could not be asked what it needs. Close this and try again."}
+                Asking the app what it needs…
+              </p>
+            ) : account.fieldsError ? (
+              /*
+               * THE REFUSAL WHERE THE PERSON IS LOOKING, AND IT IS THE SERVER'S OWN SENTENCE.
+               *
+               * THE SAME DEFECT AS THE SUBMISSION REFUSAL BELOW, ON THE PRESS THAT OPENS THIS
+               * DIALOG. It reaches the screen's banner too, and that banner is behind this dialog's
+               * backdrop — so the four things the route can say here, each naming a different thing
+               * to do, all arrived where nobody could read them, and what stood in their place was
+               * the line below: true of every one of them and actionable about none. "This app needs
+               * no account" and "you already have one, disconnect it first" are not "try again".
+               *
+               * `role="alert"` and the destructive colour for the reason the submission refusal has
+               * them: this is the server refusing, not the dialog waiting.
+               */
+              <p className="text-destructive text-sm" role="alert">
+                {account.fieldsError}
+              </p>
+            ) : (
+              /*
+               * AND THE LINE FOR A PRESS THAT ANSWERED NOTHING AT ALL, which is what is left once
+               * the sentence above has its own branch: no fields, no request in flight and no
+               * refusal — the route answered 200 with no `fields` on it, which is the drift between
+               * this screen's copy of the typed-scheme list and the server's, seen from this side.
+               */
+              <p className="text-muted-foreground text-sm">
+                That app could not be asked what it needs. Close this and try
+                again.
               </p>
             )}
             {/*

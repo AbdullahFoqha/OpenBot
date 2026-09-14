@@ -88,22 +88,39 @@ test("granting one on its own still carries its refetch", async () => {
   const { queryClient, invalidated } = invalidationRecorder();
   const options = setPluginGrantMutationOptions(queryClient);
 
-  await options.mutationFn?.({
-    agentId: "agent-1",
-    granted: true,
-    kind: "mcp",
-    ref: "notion/search",
-  });
-  await options.onSuccess?.(
-    undefined as never,
+  await options.mutationFn?.(
     {
       agentId: "agent-1",
       granted: true,
       kind: "mcp",
       ref: "notion/search",
     },
-    undefined as never,
-    undefined as never,
+    /*
+     * The context react-query hands every `mutationFn`, which this one does not read. Passed because
+     * `app/tests` sits outside `app/tsconfig.json` and `bun test` does not typecheck, so a call
+     * written to the wrong arity is a green test against a signature that does not exist.
+     */
+    { client: queryClient, meta: undefined },
+  );
+  /*
+   * ON SETTLE RATHER THAN ON SUCCESS, which is where this refetch lives now and why this call
+   * changed. `POST /api/plugins/grants` upserts the grant and then files the trail row, with no
+   * catch over either, so a refusal from it is not evidence that the grant did not land — see
+   * `invalidatePlugins`, which makes the argument for the whole surface. `onSettled` is the one slot
+   * that runs on both outcomes; `plugin-mutation-refresh.test.ts` is where the refused half is
+   * pinned, for this write and the thirteen that share its shape.
+   */
+  await options.onSettled?.(
+    undefined,
+    null,
+    {
+      agentId: "agent-1",
+      granted: true,
+      kind: "mcp",
+      ref: "notion/search",
+    },
+    undefined,
+    { client: queryClient, meta: undefined },
   );
 
   expect(seen).toHaveLength(1);
