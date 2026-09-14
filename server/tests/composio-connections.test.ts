@@ -2293,6 +2293,9 @@ test("a confirm does not redate a key the last check verified", async () => {
 
   // One probe, spent by the connect, and nothing since.
   expect(reached).toEqual([probeAction]);
+});
+
+/**
  * ONE CONNECTION IS ONE LISTED ROW, EVEN WHERE TWO SERVER ROWS NAME THE APP.
  *
  * CRITERION. With two `mcp_servers` rows at one app's url and one person connected to that app,
@@ -2340,6 +2343,14 @@ test("a connection is listed once where two server rows name its app", async () 
  * in a sentence about a sign-in screen they never saw, telling them to disconnect and reconnect an
  * account that is working. The same lower-id rule the listing uses is what makes the three of them
  * agree with it and with each other.
+ *
+ * AND THE PROBE IS THE SAME READ, WHICH IS WHY THE ACTION IS ASSERTED BESIDE THE FLAG.
+ * `probeBrokeredConnection` resolves the app by its url too — to an ID rather than to a scheme, so
+ * that a probe cannot be chosen off another app's action list and spent on this key. Unordered, that
+ * read answered the row physically first, which here publishes no action at all: the re-check then
+ * reported `probe: null`, wrote nothing, and left the untouched `verified: false` standing — the
+ * `checkable`/`probe` deadlock, reached through a duplicate row instead of a composed id. So
+ * `probe` naming the action is what says the scheme and the action came off ONE row.
  */
 test("a re-check reads the app's scheme off the same row the listing names it by", async () => {
   useAnsweringClient();
@@ -2363,6 +2374,60 @@ test("a re-check reads the app's scheme off the same row the listing names it by
 
   expect(answer.verified).toBe(true);
   expect(answer.probe).toBe(probeAction);
+});
+
+/**
+ * AND SO DOES THE CONFIRM, WHERE THE SCHEME DECIDES WHETHER IT MAY WRITE AT ALL.
+ *
+ * CRITERION. With the same two rows at the probed app's url, a confirm against a key connection
+ * checked in August leaves that August date standing.
+ *
+ * REASON. `confirmBrokeredConnection` branches on the app's scheme for a reason no other caller
+ * shares: on a KEY connection the vendor's yes is not a check — Composio accepts a key without ever
+ * trying it — so the confirm writes nothing and the date a real probe earned survives, while on a
+ * CONSENT connection that yes IS the check and is written and dated. Read off the wrong row the
+ * branch inverts: this key connection is taken for a consent one, and a page load stamps today over
+ * the date of the last call anybody actually made. Every key connection in the deployment would then
+ * claim it was last checked on whatever day its owner last opened the page. The date is asserted
+ * rather than the flag because both readings leave the row saying `verified: true` — the damage here
+ * is quiet, and only `verified_at` records it.
+ */
+test("a confirm reads the app's scheme off the same row the listing names it by", async () => {
+  useAnsweringClient();
+  // The same pair, ordered the same way. See {@link schemeTwinId}.
+  await database.insert(mcpServers).values({
+    id: schemeTwinId,
+    title: "Probed App, as it was recorded before",
+    vendor: "Composio",
+    url: `composio://${probedToolkit}`,
+    provenance: "composio",
+    authScheme: "OAUTH2",
+  });
+  await addProbedApp();
+  const checked = new Date("2026-08-30T09:00:00.000Z");
+  await holdProbedApp(checked);
+
+  expect(
+    await store.confirmBrokeredConnection({
+      toolkit: probedToolkit,
+      userId: askerId,
+    }),
+  ).toEqual({ connected: true });
+
+  const [after] = await database
+    .select()
+    .from(composioConnections)
+    .where(
+      and(
+        eq(composioConnections.toolkit, probedToolkit),
+        eq(composioConnections.userId, askerId),
+      ),
+    );
+  expect(after.verified).toBe(true);
+  expect(after.verifiedAt?.toISOString()).toBe(checked.toISOString());
+  // And nothing of the app's was called to arrive at that: a confirm asks the vendor, it does not
+  // spend the key.
+  expect(reached).toEqual([]);
 });
 
 /**

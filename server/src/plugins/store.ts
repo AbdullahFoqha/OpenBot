@@ -2258,36 +2258,51 @@ export function createPluginStore(options: PluginStoreOptions) {
   }
 
   /**
-   * The scheme recorded for the app one url names, out of the one row that answers for that app.
+   * The one `mcp_servers` row that answers for the app a url names: its id, and its scheme.
    *
    * KEYED ON THE URL, which is where a brokered row records which app it is; `mcp_servers.id` is a
    * display name and nothing holds the two equal. A row called `gmail` at `composio://slack` would
-   * have somebody's Slack key attached to a scheme read off Gmail's row, which is the stake all
-   * three callers share — {@link connectBrokeredWithFields}, {@link recheckBrokeredConnection} and
-   * {@link disconnectBrokered}.
+   * have somebody's Slack key attached to a scheme read off Gmail's row — and, through the id this
+   * also answers, a probe chosen off Gmail's action list and spent on their Slack key. That stake is
+   * shared by every caller: {@link connectBrokeredWithFields}, {@link recheckBrokeredConnection},
+   * {@link confirmBrokeredConnection} and {@link disconnectBrokered} read the scheme,
+   * {@link probeBrokeredConnection} reads the id.
    *
    * AND ORDERED, BECAUSE THE URL IS NOT A KEY. `mcp_servers.url` has no unique index behind it, so
    * two rows may name one app and `limit(1)` over them is the planner's choice rather than an
-   * answer. Each of the three used to take it unordered and separately: the same person, the same
-   * app, and three readings free to disagree with each other and with themselves between two page
-   * loads. What that costs is a live key connection refused in words about a sign-in screen nobody
-   * used — "connect it the way it asks for", over an app connected exactly the way it asked.
+   * answer. Each caller used to take it unordered and separately: the same person, the same app, and
+   * five readings free to disagree with each other and with themselves between two page loads. What
+   * that costs is a live key connection refused in words about a sign-in screen nobody used —
+   * "connect it the way it asks for", over an app connected exactly the way it asked — and, on the
+   * id, a Re-check the listing offers off the app's own row whose press resolves to the OTHER row,
+   * finds no action published there and reports that nothing could be tried: the `checkable`/`probe`
+   * deadlock, reached through the duplicate rather than through a composed id.
    *
-   * The lower id answers, which is the rule {@link brokeredConnectionsFor} names the app by, so the
-   * row the page shows an app under is the row these three read its scheme off.
+   * SO THE READ IS ONE FUNCTION AND NOT A RULE EACH CALLER REPEATS. The lower id answers, which is
+   * the rule {@link brokeredConnectionsFor} names the app by, so the row the page shows an app under
+   * is the row every one of these reads off — and a sixth caller cannot re-derive the choice
+   * differently, because there is nothing here to re-derive.
    *
    * NULL FOR AN APP WITH NO ROW AT ALL, and that is an answer rather than a gap: a person can hold
    * an account at an app this deployment has since removed, nothing names the scheme it was
-   * connected under any more, and every caller treats the null as "not an app we hold a key for".
+   * connected under any more, and every caller treats the null as "not an app we hold a key for" —
+   * or, for the probe, as "there is no app left to check".
    */
-  async function brokeredAppScheme(toolkit: string): Promise<string | null> {
+  async function brokeredAppRow(
+    toolkit: string,
+  ): Promise<{ id: string; authScheme: string | null } | null> {
     const [app] = await database
-      .select({ authScheme: mcpServers.authScheme })
+      .select({ id: mcpServers.id, authScheme: mcpServers.authScheme })
       .from(mcpServers)
       .where(eq(mcpServers.url, `composio://${toolkit}`))
       .orderBy(asc(mcpServers.id))
       .limit(1);
-    return app?.authScheme ?? null;
+    return app ?? null;
+  }
+
+  /** {@link brokeredAppRow}'s scheme, for the four callers that ask only what the app is connected with. */
+  async function brokeredAppScheme(toolkit: string): Promise<string | null> {
+    return (await brokeredAppRow(toolkit))?.authScheme ?? null;
   }
 
   return {
@@ -4715,11 +4730,12 @@ export function createPluginStore(options: PluginStoreOptions) {
        * listing answered by asking the chooser too. It no longer does: what a page says about a
        * check is what the check recorded, and what it recorded is the name this method returns.
        *
-       * AND THE APP IS RESOLVED BY ITS URL, THE WAY EVERY OTHER BROKERED LOOKUP HERE IS. The url is
-       * where a brokered row records which app it is; `mcp_servers.id` is a display name and
-       * nothing holds the two equal — which is exactly why {@link connectBrokeredWithFields}, {@link
+       * AND THE APP IS RESOLVED BY ITS URL, THE WAY EVERY OTHER BROKERED LOOKUP HERE IS — through
+       * {@link brokeredAppRow}, which is the one read that decides it. The url is where a brokered
+       * row records which app it is; `mcp_servers.id` is a display name and nothing holds the two
+       * equal — which is exactly why {@link connectBrokeredWithFields}, {@link
        * recheckBrokeredConnection} and {@link disconnectBrokered} all key on the url, and why {@link
-       * brokeredConnectionsFor} JOINS on it rather than spelling `composio-${toolkit}` by hand.
+       * brokeredConnectionsFor} resolves on it rather than spelling `composio-${toolkit}` by hand.
        * Composing it here made this method the one place that re-derived the id from a convention,
        * and it put the two halves of the `checkable`/`probe` split back into disagreement on any
        * row where they differ: the listing answered `checkable` off the app's real row while this
@@ -4729,12 +4745,17 @@ export function createPluginStore(options: PluginStoreOptions) {
        * at `composio://slack` would have this choose a stranger's probe off another app's listing
        * and spend their key on it. A row this deployment has since removed drops out here as null,
        * which is the same honest answer the listing gives for it: there is no app left to check.
+       *
+       * AND THE SHARED READ RATHER THAN A URL QUERY OF ITS OWN, because `mcp_servers.url` has no
+       * unique index and an unordered `limit(1)` over it is not an answer. A second row at the app's
+       * url — the ordinary state of any database where a fixture sits beside the `composio-` row an
+       * administrator really added — had this resolve to whichever row the scan met first while the
+       * listing named the app by the lower id, which is the SAME deadlock one step along: Re-check
+       * offered off the app's own row, and the press landing on a row that publishes no action and
+       * reporting there was nothing to try. One function decides which row answers for an app, so
+       * nothing here can name one row while something else names another.
        */
-      const [app] = await database
-        .select({ id: mcpServers.id })
-        .from(mcpServers)
-        .where(eq(mcpServers.url, `composio://${input.toolkit}`))
-        .limit(1);
+      const app = await brokeredAppRow(input.toolkit);
 
       const candidate = app ? await this.probeActionFor(app.id) : null;
       if (candidate === null) {
@@ -4868,19 +4889,15 @@ export function createPluginStore(options: PluginStoreOptions) {
       /*
        * THE SCHEME ON THE APP'S ROW, WHICH IS WHAT DECIDES WHETHER THE YES ABOVE IS A CHECK.
        *
-       * Keyed on the url, for the reason {@link connectBrokeredWithFields} and {@link
-       * recheckBrokeredConnection} both key their copy of this lookup on it: `mcp_servers.id` is a
-       * display name and nothing holds the two equal, so a row called `gmail` at `composio://slack`
-       * would decide a Slack confirm on Gmail's scheme. Asked through {@link isFieldScheme} rather
-       * than compared as a string, so the schemes this branches on cannot drift from the schemes
-       * that have a key behind them.
+       * Keyed on the url and on the one row that answers for it — see {@link brokeredAppRow} — which
+       * is the read {@link connectBrokeredWithFields} and {@link recheckBrokeredConnection} both
+       * make: `mcp_servers.id` is a display name and nothing holds the two equal, so a row called
+       * `gmail` at `composio://slack` would decide a Slack confirm on Gmail's scheme, and a second
+       * row at the app's own url would have this confirm branch on a scheme the re-check beside it
+       * disagrees with. Asked through {@link isFieldScheme} rather than compared as a string, so the
+       * schemes this branches on cannot drift from the schemes that have a key behind them.
        */
-      const [app] = await database
-        .select({ authScheme: mcpServers.authScheme })
-        .from(mcpServers)
-        .where(eq(mcpServers.url, `composio://${input.toolkit}`))
-        .limit(1);
-      const holdsKey = isFieldScheme(app?.authScheme ?? null);
+      const holdsKey = isFieldScheme(await brokeredAppScheme(input.toolkit));
 
       if (!holdsKey) {
         // VERIFIED, BECAUSE A CONSENT SCREEN IS A VERIFICATION AND NOT A LESSER KIND OF ONE. The
