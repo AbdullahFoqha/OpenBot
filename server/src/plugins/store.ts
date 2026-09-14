@@ -20,6 +20,11 @@ import {
 } from "../credentials";
 import type { Database } from "../db/client";
 import {
+  databaseComplaint,
+  isQueryFailure,
+  withoutStatement,
+} from "../db/query-failure";
+import {
   agentProfiles,
   agents,
   composioConnections,
@@ -434,72 +439,6 @@ function storableSchema(
   schema: Record<string, unknown>,
 ): Record<string, unknown> {
   return withoutNul(schema, new Set()) as Record<string, unknown>;
-}
-
-/**
- * Whether a throw is a query failure carrying the statement and the values bound to it.
- *
- * CRITERION. Anything this answers true for has a message that must never be relayed — not to a
- * model, not to a browser, not into a column an operator reads.
- *
- * REASON. drizzle wraps every failure as a `DrizzleQueryError` and puts `Failed query: <the whole
- * statement>` and `params: <every bound value>` in its `message`. Along the tool-call path those
- * values are credential ids, user ids and server ids; along the refresh path they are the vendor's
- * entire tool list.
- *
- * BY SHAPE, NOT BY CLASS, and that is the one place this file departs from its own "tell them apart
- * by a class, never by prose" rule. The class is drizzle's, reachable only through a deep import
- * that is not part of its published surface, so an `instanceof` here would pin this deployment to
- * an internal path a minor release may move. `query` and `params` as own properties on an `Error`
- * is not prose — it is the shape the constructor assigns, it is what makes the message dangerous,
- * and anything else carrying both fields is a query failure too.
- */
-function isQueryFailure(
-  error: unknown,
-): error is Error & { query: unknown; params: unknown } {
-  return (
-    error instanceof Error &&
-    Object.hasOwn(error, "query") &&
-    Object.hasOwn(error, "params")
-  );
-}
-
-/**
- * As much of a failure as may be shown to whoever is entitled to see it.
- *
- * CRITERION. Every place that copies a message out of a caught error asks this instead of reading
- * `.message`. What comes back never contains a statement or a bound value.
- *
- * REASON. The message is the useful thing for a vendor's refusal, a person's missing connection or
- * an invariant of ours — that is why those paths quote it, and they should go on quoting it. It is
- * the wrong thing for exactly one kind of error, and that kind announces itself by shape. Asking
- * here rather than at each site means a new audience cannot be added without the question already
- * answered for it.
- */
-function withoutStatement(error: Error): string {
-  return isQueryFailure(error) ? databaseComplaint(error) : error.message;
-}
-
-/**
- * The driver's own complaint about a query, without the query.
- *
- * CRITERION. What this returns never contains the statement or the values bound to it.
- *
- * REASON. drizzle's `DrizzleQueryError` puts both in its own `message` and hangs the driver's
- * error off `cause`. The driver's message is the useful half — `duplicate key value violates
- * unique constraint`, `invalid byte sequence`, `canceling statement due to statement timeout` —
- * and it is the half that names nothing anybody sent. An error shaped differently gets a fixed
- * sentence rather than its own message, because the reason this exists is that a message from an
- * unexamined shape is exactly what leaked the last one.
- *
- * Capped where every other quoted failure in this file is capped, for the same reason: parts of
- * it come from somewhere else and none of it is a promise about length.
- */
-function databaseComplaint(error: unknown): string {
-  const cause = error instanceof Error ? error.cause : undefined;
-  return cause instanceof Error
-    ? cause.message.slice(0, 400)
-    : "The database gave no reason this deployment can quote.";
 }
 
 /**

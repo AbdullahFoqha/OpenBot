@@ -1,6 +1,7 @@
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { type AuditStore, recordAuditEvent } from "./audit";
 import type { Database } from "./db/client";
+import { reasonWithoutStatement } from "./db/query-failure";
 import { type credentialKind, credentials } from "./db/schema";
 
 type CredentialEnvelope = {
@@ -589,8 +590,18 @@ export async function rotateCredential(
      * and each of them left nothing behind while only successes were recorded.
      *
      * Written outside the transaction that has just rolled back, so the row survives the failure it
-     * describes. The reason is the vault's own message and never the secret, which never left this
-     * function.
+     * describes.
+     *
+     * THE REASON IS ASKED FOR THROUGH {@link reasonWithoutStatement}, and the sentence this comment
+     * used to carry — "the vault's own message and never the secret, which never left this
+     * function" — was false. Not every throw caught here is the vault's own: the rotation runs
+     * three statements, and a `DrizzleQueryError` from any of them has `Failed query: <the
+     * statement>` and `params: <every bound value>` for a message. The insert binds
+     * `encryptedValue`, so the values in that message include the credential envelope this function
+     * had just built — and `audit_events` is append-only by trigger, exported, and kept for the
+     * deployment's whole retention window, so a secret landing there is not one anybody can take
+     * back out. A refusal the vault itself wrote still arrives here word for word; only the shape
+     * that carries a statement is answered with the driver's complaint instead.
      */
     await recordAuditEvent(service.auditStore, {
       eventType: "credential.rotation_refused",
@@ -601,7 +612,7 @@ export async function rotateCredential(
         kind: input.kind,
         provider: input.provider,
         keyId: input.keyId,
-        reason: error instanceof Error ? error.message : String(error),
+        reason: reasonWithoutStatement(error),
       },
     });
     throw error;
