@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import {
   type MutationFunctionContext,
@@ -10,6 +12,7 @@ import {
   addCustomServerMutationOptions,
   brokeredConnectionFieldsMutationOptions,
   confirmBrokeredConnectionMutationOptions,
+  connectAccountMutationOptions,
   connectBrokeredWithFieldsMutationOptions,
   disconnectBrokeredMutationOptions,
   enableComposioAppMutationOptions,
@@ -395,4 +398,213 @@ test("every mutation factory `mutations.ts` exports is answered for by this file
       ...Object.keys(NOT_A_MUTATION_FACTORY),
     ].sort(),
   ).toEqual(unclaimed);
+});
+
+/**
+ * WHAT THESE WRITES PUT IN A URL, AND WHOSE TEXT IT IS.
+ *
+ * NONE OF THESE IDS IS THIS APP'S TO CHOOSE. A server id is whatever an administrator typed when
+ * they added a server by URL, a skill slug is whatever somebody named a skill, and a brokered id is
+ * Composio's own app slug. Interpolated raw, a `/` in one of them adds a path segment — so a
+ * refresh of a server called `a/../b` is a POST to a route nobody meant, resolved by the URL parser
+ * before any handler is reached — and a `?` turns the rest of the id into a query string, silently
+ * truncating the id the route then looks up.
+ *
+ * REPORTED THREE TIMES AND CLASSED AS COSMETIC THREE TIMES, which is what the pair of tests below
+ * is really about. The first is the behaviour, one case per write that puts a caller's text in a
+ * URL; the second is the lever, because a roster of cases only ever covers the writes that existed
+ * when somebody wrote it — and the defect here was one new line forgetting the call its ten
+ * neighbours all make.
+ */
+
+/**
+ * An id that is all three kinds of trouble at once, so one assertion answers for each of them.
+ *
+ * `/` re-segments the path, `?` truncates it into a query, and `#` truncates it again into a
+ * fragment the server never receives. Encoded, it is one opaque segment and the route's own `:id`
+ * catches exactly it.
+ */
+const HOSTILE_ID = "acme/../gmail?returnTo=admin#x";
+
+/** The same id as a single path segment, which is what every URL below has to carry. */
+const ENCODED_ID = encodeURIComponent(HOSTILE_ID);
+
+/**
+ * Drive one mutation and report the URLs it asked for.
+ *
+ * THROUGH A REAL `MutationObserver` for {@link refetchedOnRefusal}'s reason, and answering 200 for
+ * one of its own: what is under test is the path a write builds, and a refusal would make every
+ * case below have to say something about its rejection as well.
+ */
+async function requestedBy(
+  build: (queryClient: QueryClient) => unknown,
+  variables: unknown,
+): Promise<string[]> {
+  const asked: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    asked.push(typeof input === "string" ? input : String(input));
+    return new Response("{}", {
+      headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false } },
+  });
+  const observer = new MutationObserver(
+    queryClient,
+    build(queryClient) as never,
+  );
+  await observer.mutate(variables as never).catch(() => undefined);
+  return asked;
+}
+
+/**
+ * One case per URL a caller's own text reaches, and the whole URL it has to produce.
+ *
+ * THE EXPECTATION IS THE FULL STRING rather than a `toContain`, because half of what an unencoded
+ * id does is to the REST of the path: `.../servers/acme/../gmail/refresh` contains the id and is
+ * not the route.
+ */
+const ENCODED_REQUESTS: {
+  name: string;
+  url: string;
+  build: (queryClient: QueryClient) => unknown;
+  variables: unknown;
+}[] = [
+  {
+    name: "refreshing a server's tools",
+    url: `/api/plugins/servers/${ENCODED_ID}/refresh`,
+    build: refreshPluginServerMutationOptions,
+    variables: HOSTILE_ID,
+  },
+  {
+    name: "removing a server",
+    url: `/api/plugins/servers/${ENCODED_ID}`,
+    build: removePluginServerMutationOptions,
+    variables: HOSTILE_ID,
+  },
+  {
+    name: "registering an OAuth client",
+    url: `/api/plugins/servers/${ENCODED_ID}/oauth-client`,
+    build: registerOAuthClientMutationOptions,
+    variables: { clientId: "abc", clientSecret: "shh", serverId: HOSTILE_ID },
+  },
+  {
+    name: "starting a consent flow",
+    url: `/api/plugins/servers/${ENCODED_ID}/connect?returnTo=settings`,
+    build: () => connectAccountMutationOptions(),
+    variables: HOSTILE_ID,
+  },
+  {
+    name: "confirming a brokered connection",
+    url: `/api/plugins/servers/${ENCODED_ID}/connection/confirm`,
+    build: confirmBrokeredConnectionMutationOptions,
+    variables: HOSTILE_ID,
+  },
+  {
+    name: "disconnecting a brokered account",
+    url: `/api/plugins/servers/${ENCODED_ID}/connection`,
+    build: disconnectBrokeredMutationOptions,
+    variables: HOSTILE_ID,
+  },
+  {
+    name: "asking an app what it wants typed in",
+    url: `/api/plugins/servers/${ENCODED_ID}/connect`,
+    build: () => brokeredConnectionFieldsMutationOptions(),
+    variables: HOSTILE_ID,
+  },
+  {
+    name: "handing over a typed key",
+    url: `/api/plugins/servers/${ENCODED_ID}/connect`,
+    build: connectBrokeredWithFieldsMutationOptions,
+    variables: { serverId: HOSTILE_ID, values: { api_key: "typed" } },
+  },
+  {
+    name: "re-checking a key",
+    url: `/api/plugins/servers/${ENCODED_ID}/connection/recheck`,
+    build: recheckBrokeredConnectionMutationOptions,
+    variables: HOSTILE_ID,
+  },
+  {
+    name: "removing a skill",
+    url: `/api/plugins/skills/${ENCODED_ID}`,
+    build: removeSkillMutationOptions,
+    variables: HOSTILE_ID,
+  },
+  {
+    /*
+     * The one write whose caller text goes in a QUERY rather than a path, and it takes the same
+     * care: an unencoded `&` in a ref adds a parameter the route reads as one of its own. `kind`
+     * beside it is not a caller's text — it is this module's own two-member union — which is why it
+     * is one of the two interpolations the lever below lets through.
+     */
+    name: "withholding a plugin from a Bot",
+    url: `/api/plugins/grants?kind=mcp&ref=${ENCODED_ID}&agentId=${ENCODED_ID}`,
+    build: setPluginGrantMutationOptions,
+    variables: {
+      agentId: HOSTILE_ID,
+      granted: false,
+      kind: "mcp" as const,
+      ref: HOSTILE_ID,
+    },
+  },
+];
+
+for (const request of ENCODED_REQUESTS) {
+  test(`${request.name} keeps the id in one segment, whatever is in it`, async () => {
+    expect(await requestedBy(request.build, request.variables)).toEqual([
+      request.url,
+    ]);
+  });
+}
+
+test("every id these writes interpolate into a URL goes through encodeURIComponent", () => {
+  /*
+   * THE LEVER, AND WHY THE ROSTER ABOVE IS NOT ENOUGH ON ITS OWN. A case list covers the writes
+   * that existed when it was written, and the defect it is about is a new one forgetting what its
+   * neighbours do. There is no way to enumerate from the outside every path a module MIGHT build —
+   * the roster is that attempt, and it can only ever be a list — but every interpolation the file
+   * contains can be enumerated, and that is the set this asks the question of.
+   *
+   * THE MODULE BUILDS ITS URLS NOWHERE ELSE: no base, no join helper, no concatenation. So every
+   * backticked string beginning `/api/` is the whole surface rather than a sample of it, and this
+   * assumption is itself pinned by the count below.
+   */
+  const source = readFileSync(
+    join(import.meta.dir, "../src/lib/plugins/mutations.ts"),
+    "utf8",
+  );
+  const paths = [...source.matchAll(/`(\/api\/[^`]*)`/g)].map(
+    (match) => match[1] ?? "",
+  );
+  /*
+   * AND THE ROSTER ABOVE IS THE SAME SET, COUNTED. A path with nothing interpolated into it is a
+   * plain quoted string in this module and is not matched here at all, so every path this finds
+   * carries somebody's text and has a case above naming the URL it must produce. A new interpolated
+   * path added with no case beside it fails here, which is what keeps the roster from quietly
+   * becoming a sample.
+   */
+  expect(paths.length).toBe(ENCODED_REQUESTS.length);
+
+  /*
+   * THE TWO NAMES THAT MAY GO IN RAW, AND WHY NEITHER IS A CALLER'S TEXT. `variables.kind` is
+   * `PluginKind` and `returnTo` is `"settings" | "admin"` — two closed unions this module declares
+   * itself, each narrowed again by the server before it decides anything. Anything else in this
+   * position is somebody's typed id, and there are exactly two ways for one of those to be safe:
+   * the call this test is named for, or a new entry here that somebody had to argue for.
+   */
+  const closedUnions = ["variables.kind", "returnTo"];
+
+  const raw = paths.flatMap((path) =>
+    [...path.matchAll(/\$\{([^}]*)\}/g)]
+      .map((match) => (match[1] ?? "").trim())
+      .filter(
+        (interpolation) =>
+          !interpolation.startsWith("encodeURIComponent(") &&
+          !closedUnions.includes(interpolation),
+      ),
+  );
+
+  expect(raw).toEqual([]);
 });

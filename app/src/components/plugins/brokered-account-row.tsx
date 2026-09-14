@@ -180,8 +180,12 @@ export type BrokeredAccount = {
    */
   disconnected: boolean;
   /**
-   * What the app wants typed in, once it has been asked. Null until then, and for every app nobody
-   * types anything into.
+   * What the app wants typed in, as it last answered. Null until it has answered anything, and for
+   * every app nobody types anything into.
+   *
+   * THE LAST ANSWER RATHER THAN THE PENDING REQUEST'S, which is what lets a reopened dialog draw a
+   * form at all. Asking again is a fresh mutation and a mutation clears its own `data` as it fires,
+   * so reading the request would make this null on every open — see the hook for what that cost.
    */
   fields: BrokerField[] | null;
   /** Ask the app what it needs, which is the first press on a `fields` app. */
@@ -446,13 +450,41 @@ export function useBrokeredAccount(input: {
    * The first press on an app nobody consents to: what does it want typed in?
    *
    * A question about the app rather than about anybody's account, which is why it writes nothing
-   * and refetches nothing. Its answer is the mutation's own `data` and is not held anywhere else,
-   * so leaving the screen forgets the form rather than leaving a half-filled one behind.
+   * and refetches nothing. Nothing anybody TYPES is held here — that lives in the form and in the
+   * request that carries it, and leaving the screen forgets it — and what is kept below is the
+   * vendor's published list, which is metadata about the app and nobody's secret.
    */
   const fieldsRequest = useMutation({
     ...brokeredConnectionFieldsMutationOptions(),
     onError: (thrown: Error) => report(thrown.message),
   });
+
+  /*
+   * The last list this app answered with, kept across the next time it is asked.
+   *
+   * NOT `fieldsRequest.data`, WHICH IS EMPTY AT EXACTLY THE MOMENT IT IS WANTED. A mutation clears
+   * its own `data` as it fires — `query-core` dispatches `pending` with `data: void 0` — and the
+   * press that opens this dialog is the same press that asks the app again. So the list was null on
+   * every open, the dialog drew its waiting line, and `ConnectionFields` was mounted fresh on
+   * whatever came back. That made the whole of that file's list-changed-under-the-form machinery —
+   * the previous list it keeps, and the reconcile that carries typed values onto a new one —
+   * unreachable from the product, and its docblock's account of a form "mounted on the old list and
+   * handed the new one a moment later" a description of something that could not happen.
+   *
+   * ADJUSTED DURING RENDER RATHER THAN IN AN EFFECT, which is what React asks for when state has to
+   * follow something else: the new list is drawn in this paint rather than one frame later, under
+   * somebody's cursor. The same pattern, for the same reason, as `published` in `connection-fields
+   * .tsx` — which this is what feeds.
+   *
+   * ONLY A SUCCESS WRITES HERE, AND A SUCCESS ANSWERING NOTHING CLEARS IT. `null` is a real answer
+   * from this route — the app takes no typed fields at all — so it has to be able to take the held
+   * list away, which a `??` could not. A REFUSAL leaves the list alone, because a refusal is not an
+   * answer about the app; what the dialog does about it is decided where the dialog is drawn.
+   */
+  const [published, setPublished] = useState<BrokerField[] | null>(null);
+  if (fieldsRequest.isSuccess && fieldsRequest.data !== published) {
+    setPublished(fieldsRequest.data);
+  }
 
   /*
    * The second press, with the values on it. The refetch rides on the mutation's own `onSettled`,
@@ -480,14 +512,40 @@ export function useBrokeredAccount(input: {
   });
 
   /*
-   * The freshest thing either check has said about this key, or nothing at all.
+   * The freshest thing either check has WRITTEN DOWN about this key, or nothing at all.
    *
    * Two answers name a probe — a re-check, and a key just handed over — and the newer of the two
    * wins for the reason `verified` below gives: an answer beats the record, and these two cannot
    * both be new. A submission clears the re-check's answer as it lands, and opening the form clears
    * the submission's, so whichever is present is the one that was actually last said.
+   *
+   * AND A RE-CHECK THAT SPENT NOTHING IS NOT ONE OF THEM, which is the whole of why this is a
+   * branch rather than a `??`. `recheckBrokeredConnection` answers `probe: null` on exactly one
+   * outcome — the app published nothing safe to spend the key on — and on that outcome it returns
+   * BEFORE its writer, deliberately, so that a check which could try nothing writes nothing at all.
+   * The row it read is untouched and `probe_action` still names whatever the last real check spent.
+   *
+   * SO THE TWO NULLS ARE NOT THE SAME NULL. The connections read's null is a record: the last check
+   * spent nothing. This route's null is a press: THIS check spent nothing, about a record it did
+   * not touch. Letting it through as though it were the first is a browser unwriting a verdict no
+   * request ever unwrote — the row flips from "your key was rejected and the account still stands
+   * at Composio", which names two ways out, to "accepted without being checked … that is about the
+   * app, not about your key", which is an absolution nothing established.
+   *
+   * AND THERE IS NO WAY BACK FROM IT, which is what makes it worse than a stale render. That
+   * outcome arises exactly when `probeActionFor` answers null, and the connections listing draws
+   * `checkable` from the same read — so the refetch this very press makes withdraws the Re-check
+   * button. The one control that could ask again goes with the sentence it would have corrected.
+   *
+   * A SUBMISSION'S NULL IS KEPT, and the asymmetry is the server's rather than a preference:
+   * `connectBrokeredWithFields` hands `probeAction: probe` to the writer on every path that answers
+   * at all, null included. Its null IS the new record. The one path where it writes a name and then
+   * raises never reaches here — a refusal clears both answers — so what is left is authoritative.
    */
-  const answered = recheck.data ?? submission.data;
+  const answered =
+    recheck.data && recheck.data.probe !== null
+      ? recheck.data
+      : submission.data;
 
   return {
     /*
@@ -505,21 +563,30 @@ export function useBrokeredAccount(input: {
      * `verifiedAt` is legitimately null in a fresh answer — a check that came back not verified
      * records no time — and a `??` on it would pair that answer with the time of the check before,
      * leaving the row saying a key failed as of an hour before it was asked.
+     *
+     * AND THESE TWO TAKE EVERY ANSWER, INCLUDING THE PRESS `probe` BELOW REFUSES, which is not an
+     * inconsistency between neighbouring lines but the shape of what the route answers with. On the
+     * outcome where nothing was tried, `recheckBrokeredConnection` RE-READS the row and echoes what
+     * it holds — `verified: held.verified, verifiedAt: iso(held.verifiedAt)` — so the answer carries
+     * the record on these two and is, if anything, fresher than what this render was passed. It is
+     * only `probe` that the same branch answers a press with rather than a record.
      */
     verified: recheck.data ? recheck.data.verified : verified,
     verifiedAt: recheck.data ? recheck.data.verifiedAt : verifiedAt,
     /*
-     * The name off whichever answer is newest, and THE READ'S OWN RECORD UNTIL THERE IS ONE — the
-     * same rule `connected` and `verified` follow above, and for the same reason: an answer beats
-     * the record, and a just-finished re-check must not be overruled by a read taken before it.
+     * The name off whichever answer WROTE ONE DOWN, and THE READ'S OWN RECORD OTHERWISE — nearly
+     * the rule `connected` and `verified` follow above, and narrowed at exactly one place: the
+     * answers this reads are the ones that changed the record, and `answered` above is where a
+     * press that changed nothing is dropped. See the argument there for why that is not the same
+     * question as which answer is newest.
      *
-     * BOTH SIDES OF THAT `??` ARE THE SAME KIND OF FACT, which is what makes the rule sound here.
+     * BOTH SIDES OF THIS BRANCH ARE THEREFORE THE SAME KIND OF FACT, which is what makes it sound.
      * The connections read carries what the last check SPENT, written down by that check; an answer
-     * carries what the check just made spent. A newer record of one thing replacing an older record
-     * of the same thing — so its null is the server saying that check spent nothing, exactly as an
-     * answer's null is. That is why it is passed straight through rather than flattened to
-     * undefined: undefined is the absence of any record at all, and it is what remains for a row
-     * whose read carried no such field. See {@link BrokeredAccount.probe}.
+     * that reached its writer carries what the check just made spent and wrote. A newer record of
+     * one thing replacing an older record of the same thing — so its null is the server saying that
+     * check spent nothing, exactly as the read's null is. That is why it is passed straight through
+     * rather than flattened to undefined: undefined is the absence of any record at all, and it is
+     * what remains for a row whose read carried no such field. See {@link BrokeredAccount.probe}.
      */
     probe: answered ? answered.probe : probe,
     /*
@@ -564,7 +631,7 @@ export function useBrokeredAccount(input: {
      */
     disconnected: disconnect.isSuccess,
     kind: kindOf(authScheme),
-    fields: fieldsRequest.data ?? null,
+    fields: published,
     requestFields: () => {
       report(null);
       /*
@@ -917,7 +984,35 @@ export function BrokeredAccountRow({
             <DialogTitle>Connect your account</DialogTitle>
           </DialogHeader>
           <DialogBody className="mt-4">
-            {account.fields ? (
+            {/*
+             * THE REFUSAL FIRST, AND IT IS FIRST BECAUSE THE LIST OUTLIVES THE PRESS THAT FETCHED IT.
+             *
+             * THE REFUSAL WHERE THE PERSON IS LOOKING, AND IT IS THE SERVER'S OWN SENTENCE. It
+             * reaches the screen's banner too, and that banner is behind this dialog's backdrop —
+             * so the four things the route can say here, each naming a different thing to do, all
+             * arrived where nobody could read them, and what stood in their place was the waiting
+             * line: true of every one of them and actionable about none. "This app needs no
+             * account" and "you already have one, disconnect it first" are not "try again".
+             *
+             * AND IT WOULD BE UNREACHABLE ANYWHERE BELOW THE FORM. `account.fields` is the app's
+             * LAST answer rather than this press's, so a second open that Composio refuses still
+             * has a list to draw — and a form drawn over a swallowed refusal is worse than a stale
+             * one: it invites the one act that cannot work, sending a list the app has just
+             * declined to confirm, and the 400 that comes back names a field rather than the
+             * outage. A refusal clears it from the screen instead, and the person still has the
+             * sentence that says which act ends the state.
+             *
+             * A FRESH PRESS CLEARS THIS ON ITS OWN, so it cannot outlive its own retry: firing the
+             * mutation dispatches `pending`, which sets `error: null`. That is the same fact about
+             * mutation state the held list above exists to work around, working the other way.
+             */}
+            {account.fieldsError ? (
+              // `role="alert"` and the destructive colour for the reason the submission refusal
+              // has them: this is the server refusing, not the dialog waiting.
+              <p className="text-destructive text-sm" role="alert">
+                {account.fieldsError}
+              </p>
+            ) : account.fields ? (
               <ConnectionFields
                 busy={account.submittingFields}
                 fields={account.fields}
@@ -927,29 +1022,14 @@ export function BrokeredAccountRow({
               <p className="text-muted-foreground text-sm">
                 Asking the app what it needs…
               </p>
-            ) : account.fieldsError ? (
-              /*
-               * THE REFUSAL WHERE THE PERSON IS LOOKING, AND IT IS THE SERVER'S OWN SENTENCE.
-               *
-               * THE SAME DEFECT AS THE SUBMISSION REFUSAL BELOW, ON THE PRESS THAT OPENS THIS
-               * DIALOG. It reaches the screen's banner too, and that banner is behind this dialog's
-               * backdrop — so the four things the route can say here, each naming a different thing
-               * to do, all arrived where nobody could read them, and what stood in their place was
-               * the line below: true of every one of them and actionable about none. "This app needs
-               * no account" and "you already have one, disconnect it first" are not "try again".
-               *
-               * `role="alert"` and the destructive colour for the reason the submission refusal has
-               * them: this is the server refusing, not the dialog waiting.
-               */
-              <p className="text-destructive text-sm" role="alert">
-                {account.fieldsError}
-              </p>
             ) : (
               /*
                * AND THE LINE FOR A PRESS THAT ANSWERED NOTHING AT ALL, which is what is left once
                * the sentence above has its own branch: no fields, no request in flight and no
                * refusal — the route answered 200 with no `fields` on it, which is the drift between
                * this screen's copy of the typed-scheme list and the server's, seen from this side.
+               * That answer also takes any held list away with it, which is why this is reachable
+               * on a second open and not only on a first.
                */
               <p className="text-muted-foreground text-sm">
                 That app could not be asked what it needs. Close this and try

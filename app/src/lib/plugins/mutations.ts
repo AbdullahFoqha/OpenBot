@@ -189,15 +189,25 @@ export function enableComposioAppMutationOptions(queryClient: QueryClient) {
   });
 }
 
-/** Re-read a server's tool list, which is what makes a newly-added tool appear. */
+/**
+ * Re-read a server's tool list, which is what makes a newly-added tool appear.
+ *
+ * The id is encoded, as every id in this file is. It is not this app's text: a custom server's id
+ * is whatever an administrator typed when they added it, so a `/` in one adds a path segment the
+ * URL parser resolves before any handler sees it, and a `?` truncates the id into a query. This was
+ * the one interpolation here that went in raw.
+ */
 export function refreshPluginServerMutationOptions(queryClient: QueryClient) {
   return mutationOptions({
     mutationFn: async (serverId: string) => {
-      await client(`/api/plugins/servers/${serverId}/refresh`, {
-        method: "POST",
-        body: {},
-        fallback: FALLBACK,
-      });
+      await client(
+        `/api/plugins/servers/${encodeURIComponent(serverId)}/refresh`,
+        {
+          method: "POST",
+          body: {},
+          fallback: FALLBACK,
+        },
+      );
     },
     onSettled: () => invalidatePlugins(queryClient),
   });

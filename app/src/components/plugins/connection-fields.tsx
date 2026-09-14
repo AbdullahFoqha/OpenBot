@@ -33,6 +33,15 @@ import type { BrokerField } from "@/lib/plugins/mutations";
  * retired field's name still in the values and still going up with the submission, which is the 400
  * that tells somebody their current form is not the current form.
  *
+ * AND WHAT MAKES THAT TRUE IS NAMED, BECAUSE FOR A WHILE IT WAS NOT. "It opens holding the previous
+ * answer" is a fact about `published` in `brokered-account-row.tsx` — the row keeps the last list
+ * the app ANSWERED with, rather than reading the request that is asking again. Read off the request,
+ * the list is null at exactly that moment: a mutation clears its own `data` as it fires, so the
+ * dialog drew its waiting line, this component was not mounted at all, and every line below about
+ * a list arriving under a mounted form described something that could not happen. The sentence
+ * above was false for as long as that was how the list was read, and nothing failed — the values
+ * were right, by the other route, and the reconcile they were argued for never ran.
+ *
  * THE NAMES IN IT ARE THE VENDOR'S, AND THEY ARE KEYS HERE. Every name below was chosen by whoever
  * publishes the app at Composio, and this form uses each one three ways: as a key into the object
  * holding what somebody has typed, as the id tying a label to its box, and as React's key for the

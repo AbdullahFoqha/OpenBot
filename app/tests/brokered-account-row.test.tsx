@@ -300,6 +300,23 @@ type Server = {
    */
   publish: (fields: BrokerField[]) => void;
   /**
+   * Hold the next answer to "what does this app want typed in?", and hand back its release.
+   *
+   * THE ONLY WAY TO READ THE RENDER A DIALOG OPENS ON. That press asks the app again and the answer
+   * lands a moment later; with nothing holding it, the two are one turn as far as a test is
+   * concerned, and what the form was mounted on is unobservable. Holding it separates the open from
+   * the answer, which is the whole of the sequence `connection-fields.tsx` is written for.
+   */
+  holdFields: () => () => void;
+  /**
+   * Refuse every later field request, the way a directory this deployment cannot reach does.
+   *
+   * A second press being refused where the first was answered is the state the dialog has to be
+   * right about once it holds the previous answer, and it is not reachable from
+   * {@link Deployment.refusesFields}, which is set before anything is pressed.
+   */
+  refuseFields: (refusal: NonNullable<Deployment["refusesFields"]>) => void;
+  /**
    * The values of each submission that reached the connect route, in order.
    *
    * The body rather than the form, because the body is what the server refuses: a name the app no
@@ -330,10 +347,26 @@ function installDeployment(deployment: Deployment): Server {
     recheckAnswer: { verified: true, verifiedAt: RECHECKED_AT, probe: PROBE },
     ...deployment,
   };
+  /** What the next field request waits on, or null where it answers straight away. */
+  let held: Promise<void> | null = null;
+
   const server: Server = {
     deletes: 0,
     publish: (fields) => {
       state.fields = fields;
+    },
+    holdFields: () => {
+      let release: () => void = () => undefined;
+      held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        held = null;
+        release();
+      };
+    },
+    refuseFields: (refusal) => {
+      state.refusesFields = refusal;
     },
     submitted: [],
   };
@@ -482,6 +515,9 @@ function installDeployment(deployment: Deployment): Server {
        * cannot reach (502) and a broker it is not configured for (503). None of them is a field
        * list, and each one is a sentence naming what to do about it.
        */
+      // Held only on this half of the route: the press that asks the app what it wants. See
+      // {@link Server.holdFields}.
+      if (held) await held;
       if (state.refusesFields) {
         return new Response(
           JSON.stringify({ error: state.refusesFields.error }),
@@ -516,6 +552,21 @@ function installDeployment(deployment: Deployment): Server {
         state.verified = state.recheckAnswer.verified;
         state.verifiedAt = state.recheckAnswer.verifiedAt;
         state.probe = state.recheckAnswer.probe;
+      } else {
+        /*
+         * AND THE GATE CLOSES BEHIND A PRESS THAT FOUND NOTHING, which is not this stub inventing a
+         * consequence: the two answers come from ONE read on the server. `probeBrokeredConnection`
+         * returns `outcome: "nothing"` exactly when `probeActionFor` answers null for this app, and
+         * the connections listing answers `checkable: probeActionFor(...) !== null` off that same
+         * function — so a re-check that could try nothing is, by construction, a later read that
+         * says there is nothing to try. The refetch every one of these mutations makes is what
+         * carries it to the row.
+         *
+         * WHICH IS WHY A NULL PROBE MAY NOT BE ALLOWED TO REWRITE THE RECORD. This press takes the
+         * Re-check button off the row with it, so whatever the row is left saying is what it goes
+         * on saying, with nothing left in the interface to ask again with.
+         */
+        state.checkable = false;
       }
       /*
        * AND A CHECK THE VENDOR REFUSED IS A REFUSAL, NOT AN ANSWER — the correction that let the
@@ -2063,6 +2114,133 @@ test("a form reopened after the app changed its fields draws today's fields, and
   });
 });
 
+/**
+ * THE FORM OPENS ON THE PREVIOUS LIST, WHICH IS WHAT MAKES ITS RECONCILE A REAL PATH.
+ *
+ * CRITERION. Reopening the dialog for an app that has since changed its fields draws the list this
+ * deployment already had, while the new one is still being asked for; the answer then arrives at a
+ * form that is already mounted, and what somebody typed into it in the meantime survives.
+ *
+ * WHY THIS NEEDED A TEST OF ITS OWN, beside the one above it. That test asserts the same submitted
+ * body and passed while the reconcile it describes could never run: the mutation clears its own
+ * `data` the instant it is fired — `query-core` dispatches `pending` with `data: void 0` — so the
+ * list was null as the dialog opened, `ConnectionFields` was not mounted at all, and the form was
+ * built fresh on the new list every time. Right answer, path never taken. The docblock on that file
+ * describing a form "mounted on the old list and handed the new one a moment later" was a
+ * description of code that could not happen, and the two protections it argues for — the values
+ * following the list, and the reads going through maps rather than a prototype — were reachable
+ * only from `connection-fields.tsx`'s own unit tests, which drive the prop directly.
+ *
+ * THE GATE IS WHAT MAKES THE OPENING RENDER OBSERVABLE. Without it the ask and its answer are one
+ * turn, and a form that opened empty for a moment is indistinguishable from one that never did.
+ */
+test("a form reopened while the app is being asked again opens on the list it already had", async () => {
+  const server = installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY, RETIRED_FIELD],
+    recorded: false,
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  /*
+   * The first open, which genuinely has nothing to open on: this deployment has never asked this
+   * app anything. That is the state the waiting line is written for, and it is still drawn here.
+   */
+  await userEvent.click(await view.findByRole("button", { name: "Connect" }));
+  await within(await view.findByRole("dialog")).findByLabelText("Subdomain");
+  await userEvent.click(
+    within(view.getByRole("dialog")).getByRole("button", { name: "Close" }),
+  );
+  await waitFor(() => expect(view.queryByRole("dialog")).toBeNull());
+
+  // The second open, with the app's answer held so the render it opens on can be read.
+  const release = server.holdFields();
+  await userEvent.click(view.getByRole("button", { name: "Connect" }));
+  const opened = within(await view.findByRole("dialog"));
+
+  // THE CLAIM ITSELF: the list this deployment already had, drawn while the new one is in flight.
+  const key = (await opened.findByLabelText("API Key")) as HTMLInputElement;
+  expect(opened.getByLabelText("Subdomain")).toBeTruthy();
+  expect(view.queryByText(/Asking the app what it needs/)).toBeNull();
+
+  /*
+   * And somebody starts typing, which is what makes the arrival below a reconcile rather than a
+   * remount. A form rebuilt on the new list would have no way to keep this.
+   */
+  await userEvent.type(key, "pplx-typed-while-waiting");
+
+  // What the vendor publishes for this app now, which is not what it published above.
+  server.publish([PERPLEXITY_KEY, FIRECRAWL_BASE_URL]);
+  release();
+
+  const dialog = within(view.getByRole("dialog"));
+  const baseUrl = (await dialog.findByLabelText(
+    "Base URL",
+  )) as HTMLInputElement;
+  // The app answered this one itself, and a form ignoring the answer is asking for it again.
+  expect(baseUrl.value).toBe("https://api.firecrawl.dev");
+  // The form was not rebuilt: what was typed a moment ago is still in it.
+  expect((dialog.getByLabelText("API Key") as HTMLInputElement).value).toBe(
+    "pplx-typed-while-waiting",
+  );
+  // And the name the app has stopped publishing is gone, rather than left to go up with the rest.
+  expect(dialog.queryByLabelText("Subdomain")).toBeNull();
+
+  await userEvent.click(dialog.getByRole("button", { name: "Connect" }));
+
+  await waitFor(() => expect(server.submitted.length).toBe(1));
+  expect(server.submitted[0]).toEqual({
+    generic_api_key: "pplx-typed-while-waiting",
+    base_url: "https://api.firecrawl.dev",
+  });
+});
+
+/**
+ * AND A RE-ASK THAT IS REFUSED SAYS SO, RATHER THAN LEAVING THE OLD FORM UP TO BE SUBMITTED.
+ *
+ * THE COST OF THE TEST ABOVE, PAID HERE. Holding the previous list means the dialog has something
+ * to draw on a press that then fails — and the four things this route can say each name a different
+ * act, while a stale form invites the one act that cannot work: sending a list the app has just
+ * refused to confirm. The refusal is what the person gets, on the press that asked.
+ */
+test("a form reopened against an app that cannot be asked shows the refusal, not the old list", async () => {
+  const server = installDeployment({
+    authScheme: "API_KEY",
+    composioConfigured: true,
+    confirms: false,
+    fields: [PERPLEXITY_KEY, RETIRED_FIELD],
+    recorded: false,
+  });
+
+  const view = renderAccountScreen(queryClient());
+
+  await userEvent.click(await view.findByRole("button", { name: "Connect" }));
+  await within(await view.findByRole("dialog")).findByLabelText("Subdomain");
+  await userEvent.click(
+    within(view.getByRole("dialog")).getByRole("button", { name: "Close" }),
+  );
+  await waitFor(() => expect(view.queryByRole("dialog")).toBeNull());
+
+  // The app is gone from the directory between the two presses, which is a 502 and a sentence.
+  server.refuseFields({
+    error: "Composio would not say what Gmail asks for.",
+    status: 502,
+  });
+
+  await userEvent.click(view.getByRole("button", { name: "Connect" }));
+  const dialog = within(await view.findByRole("dialog"));
+
+  expect(
+    await dialog.findByText("Composio would not say what Gmail asks for."),
+  ).toBeTruthy();
+  // And nothing left over to type a key into and press Connect on.
+  expect(dialog.queryByLabelText("API Key")).toBeNull();
+  expect(dialog.queryByLabelText("Subdomain")).toBeNull();
+});
+
 /** A key worth being careful with, spelled distinctly so a search of held state cannot miss it. */
 const TYPED_SECRET = "pplx-0nly-ever-forwarded";
 
@@ -2246,27 +2424,32 @@ test("a disconnect drops the re-check's verdict for every reader, not just the r
 });
 
 /**
- * A RE-CHECK THAT SPENT NOTHING SAYS SO, AND OVERRULES THE NAME THE LAST ONE WROTE DOWN.
+ * A RE-CHECK THAT SPENT NOTHING LEAVES THE RECORDED VERDICT EXACTLY WHERE IT FOUND IT.
  *
- * CRITERION. On a row recording a key the vendor refused, a re-check answering a null probe leaves
- * the row saying the key was accepted without being checked — the answer's null replacing the
- * record's name, though the recorded row still carries that name.
+ * CRITERION. On a row recording a key the vendor checked and refused, a re-check answering a null
+ * probe leaves the row still saying so. The press wrote nothing, so it may unwrite nothing.
  *
- * REASON. `probe` is the only field of the three that takes its answer from EITHER mutation — a
- * re-check or a key just handed over — and the rule is `answered ? answered.probe : probe`: an
- * answer beats the record. Nothing pinned it. Every other case here has the deployment write the
- * answer's probe into the row it then re-reads, so the two agree by the time anything is asserted
- * and reading the record alone passes every one of them.
+ * THIS FILE USED TO PIN THE OPPOSITE, under `a re-check that spent nothing overrules the action the
+ * record still names`, on the reading that "an answer beats the record" and that the answer's null
+ * is the server saying this check spent nothing. The first half is right and the second is the
+ * mistake: `probe` on THIS route is what the PRESS spent, and `probe` on the connections read is
+ * what the last check that spent anything WROTE DOWN. They are not two records of one thing, so the
+ * newer of the two does not win — the newer one is not a record at all.
  *
- * AND THIS IS THE ONE CASE WHERE THEY CANNOT AGREE. `recheckBrokeredConnection` returns early on a
- * null probe and writes NOTHING — the app published nothing safe to spend the key on, so there is
- * no verdict to record and the row keeps the name of the last check that did spend something. The
- * press still happened and still learned something, and what it learned is the sentence the hook's
- * own comment spells out: "its null is the server saying that check spent nothing, exactly as an
- * answer's null is". Read off the record instead, the person presses a button, is told nothing
- * changed, and goes on reading an accusation about a key that nothing has just tried.
+ * AND `recheckBrokeredConnection` SAYS SO IN THE ONLY WAY THAT MATTERS: on this outcome it returns
+ * before the writer, deliberately, so that "a check which could try nothing writes nothing at all".
+ * The row it read is untouched, `probe_action` still names the action the vendor refused, and the
+ * very next connections read answers with that name again.
+ *
+ * WHAT THE OLD RULE COST, WHICH IS WHY IT IS WORTH A TEST RATHER THAN A COMMENT. The row flipped
+ * from the worst state this feature has — your key was rejected and the account still stands at
+ * Composio, with two named ways out — to "accepted without being checked … that is about the app,
+ * not about your key", which is an absolution. AND THE PRESS TOOK THE BUTTON WITH IT: the outcome
+ * is `nothing` precisely when `probeActionFor` answers null, which is the same read the listing
+ * draws `checkable` from, so the refetch that follows withdraws Re-check. Nothing in the interface
+ * could then put the true sentence back.
  */
-test("a re-check that spent nothing overrules the action the record still names", async () => {
+test("a re-check that spent nothing leaves the rejection the record still names", async () => {
   installDeployment({
     authScheme: "API_KEY",
     // The app still publishes something, which is what puts the button on the row at all.
@@ -2294,12 +2477,20 @@ test("a re-check that spent nothing overrules the action the record still names"
 
   await userEvent.click(view.getByRole("button", { name: "Re-check" }));
 
-  // The answer, which is newer than the record and about the same thing.
+  /*
+   * THE BUTTON GOING IS WHAT SAYS THE PRESS LANDED, and it is asserted first for that reason: the
+   * sentence below is what the row said before the press as well, so a test that only read it
+   * would pass against a click that never reached the deployment at all.
+   */
   await waitFor(() =>
-    expect(
-      view.queryByText(/accepted without being checked against Gmail/),
-    ).toBeTruthy(),
+    expect(view.queryByRole("button", { name: "Re-check" })).toBeNull(),
   );
-  // And the sentence the record alone would still be drawing is gone with it.
-  expect(view.queryByText(/was checked against Gmail and rejected/)).toBeNull();
+
+  // And the three facts this person can act on are all still on the row.
+  expect(view.getByText(/was checked against Gmail and rejected/)).toBeTruthy();
+  expect(view.getByText(/still stands at Composio/)).toBeTruthy();
+  // Never the absolution, which is the other app's state and not this one's.
+  expect(
+    view.queryByText(/accepted without being checked against Gmail/),
+  ).toBeNull();
 });
