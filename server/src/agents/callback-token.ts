@@ -213,7 +213,28 @@ function readInitiator(value: unknown): AuditInitiator {
 }
 
 export type CallVerdict =
-  | { ok: true; botId: string; actorId: string; initiator?: AuditInitiator }
+  | {
+      ok: true;
+      botId: string;
+      actorId: string;
+      initiator?: AuditInitiator;
+      /**
+       * The whole verified assertion, not only the two fields the audit row needs.
+       *
+       * WHY THE REST WAS MISSING AND WHY IT MATTERS. This verdict used to project `botId`,
+       * `actorId` and `initiator` and drop `runId`, `threadId` and `depth` on the floor. That was
+       * enough while every server-owned tool a callback could reach acted on the Bot alone — an MCP
+       * call, a host folder read. It is not enough for a tool that hands work to another Bot: such
+       * a tool has to know which conversation the answer returns to and how deep the chain already
+       * is, and those are precisely the two fields a caller must not be able to supply. Dropped
+       * here, the only place left to read them was the request body, which is the forgery this
+       * whole file exists to close.
+       *
+       * So the verified assertion travels whole. `botId` and `actorId` stay beside it, unchanged,
+       * because every existing caller reads them and they say the same thing.
+       */
+      run: RunAssertion;
+    }
   | { ok: false; status: 401 | 403; reason: string };
 
 /**
@@ -344,5 +365,6 @@ export async function authoriseAgentCall(options: {
     botId: assertion.botId,
     actorId: assertion.actorId,
     initiator: assertion.initiator,
+    run: assertion,
   };
 }

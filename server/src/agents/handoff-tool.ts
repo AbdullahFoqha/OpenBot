@@ -21,7 +21,15 @@ import type { HandoffDesk } from "./handoff";
 /** What the model is offered. One name, so a transcript can find every hop by searching for it. */
 export const HANDOFF_TOOL = "message_bot";
 
-const parameters = z.object({
+/**
+ * What the model may name, exported because the delegating callback parses the same shape.
+ *
+ * ONE SCHEMA FOR BOTH PATHS. A remote Bot reaching this deployment through
+ * `/api/agent-tools/call` is asking for the same tool as a built-in one calling it in process, and
+ * two schemas for one tool drift: the second one grows a field, or stops requiring one, and the
+ * difference shows up as a Bot that can do something from an endpoint it could not do from here.
+ */
+export const handoffToolParameters = z.object({
   bot: z
     .string()
     .describe(
@@ -51,6 +59,8 @@ const parameters = z.object({
  * offered a tool whose every call would be refused. A model offered a tool it may never use spends
  * attention on it and tells the person it tried.
  */
+const parameters = handoffToolParameters;
+
 export function handoffTool(options: {
   desk: HandoffDesk;
   /** The run doing the asking, as this deployment signed it. */

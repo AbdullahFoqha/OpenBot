@@ -104,6 +104,35 @@ export function createPluginRoutes(
      */
     appUrl: string | undefined;
   },
+  /**
+   * Which Bots at their own endpoints have been registered as able to hand work on.
+   *
+   * WHY A GRANT SCREEN NEEDS TO KNOW. The refusal below used to be flat: a Bot that runs at its own
+   * endpoint could not be given another Bot to hand work to, because the callback route executed
+   * MCP refs only and the grant would have been dead the moment it was written. That is no longer
+   * true of every remote Bot — it is true of every remote Bot whose adapter does not call tools
+   * back, which is most of them and is not something this deployment can tell by looking at a URL.
+   *
+   * So an administrator registers the endpoints that implement the contract, and this reads the
+   * register. Absent leaves the original flat refusal in place, which is the correct behaviour for
+   * a deployment that has registered nothing.
+   *
+   * Last, after `connect`, for the positional reason its own note gives.
+   */
+  delegation?: {
+    isRegistered: (agentId: string) => Promise<boolean>;
+    declare: (agentId: string, declaredBy: string | null) => Promise<void>;
+    revoke: (agentId: string) => Promise<void>;
+    list: () => Promise<
+      {
+        agentId: string;
+        declaredAt: Date;
+        verifiedAt: Date | null;
+        verifiedRunId: string | null;
+        revokedAt: Date | null;
+      }[]
+    >;
+  },
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
 
@@ -753,8 +782,27 @@ export function createPluginRoutes(
       }
       const runsHere = await store.agentRunsHere(agentId);
       if (runsHere === undefined) return "There is no such Bot.";
+      /*
+       * A remote Bot may be granted this, but only a registered one.
+       *
+       * NOT AN UNCONDITIONAL LIFT. The grant is real work for the grantee: being handed a tool it
+       * cannot invoke is worse than being handed none, because the model announces to the person
+       * that it has asked another Bot and nothing was asked. Whether the process at that URL calls
+       * tools back is a fact about somebody else's software, so it is declared rather than guessed,
+       * and an endpoint nobody declared still gets the sentence it always got — with the one extra
+       * clause that says what would change it.
+       *
+       * Read here rather than cached at boot: a registration withdrawn a minute ago must refuse the
+       * next grant. A read that fails is not a registration, for the reason every other failing
+       * grant read in this codebase is treated as absent.
+       */
       if (!runsHere) {
-        return `${agentId} runs at its own endpoint, so this deployment cannot offer it a tool for handing work on. Only a Bot that runs here can be given one.`;
+        const registered = delegation
+          ? await delegation.isRegistered(agentId).catch(() => false)
+          : false;
+        if (!registered) {
+          return `${agentId} runs at its own endpoint, so this deployment cannot offer it a tool for handing work on unless its endpoint has been registered as calling tools back. Register it first, or grant this to a Bot that runs here.`;
+        }
       }
       if (!(await store.agentIsRegistered(ref))) {
         return `There is no Bot called ${ref} to hand work to.`;
@@ -855,6 +903,92 @@ export function createPluginRoutes(
     await store.revoke(kind, trimmedRef, trimmedAgentId, actorEmail(context));
     return context.json({ ok: true });
   });
+
+  /*
+   * Registering an endpoint as one that calls tools back.
+   *
+   * AN ADMINISTRATOR'S DECISION AND NOTHING ELSE'S, for the same reason granting one Bot to another
+   * is: it is what makes a remote process able to spend this deployment's Bots. The register is a
+   * claim about software somebody else runs — this deployment cannot test a URL by looking at it —
+   * so the row also carries when the runtime last saw that adapter really complete a delegation.
+   * Declared and verified are different words on the response on purpose: one is configured, the
+   * other is observed.
+   *
+   * Absent `delegation` leaves these unmounted rather than mounted and refusing, which is the shape
+   * every other optional collaborator in this deployment takes.
+   */
+  if (delegation) {
+    routes.get("/delegation", requireUser, async (context) => {
+      if (context.var.actor.role !== "admin") {
+        return context.json(
+          {
+            error: "An administrator decides which endpoints may hand work on.",
+          },
+          403,
+        );
+      }
+      return context.json(await delegation.list());
+    });
+
+    routes.post("/delegation", requireUser, async (context) => {
+      if (context.var.actor.role !== "admin") {
+        return context.json(
+          {
+            error: "An administrator decides which endpoints may hand work on.",
+          },
+          403,
+        );
+      }
+      const body = (await context.req.json().catch(() => null)) as {
+        agentId?: unknown;
+      } | null;
+      // A JSON annotation is a wish: a number here would reach the store and compare a text column
+      // against it. The twin below requires the same shape, for the same reason.
+      const agentId =
+        typeof body?.agentId === "string" ? body.agentId.trim() : "";
+      if (!agentId) return context.json({ error: "A Bot is required." }, 400);
+      /*
+       * The Bot has to exist AND run somewhere else.
+       *
+       * A built-in Bot executes `message_bot` in process and needs no registration; registering one
+       * would store a row that means nothing and read, on the screen, as a capability somebody
+       * configured. `agentRunsHere` answers both questions in one read.
+       */
+      const runsHere = await store.agentRunsHere(agentId);
+      if (runsHere === undefined) {
+        return context.json({ error: "There is no such Bot." }, 404);
+      }
+      if (runsHere) {
+        return context.json(
+          {
+            error: `${agentId} runs in this deployment, so it already hands work on directly. Registration is for Bots at their own endpoints.`,
+          },
+          400,
+        );
+      }
+      await delegation.declare(agentId, context.var.actor.id ?? null);
+      return context.json({ ok: true });
+    });
+
+    routes.delete("/delegation", requireUser, async (context) => {
+      if (context.var.actor.role !== "admin") {
+        return context.json(
+          {
+            error: "An administrator decides which endpoints may hand work on.",
+          },
+          403,
+        );
+      }
+      const agentId = context.req.query("agentId");
+      if (typeof agentId !== "string" || !agentId.trim()) {
+        return context.json({ error: "A Bot is required." }, 400);
+      }
+      // Withdrawing is always allowed, for the reason `enablementRefusal`'s `intent` note gives:
+      // every check that decides whether a capability should exist becomes a trap on the way out.
+      await delegation.revoke(agentId.trim());
+      return context.json({ ok: true });
+    });
+  }
 
   /** What one Bot holds. The runtime reads this to decide what to offer a model. */
   routes.get("/for/:agentId", requireUser, async (context) => {

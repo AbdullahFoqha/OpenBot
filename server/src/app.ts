@@ -6,6 +6,7 @@ import { MAX_IMAGE_BYTES } from "../../shared/attachments";
 import {
   authoriseAgentCall,
   parseAgentToolCallInput,
+  type RunAssertion,
   sameToken,
 } from "./agents/callback-token";
 import type { BotAccessCheck } from "./agents/profile-policy";
@@ -109,12 +110,43 @@ export const UPLOAD_BODY_LIMIT_BYTES =
  * The address is on the row rather than only the user id, because the id means nothing to a person
  * reading the trail a year later and the user row may be gone by then.
  */
+/**
+ * The register of remote endpoints an administrator has declared implement the delegation contract.
+ *
+ * Shaped as four functions rather than the store itself, so this module keeps not importing the
+ * database: `createApp` has never known what a table is and adding a capability is not a reason for
+ * it to start.
+ */
+export type DelegationRegistry = {
+  isRegistered: (agentId: string) => Promise<boolean>;
+  declare: (agentId: string, declaredBy: string | null) => Promise<void>;
+  revoke: (agentId: string) => Promise<void>;
+  list: () => Promise<
+    {
+      agentId: string;
+      declaredAt: Date;
+      verifiedAt: Date | null;
+      verifiedRunId: string | null;
+      revokedAt: Date | null;
+    }[]
+  >;
+};
+
 export type DeploymentToolCaller = (input: {
   name: string;
   args: Record<string, unknown>;
   botId: string;
   actorId: string;
   initiator?: AuditInitiator;
+  /**
+   * The whole verified run, for the server-owned tools that need more than the Bot.
+   *
+   * Handing work to another Bot needs the conversation an answer returns to and how deep the chain
+   * already is, and both have to be this deployment's signed statement rather than anything the
+   * calling process can edit. `botId` and `actorId` above are the same values and are kept because
+   * every existing caller reads them.
+   */
+  run: RunAssertion;
 }) => Promise<{ text: string; isError: boolean } | null>;
 
 async function recordPersonEvent(
@@ -294,6 +326,14 @@ export function createApp(
   desktopHostToken?: string,
   /** Server-owned tools that are not MCP but use the same signed agent callback route. */
   deploymentToolCaller?: DeploymentToolCaller,
+  /**
+   * Which Bots at their own endpoints have been registered as calling tools back.
+   *
+   * Appended last, like every optional store above it: these are positional, so inserting one
+   * anywhere else silently shifts every existing call site's arguments by one. Absent leaves the
+   * registration routes unmounted and the flat remote refusal in place.
+   */
+  delegationRegistry?: DelegationRegistry,
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -1218,33 +1258,39 @@ export function createApp(
   if (pluginStore) {
     app.route(
       "/api/plugins",
-      createPluginRoutes(pluginStore, requireUser, canUseBot, {
-        encryptionKey: config.keyEncryptionKey,
-        /*
-         * Whether the person a consent was started for still has access, asked when the callback
-         * lands rather than when the flow began.
-         *
-         * The callback carries no session — identity comes from the state — so this is where the
-         * question gets asked at all. `find` answers both halves of it: no row means a user id that
-         * names nobody, and `revoked` means an administrator removed them while they were away at
-         * the vendor. Either way there is no live person for a fresh refresh token to belong to.
-         *
-         * No people store means this deployment cannot answer the question, so it refuses rather
-         * than assuming yes. It also cannot remove anybody, which is exactly why guessing here
-         * would be a hole nothing else closes.
-         */
-        personHasAccess: async (userId) => {
-          if (!peopleStore) return false;
-          const person = await peopleStore.find(userId);
-          return person !== undefined && !person.revoked;
+      createPluginRoutes(
+        pluginStore,
+        requireUser,
+        canUseBot,
+        {
+          encryptionKey: config.keyEncryptionKey,
+          /*
+           * Whether the person a consent was started for still has access, asked when the callback
+           * lands rather than when the flow began.
+           *
+           * The callback carries no session — identity comes from the state — so this is where the
+           * question gets asked at all. `find` answers both halves of it: no row means a user id that
+           * names nobody, and `revoked` means an administrator removed them while they were away at
+           * the vendor. Either way there is no live person for a fresh refresh token to belong to.
+           *
+           * No people store means this deployment cannot answer the question, so it refuses rather
+           * than assuming yes. It also cannot remove anybody, which is exactly why guessing here
+           * would be a hole nothing else closes.
+           */
+          personHasAccess: async (userId) => {
+            if (!peopleStore) return false;
+            const person = await peopleStore.find(userId);
+            return person !== undefined && !person.revoked;
+          },
+          // The deployment-wide fallback a Bot may present, as a yes or no. The secret itself stays
+          // in config and is checked in `/api/agent-tools/call`; the surface only needs to know
+          // whether a Bot without its own credential has any way to call back.
+          botsMayCallBack: Boolean(config.agentToolToken),
+          publicUrl: config.publicUrl,
+          appUrl: config.appUrl,
         },
-        // The deployment-wide fallback a Bot may present, as a yes or no. The secret itself stays
-        // in config and is checked in `/api/agent-tools/call`; the surface only needs to know
-        // whether a Bot without its own credential has any way to call back.
-        botsMayCallBack: Boolean(config.agentToolToken),
-        publicUrl: config.publicUrl,
-        appUrl: config.appUrl,
-      }),
+        delegationRegistry,
+      ),
     );
   }
 
@@ -1335,6 +1381,9 @@ export function createApp(
           botId: verdict.botId,
           actorId: verdict.actorId,
           initiator: verdict.initiator,
+          // The verified assertion, whole. Never `body.run` again: that is the string the caller
+          // presented, and this is what checking it produced.
+          run: verdict.run,
         });
         if (deploymentResult) return context.json(deploymentResult);
 

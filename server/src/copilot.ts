@@ -15,6 +15,7 @@ import {
   PROVENANCE_GUIDANCE,
 } from "../../shared/bot-prompt";
 import { sanitizeSeededHistory } from "./agents/history-sanitize";
+import { HANDOFF_TOOL } from "./agents/handoff-tool";
 import type { AgentActor } from "./agents/profile-types";
 import type { AuditInitiator } from "./audit";
 import {
@@ -433,6 +434,20 @@ export async function buildAgents(
    * `loadAttachment` for the positional reason it gives. Absent means nothing is recorded.
    */
   markAttachmentsSent?: MarkAttachmentsSent,
+  /**
+   * Whether a Bot at its own endpoint may be offered the tool for handing work on.
+   *
+   * ASKED PER BOT, NOT ASSUMED FOR THE KIND. A remote Bot is handed tool descriptions and calls
+   * them back, so it can only really use `message_bot` if whatever runs at that URL forwards this
+   * deployment's signed assertion and calls the tool back. Most adapters do not, and describing a
+   * tool to a model that cannot invoke it is worse than describing none: it announces to the person
+   * that it has asked somebody, and nobody was asked. So an administrator registers the endpoints
+   * that do, and this reads that registration.
+   *
+   * Absent means no remote Bot is offered one, which is what every deployment did before the
+   * delegating callback existed.
+   */
+  remoteDelegation?: (botId: string) => Promise<boolean>,
 ): Promise<Record<string, AbstractAgent>> {
   let vendors: readonly string[] = [];
   try {
@@ -489,6 +504,7 @@ export async function buildAgents(
           initiator,
           loadAttachment,
           markAttachmentsSent,
+          remoteDelegation,
         ),
       ]),
     ),
@@ -747,6 +763,8 @@ async function buildAgent(
   loadAttachment?: LoadAttachment,
   /** How this run records that those files were sent. See {@link buildAgents}. */
   markAttachmentsSent?: MarkAttachmentsSent,
+  /** Whether this Bot's endpoint may be offered `message_bot`. See {@link buildAgents}. */
+  remoteDelegation?: (botId: string) => Promise<boolean>,
 ): Promise<AbstractAgent> {
   if (agent.type === "unavailable") {
     return new UnavailableAgent(agent);
@@ -828,16 +846,21 @@ async function buildAgent(
      * `remote.run(input)` skips it: the endpoint would get a run with no standing role, no holdings
      * message, no tools and no signed assertion, and every one of those failures is silent.
      *
-     * WHICH IS ALSO WHY A REMOTE BOT IS OFFERED NEITHER `message_bot` NOR `ask_person`. Both are
-     * executed here, by the wrapper below, against this deployment's grants and caps. A Bot at an
-     * endpoint runs its own loop and is handed descriptions of tools it may call back for, and the
-     * callback path executes MCP refs only — so a described `message_bot` would be a tool it could
-     * announce and never invoke. Granting one is refused at the door rather than stored dead: see
-     * `enablementRefusal` in plugins/routes.ts.
+     * `ask_person` IS STILL NOT OFFERED HERE, and `message_bot` only is, and only to a registered
+     * endpoint. Both used to be withheld for one reason: the callback path executed MCP refs only,
+     * so a described tool was one the model could announce and never invoke — which is worse than
+     * describing none, because it tells the person it has asked somebody when nobody was asked.
      *
-     * Making this work is a feature rather than a fix: the callback would have to carry a run
-     * assertion the endpoint cannot forge, and execute a hop on its behalf. Worth doing; not done
-     * here, and worth knowing it is missing rather than assuming it is not.
+     * The delegating callback closed that for `message_bot`. `/api/agent-tools/call` now executes a
+     * hop through the same desk, grants and caps the built-in path uses, taking the Bot, the person,
+     * the conversation and the depth from the assertion this deployment signed rather than from
+     * anything the endpoint can edit. `ask_person` has no such executor yet, so it stays withheld:
+     * describing it would recreate exactly the failure this paragraph is about.
+     *
+     * AND ONLY TO AN ENDPOINT SOMEBODY REGISTERED. Whether a URL's adapter really calls tools back
+     * is a fact about somebody else's process that this deployment cannot test by looking, so an
+     * administrator declares it and the runtime records the first time it is observed. An
+     * unregistered remote Bot is offered nothing, exactly as before.
      *
      * AND THE PERSON'S STANDING INSTRUCTIONS ARE NOT SENT HERE EITHER. `standingInstructions` is
      * built-in only, deliberately: a remote Bot composes its own prompt at somebody else's endpoint,
@@ -845,13 +868,42 @@ async function buildAgent(
      * way to know whether it is read or how it ranks against the role. See
      * `standingInstructionsGuidance`.
      */
+    /*
+     * Resolved per run, beside the narrowing, because both answers change between runs for the same
+     * kind of reason: a grant made a minute ago, a registration withdrawn a minute ago. Reading the
+     * registration at build time would hold a withdrawn capability until the process restarted.
+     */
+    const offeredForRemote =
+      handoff && remoteDelegation
+        ? async (input: RunAgentInput): Promise<GrantedTool[]> => {
+            const offered = narrowing ? await offeredFor(input) : granted;
+            if (!(await remoteDelegation(agent.id).catch(() => false))) {
+              return offered;
+            }
+            /*
+             * Filtered to the one this deployment can execute for a remote caller.
+             *
+             * `handoff` answers with the pair a model chooses between — handing work sideways and
+             * stopping to ask a person — because a built-in run gets both executed in process. Only
+             * the first has a callback executor, so only the first is described. Taking the whole
+             * list here would put `ask_person` in front of a model that cannot reach it.
+             */
+            const passing = (await handoff(agent.id, input)).filter(
+              (tool) => tool.name === HANDOFF_TOOL,
+            );
+            return passing.length > 0 ? [...offered, ...passing] : offered;
+          }
+        : narrowing
+          ? offeredFor
+          : undefined;
+
     return remoteAgentWithStandingRole(
       agent,
       await remoteTransport(agent, stallGuard, agentFetch, initiator),
       granted,
       signRun,
       connectedVendors,
-      narrowing ? offeredFor : undefined,
+      offeredForRemote,
       loadAttachment,
       markAttachmentsSent,
     );
@@ -1679,6 +1731,13 @@ export async function resolveRuntimeAgents(
    * same positional reason. Absent means nothing is recorded.
    */
   markAttachmentsSent?: MarkAttachmentsSent,
+  /**
+   * Whether a Bot at its own endpoint may be offered `message_bot`. See {@link buildAgents}.
+   *
+   * Appended last, like every collaborator above it: these are positional, so inserting one
+   * anywhere else silently shifts every existing call site's arguments by one.
+   */
+  remoteDelegation?: (botId: string) => Promise<boolean>,
 ): Promise<Record<string, AbstractAgent>> {
   const all = await loadAgents();
   if (all.length === 0) {
@@ -1713,6 +1772,7 @@ export async function resolveRuntimeAgents(
     initiator,
     loadAttachment,
     markAttachmentsSent,
+    remoteDelegation,
   );
 }
 
@@ -1816,6 +1876,13 @@ export function createRequestAgents(
    * nothing is recorded.
    */
   markAttachmentsSentForActor?: (actorId: string) => MarkAttachmentsSent,
+  /**
+   * Whether a Bot at its own endpoint may be offered `message_bot`. See {@link buildAgents}.
+   *
+   * Appended last, like every collaborator above it: these are positional, so inserting one
+   * anywhere else silently shifts every existing call site's arguments by one.
+   */
+  remoteDelegation?: (botId: string) => Promise<boolean>,
 ) {
   return async ({ request }: { request: Request }) => {
     const actor = await identifyActor(request);
@@ -1839,6 +1906,7 @@ export function createRequestAgents(
       undefined,
       loadAttachmentForActor?.(actor.id),
       markAttachmentsSentForActor?.(actor.id),
+      remoteDelegation,
     );
   };
 }
@@ -1990,6 +2058,15 @@ export function mountCopilotRuntime(
    * write is scoped to rows that person uploaded. Appended last. Absent means nothing is recorded.
    */
   markAttachmentsSentForActor?: (actorId: string) => MarkAttachmentsSent,
+  /**
+   * Whether a Bot at its own endpoint may be offered `message_bot`. See {@link buildAgents}.
+   *
+   * Given to the request path and to `agentFor` alike, for the reason the seams above it are: a
+   * hop's delivery turn must build the same Bot a person's chat turn builds, and a capability wired
+   * into only one of them is exactly the drift `agentFor` exists to prevent. Appended last,
+   * positionally.
+   */
+  remoteDelegation?: (botId: string) => Promise<boolean>,
 ) {
   const { intelligence } = config.runtime;
 
@@ -2037,6 +2114,7 @@ export function mountCopilotRuntime(
       input.initiator,
       loadAttachmentForActor?.(actor.id),
       markAttachmentsSentForActor?.(actor.id),
+      remoteDelegation,
     );
     return agents[input.botId] ?? null;
   };
@@ -2112,6 +2190,7 @@ export function mountCopilotRuntime(
       loadInstructionsForActor,
       loadAttachmentForActor,
       markAttachmentsSentForActor,
+      remoteDelegation,
     ) as never,
   });
 

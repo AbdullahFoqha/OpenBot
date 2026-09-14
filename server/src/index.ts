@@ -7,7 +7,11 @@ import { serve } from "bun";
 import { eq } from "drizzle-orm";
 import { COMPUTER_GUIDANCE } from "../../shared/bot-prompt";
 import { workOwner } from "../../shared/work-owner";
-import { mintRunAssertion, readRunAssertion } from "./agents/callback-token";
+import {
+  mintRunAssertion,
+  readRunAssertion,
+  type RunAssertion,
+} from "./agents/callback-token";
 import { createAgentFetch } from "./agents/endpoint";
 import { askTheirOwnPerson, escalationTool } from "./agents/escalation";
 import { createHandoffDesk, HANDOFF_KIND } from "./agents/handoff";
@@ -15,6 +19,12 @@ import { createHandoffDelivery } from "./agents/handoff-delivery";
 import { createHandoffRunner } from "./agents/handoff-runner";
 import { signHandoffDeliveryRun } from "./agents/handoff-signing";
 import { handoffTool } from "./agents/handoff-tool";
+import {
+  HANDOFF_TOOL_REF,
+  operationIdFor,
+  runDelegationCallback,
+} from "./agents/handoff-callback";
+import { createDelegationStore } from "./studio/delegation-store";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
 import { createRuntimeAgentLoader } from "./agents/runtime-agents";
@@ -386,6 +396,14 @@ const handoffDesk = createHandoffDesk({
   auditStore: bootAuditStore,
   caps: config.handoff,
 });
+
+/**
+ * Which remote Bots may hand work on, and what a callback already did.
+ *
+ * Beside the desk rather than further down, because both halves of a delegating callback read it:
+ * the capability before the hop, and the operation record around it.
+ */
+const delegationStore = createDelegationStore(database);
 
 void recordAuditEvent(bootAuditStore, {
   eventType: "computer.policy_loaded",
@@ -949,6 +967,15 @@ const copilotRuntime = mountCopilotRuntime(
   // And that those files went out in a send, written by the person who sent them and only for rows
   // they uploaded. See markAttachmentsSentForActor.
   markAttachmentsSentForActor,
+  /*
+   * Which Bots at their own endpoints have been registered as able to hand work on.
+   *
+   * Read per run rather than at boot, like the grants beside it: a registration an administrator
+   * withdrew has to stop the next run rather than the next restart. Failing closed on a read error
+   * for the same reason `mayAddress` does — an unreadable registration is not a registration, and
+   * the cost is one run offered no delegation rather than an unregistered endpoint offered it.
+   */
+  (botId) => delegationStore.mayDelegateOverCallback(botId).catch(() => false),
 );
 
 /**
@@ -1240,25 +1267,127 @@ const app = createApp(
   // desktop worker must authenticate with a fresh token for this run.
   hostAccessBroker,
   process.env.OPENBOT_DESKTOP_HOST_TOKEN,
-  async ({ name, args, botId, actorId, initiator }) => {
-    if (!name.startsWith("host_")) return null;
-    const tool = hostAccessTools({
-      broker: hostAccessBroker,
+  /*
+   * The server-owned tools a Bot at its own endpoint may call back for.
+   *
+   * TWO KINDS NOW, AND THE SECOND ONE IS WHY THIS GREW A RECORD. A host tool asks a person and runs
+   * in a container; handing work to another Bot queues a durable hop that another replica will run.
+   * Both are outside effects reached over HTTP by a process this deployment does not own, so a
+   * socket that dies after the effect and before the response looks, from the adapter's side,
+   * exactly like a call that never arrived. A correct adapter retries. Without a record of what the
+   * first call did, the retry does it again.
+   *
+   * The record is claimed before the work and filled in after it, so the claim is what serialises
+   * two retries racing rather than a read the second one also passes. The id is derived from the
+   * signed run and the exact arguments — see `operationIdFor` — so a model cannot name one and
+   * collect somebody else's answer.
+   */
+  async ({ name, args, botId, actorId, initiator, run }) => {
+    const handles =
+      name === HANDOFF_TOOL_REF || name.startsWith("host_") ? name : null;
+    if (!handles) return null;
+
+    const operationId = operationIdFor({
+      botId,
+      runId: run.runId,
+      toolRef: name,
+      args,
+    });
+    const claim = await delegationStore.claimOperation({
+      operationId,
       botId,
       actorId,
-      auditStore: bootAuditStore,
+      runId: run.runId,
+      toolRef: name,
+    });
+    // The same call again. Answered with what it produced the first time rather than repeated, and
+    // rather than refused: a retry is the adapter doing the right thing.
+    if (!claim.fresh) return claim.result;
+
+    const result = await runDeploymentTool({
+      name,
+      args,
+      botId,
+      actorId,
+      run,
       ...(initiator ? { initiator } : {}),
-    }).find((candidate) => candidate.name === name);
-    if (!tool) {
-      return {
-        text: `${REFUSAL_MARKER} That host tool is not available for this Bot right now.`,
-        isError: true,
-      };
+    });
+    /*
+     * Recorded even when the tool refused, because a refusal is an answer this side produced and a
+     * retry should see the same one. Failing to record is not a reason to undo the work: the hop is
+     * already queued, so the honest degradation is a retry that could duplicate rather than an
+     * answer thrown away.
+     */
+    if (result) {
+      await delegationStore
+        .completeOperation(operationId, result)
+        .catch(() => {});
     }
-    const text = await tool.execute(args);
-    return { text, isError: text.startsWith(REFUSAL_MARKER) };
+    return result;
+  },
+  // The register the grant screen consults and an administrator writes. The same store the callback
+  // reads, so a registration cannot be visible to one and not the other.
+  {
+    isRegistered: (agentId: string) =>
+      delegationStore.mayDelegateOverCallback(agentId),
+    declare: (agentId: string, declaredBy: string | null) =>
+      delegationStore.declare(agentId, declaredBy),
+    revoke: (agentId: string) => delegationStore.revoke(agentId),
+    list: () => delegationStore.list(),
   },
 );
+
+/** What each server-owned tool actually does, once its operation has been claimed. */
+async function runDeploymentTool(input: {
+  name: string;
+  args: Record<string, unknown>;
+  botId: string;
+  actorId: string;
+  run: RunAssertion;
+  initiator?: AuditInitiator;
+}): Promise<{ text: string; isError: boolean } | null> {
+  const { name, args, botId, actorId, initiator, run } = input;
+
+  if (name === HANDOFF_TOOL_REF) {
+    /*
+     * `from` is the verified assertion, handed straight through.
+     *
+     * The Bot being built here is not consulted and neither is the body: the run this deployment
+     * signed says which Bot, which person, which conversation and how deep, and those are the four
+     * a caller must not be able to choose. See `handoff-callback.ts`.
+     */
+    return runDelegationCallback(
+      {
+        desk: handoffDesk,
+        mayDelegate: (id) =>
+          delegationStore
+            .mayDelegateOverCallback(id)
+            // A capability that cannot be read is not a capability: failing closed costs a hop,
+            // failing open would let an unregistered endpoint delegate because the database blinked.
+            .catch(() => false),
+        markVerified: (id, runId) => delegationStore.markVerified(id, runId),
+        caps: config.handoff,
+      },
+      { ref: name, args, run },
+    );
+  }
+
+  const tool = hostAccessTools({
+    broker: hostAccessBroker,
+    botId,
+    actorId,
+    auditStore: bootAuditStore,
+    ...(initiator ? { initiator } : {}),
+  }).find((candidate) => candidate.name === name);
+  if (!tool) {
+    return {
+      text: `${REFUSAL_MARKER} That host tool is not available for this Bot right now.`,
+      isError: true,
+    };
+  }
+  const text = await tool.execute(args);
+  return { text, isError: text.startsWith(REFUSAL_MARKER) };
+}
 
 /**
  * The live screen, proxied.

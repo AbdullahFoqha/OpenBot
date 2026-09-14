@@ -102,7 +102,9 @@ describe("who may call a tool back, and as whom", () => {
 
   const runForA = () =>
     mintRunAssertion(
-      { botId: AGENT_A, actorId: "visitor_9", runId: "r1" },
+      // With a thread, because the verdict now carries the whole assertion and the conversation an
+      // answer returns to is the field a delegating tool cannot do without.
+      { botId: AGENT_A, actorId: "visitor_9", runId: "r1", threadId: "t1" },
       KEY,
     );
 
@@ -121,6 +123,23 @@ describe("who may call a tool back, and as whom", () => {
       botId: AGENT_A,
       actorId: "visitor_9",
       initiator: { kind: "person" },
+      /*
+       * The whole verified assertion, not only the two fields an audit row needs.
+       *
+       * A tool that hands work to another Bot has to know which conversation an answer returns to
+       * and how deep the chain already is, and those are exactly the fields a caller must not be
+       * able to supply. Projected away, the only place left to read them was the request body,
+       * which is the forgery this module exists to close. Asserted in full so a later projection
+       * that drops one fails here rather than silently in a hop.
+       */
+      run: {
+        botId: AGENT_A,
+        actorId: "visitor_9",
+        runId: "r1",
+        threadId: "t1",
+        depth: 0,
+        initiator: { kind: "person" },
+      },
     });
   });
 
@@ -174,6 +193,16 @@ describe("who may call a tool back, and as whom", () => {
       botId: AGENT_A,
       actorId: "visitor_9",
       initiator: { kind: "person" },
+      // Same assertion, same fields: authenticating with the deployment-wide secret changes who is
+      // calling, never what the run is.
+      run: {
+        botId: AGENT_A,
+        actorId: "visitor_9",
+        runId: "r1",
+        threadId: "t1",
+        depth: 0,
+        initiator: { kind: "person" },
+      },
     });
   });
 
