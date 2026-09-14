@@ -12,11 +12,27 @@ import { expect } from "bun:test";
 export const A_CRASH =
   /is not a function|(?:undefined|null) is not an object|is not iterable|cannot read propert/i;
 
+/**
+ * The shape of a Composio app slug, as the placeholder every row pattern below is written around.
+ *
+ * IT WAS `[a-z]+`, WHICH IS NOT THE SHAPE OF A SLUG AND IS THE REASON THIS IS NAMED AT ALL. Composio
+ * publishes `linear_mcp`, `google_calendar`, `google_super_app` and their hyphenated neighbours, and
+ * none of those matches a run of bare letters — so `expectOnlyRefusal(said, "configName")` asked of
+ * a refusal about `google_calendar` was asserting the absence of sentences that could not have
+ * matched whatever the code said. The sibling sweep is the whole point of that helper, and for every
+ * app whose slug carries an underscore or a hyphen it was passing on a pattern that never fired.
+ *
+ * A DEFAULT IS MATCHED RATHER THAN A NAME, so the class is deliberately wide: any caller that knows
+ * which app it arranged passes the slug itself, and this stands in only where a test is asserting
+ * that a sibling sentence is absent WHATEVER row it would have named.
+ */
+const SLUG = "[a-z0-9][a-z0-9_-]*";
+
 /** Any row of the listing each family of refusals is written over, for the sibling sweep below. */
-const CONFIG_ROW = "row \\d+ of Composio's authorization configs for [a-z]+";
-const ACCOUNT_ROW = "row \\d+ of its [a-z]+ accounts for this person";
+const CONFIG_ROW = `row \\d+ of Composio's authorization configs for ${SLUG}`;
+const ACCOUNT_ROW = `row \\d+ of its ${SLUG} accounts for this person`;
 const CATALOGUE_ROW = "row \\d+ of Composio's app catalogue";
-const APP = "[a-z]+";
+const APP = SLUG;
 
 /**
  * The refusal sentences this deployment writes, named, so a test can say WHICH one it expects.
@@ -96,6 +112,12 @@ const TABLE = {
   /** `revoke`: nothing was withdrawn and their access has not been shown to end. */
   unreadableNothingWithdrawn: () =>
     /whether this person holds a grant on one of this deployment's own could not be told and nothing was withdrawn/,
+  /**
+   * `revoke`: a config of ours was readable, this person holds no account on it, and a row nothing
+   * could sort is the only finding — so there is no withdrawal to count and none is counted.
+   */
+  unreadableNoAccountWithdrawn: () =>
+    /this person holds no account on any of the ones it could read/,
   /** `connectWithFields`: what was typed into the form was not sent anywhere. */
   unreadableNothingSubmitted: () =>
     /nothing it can show is its own to connect an account against and what was typed into the form was not sent anywhere/,

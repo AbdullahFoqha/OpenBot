@@ -305,6 +305,25 @@ describe("what a label means", () => {
       destructive: true,
     });
   });
+
+  /**
+   * A PADDED LABEL IS THE LABEL, AND READ RAW IT FAILS THE DANGEROUS WAY ROUND.
+   *
+   * `Set.has` is an identity comparison, so `" destructiveHint "` matched nothing and the action was
+   * recorded with `destructive: false` — on the row that decides whether a Bot is stopped before it
+   * runs the action at all, with nothing about the row looking wrong. The slug and the version read
+   * out of the same listing are both trimmed; this was the field that was not.
+   */
+  test("a label Composio padded is still the label it spells", () => {
+    expect(effectOf([" destructiveHint "])).toEqual({
+      effect: "write",
+      destructive: true,
+    });
+    expect(effectOf(["\treadOnlyHint\n"])).toEqual({
+      effect: "read",
+      destructive: false,
+    });
+  });
 });
 
 describe("finding the vendor's own sentence", () => {
@@ -859,6 +878,68 @@ describe("listing an app's actions", () => {
         offered: ["GMAIL_FETCH_EMAILS", "GMAIL_STAGES_A_FILE"],
       });
     }
+  });
+
+  /**
+   * A SCHEMA NOBODY CAN WALK TO THE BOTTOM IS A VENDOR VALUE ADMITTED WITHOUT A GUARD, and the walk
+   * that reads it sits OUTSIDE the try that wraps the vendor's call.
+   *
+   * Every other read of this listing is bounded — the element check, the slug, the labels, the
+   * version and the description each refuse in a sentence naming the app and the action. The walk
+   * recursed as deep as the vendor nested, so a schema deep enough to exhaust the stack left
+   * through the one door with nothing standing in it: `RangeError: Maximum call stack size
+   * exceeded`, which is what `refreshTools` writes into the app row's `lastError` for an
+   * administrator to read. That sentence names neither the app nor the action, and the engine is
+   * not a party anybody can act on.
+   */
+  test("a schema nested past what this deployment walks is refused in its own sentence", async () => {
+    let schema: Record<string, unknown> = { type: "string" };
+    for (let level = 0; level < 20_000; level += 1) {
+      schema = { type: "object", properties: { deeper: schema } };
+    }
+    useComposioClient(listing(schema));
+
+    const failure = await listTools({ url: "composio://gmail" }).then(
+      () => null,
+      (raised: unknown) => raised,
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    const said = failure instanceof Error ? failure.message : "";
+    // Not the engine's, which is the whole finding: it names neither the app nor the action.
+    expect(said).not.toMatch(/call stack|RangeError/i);
+    expect(said).toMatch(/gmail/);
+    expect(said).toMatch(/GMAIL_STAGES_A_FILE/);
+    // And the listing is not committed over it, which is what every sibling refusal here promises.
+    expect(said).toMatch(/actions already recorded for this app are kept/);
+  });
+
+  /**
+   * AND THE FLAG ITSELF IS A VENDOR VALUE, WHICH THIS WAS THE LAST SITE TO READ AS `=== true`.
+   *
+   * `"true" === true` is false, so a vendor publishing the flag as a string left a file-staging
+   * action OFFERED — the filter's only fail-open direction, and the one it exists to close. What a
+   * model gets is a parameter it can only invent an `s3key` for, a call that fails at the vendor's
+   * staging lookup every time, and a grant recorded against a name that can never work.
+   */
+  test("a file flag that is not a flag is refused rather than read as no file", async () => {
+    useComposioClient(
+      listing({
+        type: "object",
+        properties: { attachment: { type: "string", file_uploadable: "true" } },
+      }),
+    );
+
+    const failure = await listTools({ url: "composio://gmail" }).then(
+      () => null,
+      (raised: unknown) => raised,
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    const said = failure instanceof Error ? failure.message : "";
+    expect(said).toMatch(/gmail/);
+    expect(said).toMatch(/GMAIL_STAGES_A_FILE/);
+    expect(said).toMatch(/actions already recorded for this app are kept/);
   });
 
   test("the schema a model is shown is the one the SDK handed over, unaltered", async () => {
@@ -3309,5 +3390,50 @@ describe("what a failed call is evidence of", () => {
       "ca_the_one_just_made",
       undefined,
     ]);
+  });
+
+  /**
+   * AND AN ACCOUNT NAMED WITH SOMETHING THAT IS NOT AN ACCOUNT ID IS NOT A CALL TO SEND.
+   *
+   * The pin was forwarded on `=== undefined` alone, so a blank one went to the wire as an EXPLICIT
+   * pin at an account nothing holds. The person's id two lines above is trimmed and refused, which
+   * is the treatment this field was owed and did not get: pinning is not decoration here. It was
+   * added because a verification spends one call to find out whether ONE key works and writes the
+   * answer down as a verdict on the account that key just made — so a pin that misses, and a pin
+   * dropped in favour of "whichever account the vendor picks", both end with a verdict about a
+   * different account. Both are refusals rather than a call.
+   */
+  test("an account named as blank space is a refusal rather than a pin nothing holds", async () => {
+    const { client, calls } = recording();
+    useComposioClient(client);
+
+    const answer = await askAction(
+      { url: "composio://gmail", actorId: "user_asker", accountId: "   " },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    // Nothing was sent, so there is no verdict to read either way.
+    expect(calls).toEqual([]);
+    expect(answer.result.isError).toBe(true);
+    expect(answer.answered).toBe(false);
+  });
+
+  /**
+   * AND `null` IS THE SPELLING A NULLABLE COLUMN USES FOR "NO ACCOUNT IN PARTICULAR", which the
+   * `=== undefined` test read as a pin. `{ connectedAccountId: null }` on the wire is a named
+   * account rather than the app-level question a re-check asks.
+   */
+  test("an account named as null is the app-level question rather than a pin", async () => {
+    const { client, calls } = recording();
+    useComposioClient(client);
+
+    await askAction(
+      { url: "composio://gmail", actorId: "user_asker", accountId: null },
+      "GMAIL_FETCH_EMAILS",
+      { __version: "20260903_00" },
+    );
+
+    expect(calls.map((call) => call.connectedAccountId)).toEqual([undefined]);
   });
 });

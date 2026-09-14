@@ -1,4 +1,4 @@
-import { brokerSentence } from "./broker";
+import { brokerSentence, flagOf } from "./broker";
 import { type ListedTool, MAX_RESULT_CHARS, type McpCallResult } from "./mcp";
 
 /**
@@ -314,7 +314,20 @@ export function effectOf(tags: readonly string[] | undefined): {
   effect: "read" | "write";
   destructive: boolean;
 } {
-  const labels = new Set(tags ?? []);
+  /*
+   * AND THE LABEL IS THE WORD, WHICH IS THE SAME READ THE SLUG AND THE VERSION BESIDE IT ALREADY
+   * GET. `Set.has` is an identity comparison, so `" destructiveHint "` matches nothing here: a
+   * destructive action is recorded with `destructive: false`, on the row that decides whether a Bot
+   * is stopped before it runs the action at all, and nothing about the row looks wrong. That is the
+   * silent wrong answer the guard one function down was written for, arriving through padding
+   * rather than through a shape — and it fails the dangerous way round, because the SAME padding on
+   * `readOnlyHint` only costs a read being called a write.
+   *
+   * The map that calls this already trims the action's slug and its version for the same reason,
+   * and the guard that admits the list measures `typeof label !== "string"` and nothing else, so a
+   * padded label reaches here exactly as a clean one does.
+   */
+  const labels = new Set((tags ?? []).map((label) => label.trim()));
   if (labels.has("destructiveHint"))
     return { effect: "write", destructive: true };
   if (labels.has("readOnlyHint")) return { effect: "read", destructive: false };
@@ -332,6 +345,33 @@ function schemaNode(value: unknown): Record<string, unknown> | null {
     ? (value as Record<string, unknown>)
     : null;
 }
+
+/**
+ * How deep a published schema may nest before this deployment stops walking it and says so.
+ *
+ * THE BOUND IS AGAINST A SCHEMA THAT NEVER ENDS, not against a complicated one, which is the same
+ * argument `./composio-adapter` makes for its page ceiling. The walk below recursed as far as the
+ * vendor nested, on the premise that a wire value's depth is bounded by something. Nothing bounds
+ * it: a body Composio published, a proxy stitched, or a toolkit generated is as deep as it is, and
+ * a stack exhausted inside a walk that sits outside every `try` here is an engine sentence in an
+ * administrator's `lastError`.
+ *
+ * 64 IS PAST ANY SCHEMA A FORM COULD BE DRAWN FROM. `$ref` is not followed — only literal nesting
+ * counts — so each level is a real object inside a real object, and the deepest thing Composio
+ * publishes is an attachment descriptor three or four in. A toolkit that genuinely needs 65 is a
+ * vendor change to read rather than a number to raise.
+ */
+const SCHEMA_DEPTH = 64;
+
+/**
+ * What the walk below answers: whether the action stages a file, or why that could not be settled.
+ *
+ * THE THIRD ANSWER IS A CLAUSE RATHER THAN A `null`, so the refusal {@link listTools} writes can say
+ * WHICH shape stopped the read without this function knowing the app or the action it is about. It
+ * reads after "Composio's action list for gmail …", in the present tense, for the reason every
+ * outcome clause in `./composio-adapter` is written at the site that knows the fact.
+ */
+type FileVerdict = boolean | string;
 
 /**
  * Whether an action asks for a file, anywhere in its schema.
@@ -373,11 +413,38 @@ function schemaNode(value: unknown): Record<string, unknown> | null {
  * Wider than the vendor's predicate by `patternProperties`, `not`, the conditional trio and the
  * seven above, which that one skips: a file staged only under a condition is still a file this
  * deployment cannot stage.
+ *
+ * AND IT ANSWERS THREE THINGS RATHER THAN TWO, WHICH IS THE GUARD EVERY OTHER READ OF THIS LISTING
+ * ALREADY HAD. This returned a boolean, so every shape it could not make sense of came back as "no
+ * file here" and the action was offered — the one direction this filter must not fail in. Two
+ * shapes reach that: a `file_uploadable` that is not a flag, and a schema nested deeper than
+ * {@link SCHEMA_DEPTH}, which this walked as far as the vendor cared to nest it. The second is the
+ * worse of the two, because the walk sits OUTSIDE the try that wraps the vendor's call: a schema
+ * deep enough to exhaust the stack left through the one door in this function with nothing standing
+ * in it, as `RangeError: Maximum call stack size exceeded`, which is the string `refreshTools`
+ * writes into the app row's `lastError` for an administrator to read. That sentence names neither
+ * the app nor the action, and the engine is not a party anybody can act on. The third answer is a
+ * clause saying which of the two it was, and {@link listTools} builds the sentence around it, where
+ * the app and the action are both in hand.
  */
-function stagesAFile(schema: unknown): boolean {
+function stagesAFile(schema: unknown, depth = 0): FileVerdict {
+  if (depth > SCHEMA_DEPTH)
+    return `nests more than ${SCHEMA_DEPTH} objects deep`;
   const node = schemaNode(schema);
   if (!node) return false;
-  if (node.file_uploadable === true) return true;
+  /*
+   * THE FLAG IS A VENDOR VALUE AND WAS THE LAST `=== true` IN THIS DEPLOYMENT. `"true" === true` is
+   * `false`, so a toolkit publishing the flag as a string left a file-staging action OFFERED —
+   * this filter's only fail-open direction, and the one it exists to close. What a model gets is a
+   * parameter whose only honest value is an `s3key` nothing here can issue, a call that fails at
+   * the vendor's staging lookup every time, and a grant recorded against a name that can never
+   * work. See {@link flagOf}: an ABSENT flag is still the app saying it stages nothing, which is
+   * most of the catalogue and is why the default is `false` rather than a refusal.
+   */
+  const flagged = flagOf(node.file_uploadable, false);
+  if (flagged === null)
+    return "publishes a file_uploadable in it that is not a flag";
+  if (flagged) return true;
 
   for (const key of [
     "properties",
@@ -388,7 +455,11 @@ function stagesAFile(schema: unknown): boolean {
     "dependencies",
   ]) {
     const children = schemaNode(node[key]);
-    if (children && Object.values(children).some(stagesAFile)) return true;
+    if (!children) continue;
+    for (const child of Object.values(children)) {
+      const answer = stagesAFile(child, depth + 1);
+      if (answer !== false) return answer;
+    }
   }
 
   for (const key of [
@@ -408,10 +479,9 @@ function stagesAFile(schema: unknown): boolean {
     "else",
   ]) {
     const branch = node[key];
-    if (
-      Array.isArray(branch) ? branch.some(stagesAFile) : stagesAFile(branch)
-    ) {
-      return true;
+    for (const child of Array.isArray(branch) ? branch : [branch]) {
+      const answer = stagesAFile(child, depth + 1);
+      if (answer !== false) return answer;
     }
   }
 
@@ -572,9 +642,48 @@ export async function listTools(connection: {
    * that IS offered is still a total refusal, for the reasons each of them gives, because that one
    * really does reach the map.
    */
-  const offered = actions.filter(
-    (action) => !stagesAFile(action.inputParameters),
-  );
+  const read = actions.map((action, position) => ({
+    action,
+    /*
+     * NAMED BY ITS SLUG WHERE THERE IS ONE AND BY ITS PLACE WHERE THERE IS NOT, because this runs
+     * ABOVE the slug guard and has to — see the paragraph above for why a file-staging action with
+     * a broken field must not take the app's refresh down. The three guards below can write
+     * `action.slug.trim()` unconditionally; this one cannot, and "action 4 of the listing" is still
+     * a row an operator can find in a dashboard.
+     */
+    named:
+      typeof action.slug === "string" && action.slug.trim() !== ""
+        ? action.slug.trim()
+        : `action ${position + 1} of the listing`,
+    verdict: stagesAFile(action.inputParameters),
+  }));
+
+  /*
+   * A SCHEMA THIS DEPLOYMENT COULD NOT READ TO THE BOTTOM IS A REFUSAL, NOT AN ACTION OFFERED.
+   *
+   * The two shapes {@link stagesAFile} cannot settle are a `file_uploadable` that is not a flag and
+   * a schema nested past {@link SCHEMA_DEPTH}, and read as "no file" they are both an action
+   * published to a model whose every call fails at the vendor's staging lookup. That is the exact
+   * thing the filter below exists to prevent, so the answer is the one the three field guards after
+   * it already give: refuse while a sentence can still name the app and the action, and keep every
+   * action, effect, version and grant the app already has.
+   *
+   * IT IS A TOTAL REFUSAL RATHER THAN A DROP, WHICH IS WHERE THIS PARTS FROM THE FILTER BESIDE IT.
+   * Dropping is right for an action this deployment has DECIDED about — a standing decision, taken
+   * the same way on every refresh, over a well-formed schema. Nothing was decided here: a short
+   * listing is committed as the complete truth about the app, so an action dropped because its
+   * schema could not be read is a `version` and an `effect` deleted over a shape nobody looked at.
+   */
+  const unreadableSchema = read.find((row) => typeof row.verdict === "string");
+  if (unreadableSchema) {
+    throw new Error(
+      `Composio's action list for ${toolkit} carries an input schema for ${unreadableSchema.named} that this deployment could not read to the bottom: it ${unreadableSchema.verdict}. Whether an action stages a file is what decides whether this deployment can offer it at all — one that does is dropped, because a model can only invent the staging key it asks for — so a schema that settles neither is not one to publish an action from. Nothing was refreshed and the actions already recorded for this app are kept rather than replaced by a listing whose schemas could not be read.`,
+    );
+  }
+
+  const offered = read
+    .filter((row) => row.verdict !== true)
+    .map((row) => row.action);
 
   /*
    * AN ACTION WITH NO SLUG BREAKS THE LISTING RATHER THAN BEING DROPPED FROM IT.
@@ -1063,7 +1172,15 @@ function isSchemaMismatch(error: unknown): boolean {
     | { name?: unknown; issues?: unknown }
     | null
     | undefined;
-  if (shaped?.name === "ZodError") return true;
+  /*
+   * THE NAME IS READ AS THE WORD IT IS, for the reason `conditionOf` in `./composio-adapter` reads
+   * the same field that way: a class name is a discriminator compared against a literal, so padding
+   * is whatever the wire or a wrapper put around it rather than part of the name. It costs less here
+   * than it does there — the shape test below answers for a padded `ZodError` anyway — which is
+   * exactly why the two readings of one kind of value should not differ between the two files.
+   */
+  const thrown = shaped?.name;
+  if (typeof thrown === "string" && thrown.trim() === "ZodError") return true;
 
   const issues = shaped?.issues;
   return (
@@ -1395,7 +1512,7 @@ function reportedFailure(
  * classifies a failure twice. See {@link ActionAnswer} for what reading `isError` as a verdict cost.
  */
 export async function callTool(
-  connection: { url: string; actorId?: string; accountId?: string },
+  connection: { url: string; actorId?: string; accountId?: string | null },
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<McpCallResult> {
@@ -1448,7 +1565,7 @@ export type ActionAnswer = {
  * being sorted into a kind afterwards by matching on the sentence it happens to carry.
  */
 export async function askAction(
-  connection: { url: string; actorId?: string; accountId?: string },
+  connection: { url: string; actorId?: string; accountId?: string | null },
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<ActionAnswer> {
@@ -1502,6 +1619,35 @@ export async function askAction(
   }
 
   /*
+   * AND THE ACCOUNT THIS CALL NAMES IS READ THE WAY THE PERSON ABOVE IT IS, WHICH IS THE GUARD IT
+   * WAS OWED AND DID NOT GET.
+   *
+   * The pin travelled on `=== undefined` alone, so everything else went to the wire as an EXPLICIT
+   * `connected_account_id` — a blank string, or the `null` a nullable column spells absence with.
+   * Both are the defect pinning was added to end, arriving from the two opposite sides: a pin at an
+   * account nothing holds, and a pin nobody meant that turns the app-level question a re-check asks
+   * into a named one. `probeBrokeredConnection` spends a single call to find out whether ONE key
+   * works and writes the answer down as a verdict on the account that key just made, so a pin that
+   * misses is a verdict about a different account — a working connection condemned, or a bad key
+   * verified by the person's other one.
+   *
+   * ABSENT IS STILL A REAL ANSWER AND IS STILL UNPINNED, which is what `null` is read as here for
+   * the reason the tags and version guards read their own nulls that way: `composio_connections`
+   * records no account id, so a re-check genuinely names none, and a Bot's ordinary tool call names
+   * none either. What is refused is the OTHER thing — a value that is PRESENT and is not an
+   * account id — because dropping that one silently is the unpinned call the paragraph above is
+   * about, and sending it is a call into an account nobody holds.
+   */
+  const pinned = connection.accountId;
+  const account =
+    typeof pinned === "string" && pinned.trim() !== "" ? pinned.trim() : null;
+  if (pinned !== undefined && pinned !== null && account === null) {
+    return unreached(
+      `This call names one account of this person's for ${toolName} to run in, and what it was handed is not an account id, so nothing was sent. An unpinned call runs in whichever account Composio picks, and a verdict written off that is a verdict about a different account.`,
+    );
+  }
+
+  /*
    * THE VENDOR'S TRY HOLDS THE VENDOR'S CALL AND NOTHING ELSE.
    *
    * `resultOf` used to be invoked inside it, so a `JSON.stringify` throw of ours — a circular
@@ -1524,9 +1670,7 @@ export async function askAction(
          * verification means one account in particular, and the difference is the caller's to
          * state. See {@link ComposioActions.execute}.
          */
-        ...(connection.accountId === undefined
-          ? {}
-          : { connectedAccountId: connection.accountId }),
+        ...(account === null ? {} : { connectedAccountId: account }),
       },
       rest,
     );

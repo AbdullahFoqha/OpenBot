@@ -50,6 +50,44 @@ export function isFieldScheme(scheme: string | null): scheme is FieldScheme {
 }
 
 /**
+ * One vendor flag as the boolean it has to be, or null where Composio sent something else.
+ *
+ * THREE INPUTS AND TWO ANSWERS IS WHAT `x === true` HAS, AND THE THIRD IS THE ONE THAT MATTERS.
+ * Every flag reading it replaced was written that way, which is exactly right about an ABSENT one —
+ * Composio genuinely publishes fields with no `required`, no `is_secret` and no `user_visible`, and
+ * each of those absences is a fact about the field that the default states honestly. It is not
+ * right about a flag that is PRESENT and is not a boolean: `"true" === true` is `false`, so the
+ * vendor saying yes and the vendor saying nothing came out of the read as one answer, and the wrong
+ * one.
+ *
+ * SO THE DEFAULT IS THE CALLER'S AND THE WRONG SHAPE IS NOBODY'S. `whenAbsent` is passed rather
+ * than assumed because the callers do not agree on it — an unstated `required` is a no, an unstated
+ * `user_visible` is a yes, an unstated `file_uploadable` is "this action stages nothing" — and a
+ * null comes back for the shape none of them has a reading for, which each turns into a sentence
+ * naming what arrived. That is this deployment's rule for every wire value: answer null on what
+ * cannot be read, and let the caller say what was lost by it.
+ *
+ * REFUSING RATHER THAN COERCING, WHICH IS A DECISION AND NOT A DEFAULT. The tempting fix for a
+ * `required` of `"true"` is to read the string, and it is wrong on the row beside it: `"false"` is
+ * a truthy string, so any coercion that rescues the required field marks every optional one
+ * required, and `Boolean("0")` and `Boolean("no")` go the same way. There is no reading of a
+ * wrong-shaped flag that is right on both halves — which is the same argument `./composio-adapter`
+ * makes about a `Number("63")` and a `String(undefined)`. And a vendor publishing a string where it
+ * documents a boolean is a change in the package rather than a setting anybody here can correct, so
+ * every sentence built off a null here ends by naming that.
+ *
+ * IT LIVES HERE RATHER THAN IN `./composio-adapter`, WHICH IS WHERE IT WAS WRITTEN AND WHERE IT WAS
+ * ONE CALLER SHORT. `./composio`'s file-staging walk was the last `=== true` in this deployment and
+ * could not reach it: the adapter imports `./composio`, so an import the other way is a cycle. Both
+ * of them already import this module and neither is imported by it, so one judgement about what a
+ * vendor flag is now has one home and the walk that fails OPEN on a wrong shape is held by it.
+ */
+export function flagOf(value: unknown, whenAbsent: boolean): boolean | null {
+  if (value === undefined || value === null) return whenAbsent;
+  return typeof value === "boolean" ? value : null;
+}
+
+/**
  * The schemes where the VENDOR'S OWN YES is the whole of the check, and nothing here is ever spent.
  *
  * `OAUTH2` and `DCR_OAUTH` are the two consent flows: somebody finishes at the vendor's own screen,

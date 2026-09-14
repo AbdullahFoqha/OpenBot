@@ -6,6 +6,7 @@ import {
   BrokerRefusalError,
   type ComposioBroker,
   type FieldScheme,
+  flagOf,
   isFieldScheme,
 } from "./broker";
 import {
@@ -401,37 +402,6 @@ function textOf(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const text = value.trim();
   return text === "" ? null : text;
-}
-
-/**
- * One vendor flag as the boolean it has to be, or null where Composio sent something else.
- *
- * THREE INPUTS AND TWO ANSWERS IS WHAT `x === true` HAS, AND THE THIRD IS THE ONE THAT MATTERS.
- * Every flag below was read that way, which is exactly right about an ABSENT one — Composio
- * genuinely publishes fields with no `required`, no `is_secret` and no `user_visible`, and each of
- * those absences is a fact about the field that the default states honestly. It is not right about
- * a flag that is PRESENT and is not a boolean: `"true" === true` is `false`, so the vendor saying
- * yes and the vendor saying nothing came out of the read as one answer, and the wrong one.
- *
- * SO THE DEFAULT IS THE CALLER'S AND THE WRONG SHAPE IS NOBODY'S. `whenAbsent` is passed rather
- * than assumed because the three callers do not agree on it — an unstated `required` is a no and an
- * unstated `user_visible` is a yes — and a null comes back for the shape none of them has a reading
- * for, which each turns into a sentence naming what arrived. That is {@link textOf}'s contract with
- * its callers, and this file's rule for every wire value: answer null on what cannot be read, and
- * let the caller say what was lost by it.
- *
- * REFUSING RATHER THAN COERCING, WHICH IS A DECISION AND NOT A DEFAULT. The tempting fix for a
- * `required` of `"true"` is to read the string, and it is wrong on the row beside it: `"false"` is
- * a truthy string, so any coercion that rescues the required field marks every optional one
- * required, and `Boolean("0")` and `Boolean("no")` go the same way. There is no reading of a
- * wrong-shaped flag that is right on both halves — which is the whole argument this file already
- * makes about a `Number("63")` and a `String(undefined)`. And a vendor publishing a string where
- * it documents a boolean is a change in the package rather than a setting anybody here can
- * correct, so every sentence built off a null here ends in {@link VENDOR_SHAPE_REMEDY}.
- */
-function flagOf(value: unknown, whenAbsent: boolean): boolean | null {
-  if (value === undefined || value === null) return whenAbsent;
-  return typeof value === "boolean" ? value : null;
 }
 
 /**
@@ -1114,6 +1084,32 @@ type CheckedAuthConfig = {
 };
 
 /**
+ * That status as the WORD it is, so the test and the sentence about it are about the same value.
+ *
+ * THE TWO READINGS OF THIS ONE FIELD DISAGREED, AND THE DISAGREEMENT REACHED AN OPERATOR AS A
+ * SENTENCE CONTRADICTING ITSELF. Both callers tested the RAW value — `=== "ENABLED"` to pick the
+ * config a connection is made against, `!== "DISABLED"` to sort the rest — while {@link named}
+ * quotes the TRIMMED one. So a status of `" ENABLED "` was refused for not being ENABLED and then
+ * reported as `"ENABLED", which is neither ENABLED nor DISABLED`: a claim the reader can see is
+ * false, ending in a remedy — upgrade the package — that is nobody's act on the page they are
+ * standing on, about a config Composio calls enabled and this deployment made.
+ *
+ * IT COSTS MORE THAN THE SENTENCE. A padded `" ENABLED "` is an app nobody can connect at all,
+ * through either door, for as long as the vendor pads it; a padded `" DISABLED "` is a disabled
+ * config an operator is never told to go and enable. This is the same argument {@link textOf} makes
+ * for every identifier in this file and {@link labelsOf} makes for a scheme name — the value is the
+ * word, and the padding is whatever the wire wrapped it in — arriving at the one field that had
+ * been left out of it.
+ *
+ * NULL FOR ANYTHING THAT IS NOT A WORD, which keeps the third answer this type exists to preserve:
+ * a status that is absent, or that arrived as a number or an object, is neither ENABLED nor
+ * DISABLED and is sorted by both callers exactly as it was before.
+ */
+function statusOf(config: CheckedAuthConfig): string | null {
+  return textOf(config.status);
+}
+
+/**
  * One app's auth configs split into the ones a decision can be made about and the ones it cannot.
  *
  * EVERY ROW IS CHECKED AND NOT ONLY THE ONES THAT TURN OUT TO BE OURS, because which ones are ours
@@ -1517,8 +1513,15 @@ type VendorCall = {
  * meant to degrade to "not a condition this file knows" rather than to fail the build.
  */
 function conditionOf(error: unknown): string | null {
-  const name = (error as { name?: unknown } | null | undefined)?.name;
-  return typeof name === "string" && name.trim() !== "" ? name : null;
+  /*
+   * AND THE NAME THAT COMES BACK IS THE ONE THAT WAS JUDGED, which it was not. This decided
+   * emptiness on the TRIMMED value and answered the PADDED one — {@link textOf}'s own defect, on
+   * the value that decides which of eight authored remedies a reader gets. The switch below
+   * compares against literals, so a name the package or a proxy padded matched none of them and
+   * every condition this file translates fell through to "Composio said nothing about why", which
+   * sends an operator to check a key that is fine.
+   */
+  return textOf((error as { name?: unknown } | null | undefined)?.name);
 }
 
 /**
@@ -3342,7 +3345,7 @@ export function buildComposioClient(
        * could get a different one; the listing is sorted on the id, so this is the same config for
        * every person and for the removal that later drops all of them.
        */
-      const config = ours.find((held) => held.status === "ENABLED");
+      const config = ours.find((held) => statusOf(held) === "ENABLED");
       if (!config) {
         /*
          * "DISABLED" IS A CLAIM, AND IT IS ONLY THIS DEPLOYMENT'S TO MAKE WHEN COMPOSIO MADE IT.
@@ -3379,7 +3382,7 @@ export function buildComposioClient(
          * {@link ComposioBroker.connectWithFields} already names its local `unsettled` for exactly
          * this reason, and is the copy this one is now spelled like.
          */
-        const unsettled = ours.filter((held) => held.status !== "DISABLED");
+        const unsettled = ours.filter((held) => statusOf(held) !== "DISABLED");
         /*
          * AND THE TWO STATES ARRIVE TOGETHER, SO NEITHER ONE TAKES THE OTHER'S TURN. These were a
          * chain — report the unsettled rows, otherwise report the disabled ones — and the paragraph
@@ -3420,10 +3423,18 @@ export function buildComposioClient(
           const words = [
             ...new Set(unsettled.map((held) => named(held.status))),
           ];
+          /*
+           * AND THE TAIL COUNTS IN THE NUMBER'S OWN WORDS. "and 1 other words" was the unpluralised
+           * spelling, in a sentence whose very next clause conjugates its own verb on the same
+           * count — so the one refusal that has to be trusted about an authorization config could
+           * not get its own arithmetic to read. See {@link STATUSES_NAMED} for why there is a tail
+           * at all.
+           */
           const shown = words.slice(0, STATUSES_NAMED);
+          const unnamed = words.length - shown.length;
           const said =
-            words.length > shown.length
-              ? `${shown.join(", ")} and ${words.length - shown.length} other words`
+            unnamed > 0
+              ? `${shown.join(", ")} and ${unnamed} other word${unnamed === 1 ? "" : "s"}`
               : shown.join(", ");
           left.push(
             `Composio describes ${unsettled.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether a connection begun against one could complete is not something this deployment can tell. ${VENDOR_SHAPE_REMEDY}`,
@@ -3506,7 +3517,25 @@ export function buildComposioClient(
           `Composio sent ${sent(redirectUrl)} where the page to send this person to for ${toolkit} belongs, so nobody was sent anywhere. ${VENDOR_SHAPE_REMEDY}`,
         );
       }
-      if (!redirectUrl) {
+      /*
+       * AND THE URL IS THE ONE THAT WAS JUDGED, WHICH IT WAS NOT — the defect {@link textOf} is
+       * written against, on the one value in this file that leaves the process in a `Location`
+       * header.
+       *
+       * `!redirectUrl` is false for a string of blank space, so "   " cleared this guard and the
+       * shape guard above it and was answered as the `redirectUrl: string` this method promises: a
+       * person who pressed Connect is redirected to nothing, having been told they were being sent
+       * to the app's own consent screen. And a url that arrived PADDED was handed back with its
+       * padding, which is not an address either — the space is percent-encoded or the redirect is
+       * refused outright. Every identifier on this path is read through {@link textOf} for exactly
+       * this reason; this was the field that was not.
+       *
+       * THE SHAPE GUARD STAYS AHEAD OF IT, because the two states have different sentences. An
+       * object or a number where a url belongs is a vendor change with a package remedy; no url at
+       * all is an ordinary fact about an auth scheme, and blank is that fact spelled the other way.
+       */
+      const page = textOf(redirectUrl);
+      if (page === null) {
         /*
          * The SDK spells `redirectUrl` nullable because not every auth scheme has one — an API-key
          * toolkit is connected by typing a secret, not by visiting a page. This deployment's
@@ -3519,7 +3548,7 @@ export function buildComposioClient(
           `Composio began a connection to ${toolkit} but answered with no page to visit, so there is nothing to send this person to. An app that is connected by entering a credential rather than by visiting a page cannot be connected from here.`,
         );
       }
-      return { redirectUrl };
+      return { redirectUrl: page };
     },
 
     async isConnected({ userId, toolkit }): Promise<boolean> {
@@ -3665,6 +3694,36 @@ export function buildComposioClient(
        * back in front of the report, which is the order a person's grants actually need.
        */
       const { ids, nameless } = withdrawableAccounts(accounts, toolkit);
+
+      /*
+       * AND NOTHING TO WITHDRAW IS ITS OWN STATE, WHICH IS THE BRANCH EVERY SIBLING OF THIS METHOD
+       * HAS AND THIS ONE DID NOT.
+       *
+       * A config of ours that IS readable, no account of this person's on it, and a row nothing
+       * could sort beside it: the partial-withdrawal throw below was what answered, and what it
+       * said was "Composio withdrew 0 of this person's 0 accounts for gmail". Both figures are
+       * counts of a set nothing measured, in the one sentence a reader is meant to act on, and
+       * "withdrew" asserts that a withdrawal happened. None did, and none was there to happen.
+       * {@link ComposioBroker.deleteAuthConfig} was corrected for the identical sentence about
+       * configs — "removed 0 of this deployment's 0" — and this is that count one listing further
+       * in, reached from the other end.
+       *
+       * STILL A REFUSAL, for the reason that method's branch is one. A grant of this person's may
+       * sit on the config behind the row nothing could sort, and the account listing was never
+       * scoped to it — so `store.ts` must not delete the row naming which app they connected on the
+       * strength of a question nothing asked.
+       *
+       * THE OTHER HALF OF "NOTHING TO WITHDRAW" IS NOT A REFUSAL AND IS ANSWERED BELOW. Every row
+       * legible, none of this person's accounts on any of them, is the ordinary state of a person
+       * who is not connected — `false`, which is what the ending of this method already says.
+       */
+      if (ids.length === 0 && nameless.length === 0 && unreadable.length > 0) {
+        throw new BrokerRefusalError(
+          `Composio described ${unreadable.length} of its authorization configs for ${toolkit} in a way this deployment cannot read, and this person holds no account on any of the ones it could read, so nothing was withdrawn and their access has not been shown to end. Whether they hold a grant on one of THOSE is outside what either reading settles and disconnecting again meets the same answer: reading those rows in Composio's own dashboard is what says whether anything is left. ${VENDOR_SHAPE_REMEDY}`,
+          { cause: everyRefusal(unreadable) },
+        );
+      }
+
       /*
        * WHAT CAME BACK IS READ, WHICH IS THE HALF THAT USED TO BE MISSING. Not throwing is not the
        * same as having been done: Composio answers a delete with a `success` saying whether it
@@ -3873,7 +3932,17 @@ export function buildComposioClient(
           }
           return candidate as { mode?: unknown; fields?: unknown };
         })
-        .find((candidate) => candidate?.mode === authScheme);
+        /*
+         * THE MODE IS A SCHEME NAME, SO IT IS THE TRIMMED ONE — the rule {@link labelsOf} states
+         * for every other scheme this file reads and the one site that was comparing the raw value.
+         * A scheme is the NAME of a flow: it is matched against the word recorded on the app's row
+         * when somebody enabled it, so a padded `" API_KEY "` is the app's own mode wearing whatever
+         * the wire wrapped it in. Read raw it compared unequal to the recorded word exactly as a
+         * mode the app had DROPPED would, and the refusal below then sent an administrator to remove
+         * the app and add it again — which records the same padded word and comes back refusing
+         * identically, which is a loop that cannot close.
+         */
+        .find((candidate) => textOf(candidate?.mode) === authScheme);
       /*
        * THE REMEDY IS AN ADMINISTRATOR'S BECAUSE THE RECORDED SCHEME IS ONLY THEIRS TO REWRITE.
        * Nothing a person pressing Connect can do changes which mode this app was enabled as, and
@@ -4005,8 +4074,16 @@ export function buildComposioClient(
            * called "undefined" and then submitted whatever was typed in it under that key — a value
            * no app reads, in a connection Composio accepts.
            */
+          /*
+           * AND THE TYPE IS READ THE WAY THE NAME BESIDE IT IS, which is the half this guard did
+           * not have. `row.type !== "string"` was the RAW value while the name one line up goes
+           * through {@link textOf}, so a padded `" string "` was refused with "a box this
+           * deployment can draw is a string" — about a field whose type IS a string, in a sentence
+           * whose own words say so. A type is a keyword and not prose: the value is the word, and
+           * the padding is whatever the wire wrapped it in.
+           */
           const name = textOf(row?.name);
-          if (row?.type !== "string" || name === null) {
+          if (textOf(row?.type) !== "string" || name === null) {
             throw new BrokerRefusalError(
               `${toolkit} asks for ${textOf(row?.displayName) ?? "a value"} as ${sent(row?.type)} under the name ${sent(row?.name)}, which cannot be filled in here: a box this deployment can draw is a string, and a box whose answer can be sent back has a name. Connecting this app is not something this deployment can offer yet.`,
             );
@@ -4107,10 +4184,20 @@ export function buildComposioClient(
        * blank, and what that makes is the credential-less account that route's required guard
        * exists to refuse.
        */
-      const named = new Set<string>();
+      /*
+       * `drawnNames` RATHER THAN `named`, WHICH IS ONLY A RENAME AND IS WORTH ONE LINE — for the
+       * second time in this file, and this one came back through a merge after the first had been
+       * diagnosed. This binding shadowed the module helper {@link named} for the whole of this
+       * method, so the function every refusal in the file quotes a vendor enum through was
+       * unreachable from the one place a new refusal here would reach for it, and an edit that did
+       * would have been calling a Set. `resolved.toolkit`'s reader says the same thing about the
+       * same word one method up; nothing is wrong today, and the next change to this block is what
+       * both renames are for.
+       */
+      const drawnNames = new Set<string>();
       return drawn.filter((field) => {
-        if (named.has(field.name)) return false;
-        named.add(field.name);
+        if (drawnNames.has(field.name)) return false;
+        drawnNames.add(field.name);
         return true;
       });
     },
@@ -4203,7 +4290,7 @@ export function buildComposioClient(
        * `find(ENABLED)` attach one app's accounts to two different configs depending on which door
        * a person came through — after which removing "the" config drops half of them.
        */
-      const config = ours.find((held) => held.status === "ENABLED");
+      const config = ours.find((held) => statusOf(held) === "ENABLED");
       if (!config) {
         /*
          * "DISABLED" IS ONLY THIS DEPLOYMENT'S CLAIM TO MAKE WHEN COMPOSIO MADE IT, for the reason
@@ -4221,7 +4308,7 @@ export function buildComposioClient(
          * disabled config in Composio's dashboard, went unsaid. It is not even that person's act,
          * which is exactly why the sentence has to carry it rather than choose.
          */
-        const unsettled = ours.filter((held) => held.status !== "DISABLED");
+        const unsettled = ours.filter((held) => statusOf(held) !== "DISABLED");
         const left: string[] = [];
         const disabled = ours.length - unsettled.length;
         if (disabled > 0) {
@@ -4233,10 +4320,18 @@ export function buildComposioClient(
           const words = [
             ...new Set(unsettled.map((held) => named(held.status))),
           ];
+          /*
+           * AND THE TAIL COUNTS IN THE NUMBER'S OWN WORDS. "and 1 other words" was the unpluralised
+           * spelling, in a sentence whose very next clause conjugates its own verb on the same
+           * count — so the one refusal that has to be trusted about an authorization config could
+           * not get its own arithmetic to read. See {@link STATUSES_NAMED} for why there is a tail
+           * at all.
+           */
           const shown = words.slice(0, STATUSES_NAMED);
+          const unnamed = words.length - shown.length;
           const said =
-            words.length > shown.length
-              ? `${shown.join(", ")} and ${words.length - shown.length} other words`
+            unnamed > 0
+              ? `${shown.join(", ")} and ${unnamed} other word${unnamed === 1 ? "" : "s"}`
               : shown.join(", ");
           left.push(
             `Composio describes ${unsettled.length} of this deployment's ${ours.length} authorization configs for ${toolkit} as ${said}, which ${words.length === 1 ? "is" : "are"} neither ENABLED nor DISABLED, so whether an account connected against one could work is not something this deployment can tell. ${VENDOR_SHAPE_REMEDY}`,

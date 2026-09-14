@@ -2161,6 +2161,52 @@ describe("withdrawing one person's grants", () => {
   });
 
   /**
+   * AND A LISTING WHOSE ONLY FINDING IS AN UNREADABLE CONFIG ROW IS ITS OWN STATE, WHICH IS THE
+   * BRANCH EVERY SIBLING OF THIS METHOD HAS AND THIS ONE DID NOT.
+   *
+   * With a config of ours that IS readable and no account on it, the partial-withdrawal throw at
+   * the end of this method was what answered: "Composio withdrew 0 of this person's 0 accounts for
+   * gmail." Both figures are counts of a set nothing measured, in the one sentence a reader is
+   * meant to act on, and "withdrew" asserts that some withdrawal happened. Nothing was withdrawn
+   * and nothing was there to withdraw. {@link ComposioBroker.deleteAuthConfig} was corrected for
+   * the identical sentence about configs — "removed 0 of this deployment's 0" — and this is the
+   * same count one listing further in.
+   *
+   * STILL A REFUSAL, which is the half that does not move: a grant of this person's may sit on the
+   * config behind the row nothing could sort, so `store.ts` must not delete the row that names
+   * their connection.
+   */
+  test("a person with no account and one unsortable config row is told that, not a count of nothing", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [{ id: "ac_gmail_nameless" }, OUR_GMAIL],
+          }),
+        },
+        connectedAccounts: { list: async () => ({ items: [] }) },
+      }),
+      () => 1_000_000,
+    );
+
+    const failure = await failureOf(
+      broker.revoke({ userId: "user_1", toolkit: "gmail" }),
+    );
+
+    expect(failure).toBeInstanceOf(BrokerRefusalError);
+    expect(failure.message).not.toMatch(A_CRASH);
+    // No count of a set nothing measured, in either position.
+    expect(failure.message).not.toMatch(/withdrew \d+ of this person's \d+/);
+    // And the reason the question could not be settled travels, as it does on every sibling branch.
+    expectOnlyRefusal(
+      everythingSaidBy(failure).join("\n"),
+      "unreadableNoAccountWithdrawn",
+      undefined,
+      ["configName"],
+    );
+  });
+
+  /**
    * THE GATE IS A COUNT AND WAS ASKING FOR AN ID IT NEVER USES.
    *
    * `isConnected` answers whether this person holds an ACTIVE account for an app, which is a
@@ -4912,6 +4958,51 @@ describe("what a malformed field of a row actually costs", () => {
   });
 
   /**
+   * THE ONE THAT DID NOT FIT IS ONE WORD, AND THE SENTENCE SAID "1 other words".
+   *
+   * `STATUSES_NAMED` bounds how many distinct statuses a refusal names, and the tail counting what
+   * was left out is written as a bare plural — in a sentence whose very next clause conjugates its
+   * own verb for the count. An operator reading a refusal that cannot get its own number right is
+   * being asked to trust it about an authorization config.
+   */
+  test("the statuses that did not fit are counted in the number's own words", async () => {
+    const WORDS = [
+      "PENDING",
+      "SUSPENDED",
+      "EXPIRED",
+      "REVOKED",
+      "ARCHIVED",
+      "DRAFT",
+    ];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: WORDS.map((status, index) => ({
+              id: `ac_${index}`,
+              name: "Linear (OpenBot)",
+              status,
+            })),
+          }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(
+      broker.authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: RETURN_URL,
+      }),
+    );
+
+    // Five named and one left over, which is one WORD.
+    expect(refusal.message).toMatch(/and 1 other word,/);
+    expect(refusal.message).not.toMatch(/1 other words/);
+  });
+
+  /**
    * A ROW NOTHING COULD SORT IS THE THIRD FACT THIS SENTENCE HAS, AND A SHADOWED NAME TOOK IT AWAY.
    *
    * `configsFor` answers three things, and one of them is the refusals for rows it could sort into
@@ -5328,6 +5419,251 @@ describe("a field Composio padded with whitespace", () => {
     );
 
     expect(ran).toHaveLength(1);
+  });
+
+  /**
+   * THE CONSENT PAGE IS THE ONE VENDOR VALUE THAT LEAVES THIS PROCESS IN A `Location` HEADER.
+   *
+   * Every other identifier on this path goes through the file's own trimming read; the url this
+   * method answers did not, so a padded one was returned with its padding and put in front of a
+   * browser. " https://… " is not an address — the space is percent-encoded or the redirect is
+   * refused outright — so a person who pressed Connect lands on nothing, having been told they were
+   * being sent to the app's own consent screen.
+   */
+  test("a padded consent page is the address this person is sent to, without the padding", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: {
+          link: async () => ({
+            redirectUrl: "  https://backend.composio.dev/s/a-link  ",
+          }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const begun = await broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl: RETURN_URL,
+    });
+
+    expect(begun).toEqual({
+      redirectUrl: "https://backend.composio.dev/s/a-link",
+    });
+  });
+
+  /**
+   * AND A URL OF BLANK SPACE IS NO PAGE AT ALL, WHICH IS THE ONE SHAPE BOTH GUARDS LET THROUGH.
+   *
+   * The shape guard above it asks only whether the value is a string, and `!redirectUrl` is false
+   * for "   " — so three spaces cleared both and were handed back as the address of a consent
+   * screen. That is the same emptiness this file's own trimming read already calls absent
+   * everywhere else: an identifier that reads as present at every glance and is unusable.
+   */
+  test("a consent page of blank space is no page to visit rather than a page", async () => {
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: { list: async () => ({ items: [OURS] }) },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "   " };
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(
+      broker.authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: RETURN_URL,
+      }),
+    );
+
+    expect(refusal).toBeInstanceOf(BrokerRefusalError);
+    // The link WAS minted — this is the vendor's answer to it — so the assertion is about what
+    // came back rather than about the call not having gone out.
+    expect(linked).toHaveLength(1);
+    expectOnlyRefusal(refusal.message, "noPageRemedy");
+  });
+
+  /**
+   * A PADDED STATUS WAS REFUSED AND THEN QUOTED WITHOUT ITS PADDING, WHICH IS A SENTENCE THAT
+   * CONTRADICTS ITSELF IN FRONT OF THE OPERATOR READING IT.
+   *
+   * `=== "ENABLED"` is the RAW status and `named` quotes the TRIMMED one, so " ENABLED " fell
+   * through to the no-enabled-config branch and was reported there as `"ENABLED", which is neither
+   * ENABLED nor DISABLED`. The remedy attached to it is a package upgrade, for a config that
+   * Composio calls enabled and that this deployment made. The two readings of one field now agree,
+   * and the config is what a connection is begun against.
+   */
+  test("a padded ENABLED is the config a connection is begun against", async () => {
+    const linked: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_ours", name: "Linear (OpenBot)", status: " ENABLED " },
+            ],
+          }),
+        },
+        connectedAccounts: {
+          link: async (...call: unknown[]) => {
+            linked.push(call);
+            return { redirectUrl: "https://backend.composio.dev/s/a-link" };
+          },
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const begun = await broker.authorize({
+      userId: "user_1",
+      toolkit: "linear",
+      returnUrl: RETURN_URL,
+    });
+
+    expect(begun).toEqual({
+      redirectUrl: "https://backend.composio.dev/s/a-link",
+    });
+    expect(linked).toEqual([
+      ["user_1", "ac_ours", { callbackUrl: RETURN_URL }],
+    ]);
+  });
+
+  /** The same read, one method over, because that block is a copy of this one rather than a call. */
+  test("a padded ENABLED is the config a typed secret is attached to", async () => {
+    const created: unknown[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_ours", name: "Linear (OpenBot)", status: " ENABLED " },
+            ],
+          }),
+        },
+        connectedAccounts: {
+          create: async (body: unknown) => {
+            created.push(body);
+            return { id: "ca_made" };
+          },
+        },
+      }),
+    );
+
+    expect(
+      await broker.connectWithFields({
+        userId: "user_1",
+        toolkit: "linear",
+        authScheme: "API_KEY",
+        values: { generic_api_key: "pplx-secret" },
+      }),
+    ).toEqual({ accountId: "ca_made" });
+    expect(created).toHaveLength(1);
+  });
+
+  /**
+   * AND A PADDED DISABLED IS DISABLED, which is the other half of the same disagreement.
+   *
+   * `!== "DISABLED"` over the raw value sorted " DISABLED " into the unsettled pile, so an operator
+   * holding one disabled config was told their package was out of date and never told the one act
+   * that would have got somebody connected: enabling it in Composio's own dashboard.
+   */
+  test("a padded DISABLED is told as disabled rather than as a word nothing knows", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async () => ({
+            items: [
+              { id: "ac_ours", name: "Linear (OpenBot)", status: " DISABLED " },
+            ],
+          }),
+        },
+      }),
+      () => 1_000_000,
+    );
+
+    const refusal = await failureOf(
+      broker.authorize({
+        userId: "user_1",
+        toolkit: "linear",
+        returnUrl: RETURN_URL,
+      }),
+    );
+
+    expect(refusal.message).toMatch(
+      /calls 1 of this deployment's 1 authorization configs for linear disabled/,
+    );
+    expect(refusal.message).not.toMatch(/neither ENABLED nor DISABLED/);
+    expectOnlyRefusal(refusal.message, "disabledRemedy");
+  });
+
+  /**
+   * A PADDED CONNECTION MODE IS THE MODE THE APP WAS ENABLED AS, and it was read as one the app had
+   * stopped publishing.
+   *
+   * `labelsOf` already trims every scheme this deployment records, on the stated ground that a
+   * scheme is the NAME of a flow and a padded `" OAUTH2 "` is the app's own. The mode published
+   * beside the form's fields is the same word compared against the same recorded one, and it was
+   * the one read that skipped the trim — so an app whose vendor padded the mode told an
+   * administrator to remove it and add it again, which records the same padded word and comes back
+   * refusing identically.
+   */
+  test("a padded connection mode still draws the form the app publishes", async () => {
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        toolkits: {
+          retrieve: async () => ({
+            auth_config_details: [
+              {
+                mode: " API_KEY ",
+                fields: {
+                  connected_account_initiation: {
+                    required: [
+                      {
+                        name: "generic_api_key",
+                        displayName: "API Key",
+                        type: " string ",
+                        required: true,
+                        is_secret: true,
+                      },
+                    ],
+                    optional: [],
+                  },
+                },
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    /*
+     * AND THE TYPE OF THE BOX IS THE SAME READ ONE FIELD IN. `row.type !== "string"` was the raw
+     * value while the name beside it went through the trim, so a padded `" string "` was refused
+     * with "a box this deployment can draw is a string" — about a field whose type IS string.
+     */
+    expect(
+      await broker.connectionFields({
+        toolkit: "perplexityai",
+        authScheme: "API_KEY",
+      }),
+    ).toEqual([
+      {
+        name: "generic_api_key",
+        label: "API Key",
+        help: "",
+        required: true,
+        secret: true,
+      },
+    ]);
   });
 });
 
