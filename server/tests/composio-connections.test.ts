@@ -20,7 +20,7 @@ import {
 import { accessFor } from "../src/plugins/access";
 import type { ComposioBroker } from "../src/plugins/broker";
 import type { ComposioActions, ComposioResult } from "../src/plugins/composio";
-import { useComposioClient } from "../src/plugins/composio";
+import { useComposioClient, VERSION_ARG } from "../src/plugins/composio";
 import {
   CustomServerRefusedError,
   createPluginStore,
@@ -156,6 +156,27 @@ const answeringToolkit = `answering-${suite}`;
 const answeringId = `composio-${answeringToolkit}`;
 /** The row that does answer for it: at the same url, and sorting before `composio-`. */
 const answeringTwinId = `aa-answering-${suite}`;
+/**
+ * THE APP WHOSE ACTIONS ARE LISTED OVER A ROW THAT ALREADY ANSWERS FOR IT.
+ *
+ * {@link answeringToolkit}'s shape one column further on, and a separate app because the two tests
+ * assert different halves of the same enable. That one is about `auth_scheme`, which round four
+ * moved onto the answering row; this one is about the ACTIONS, which `addBrokeredApp` went on
+ * refreshing onto the id it composed. `probeActionFor` reads actions by server id, and every
+ * brokered caller hands it the id {@link brokeredAppRow} resolved — so actions written under the
+ * composed name are actions nothing looks for: the app is permanently "nothing to check",
+ * `checkable` is withheld, and the Re-check button never appears.
+ *
+ * Its own slug for {@link rekeyedToolkit}'s reason — it enables an app for real, and the trail rows
+ * that leaves are append-only.
+ */
+const refreshedToolkit = `refreshed-${suite}`;
+/** What `addBrokeredApp` composes for it, which is NOT the row that answers for the app. */
+const refreshedId = `composio-${refreshedToolkit}`;
+/** The row that does answer for it: at the same url, and sorting before `composio-`. */
+const refreshedTwinId = `aa-refreshed-${suite}`;
+/** The one action Composio publishes for it: a read, asking for nothing, at a version. */
+const refreshedAction = "REFRESHED_GET_ME";
 /**
  * THE APP WHOSE ROW RECORDS NO SCHEME AT ALL, which is neither a key app nor a consent one.
  *
@@ -354,6 +375,7 @@ const ownedToolkits = [
   recheckedToolkit,
   orderedToolkit,
   answeringToolkit,
+  refreshedToolkit,
   unschemedToolkit,
 ];
 /**
@@ -764,6 +786,8 @@ async function clean() {
         unitFirstId,
         answeringId,
         answeringTwinId,
+        refreshedId,
+        refreshedTwinId,
         unschemedId,
         noAuthTwinId,
       ]),
@@ -793,6 +817,8 @@ async function clean() {
         unitFirstId,
         answeringId,
         answeringTwinId,
+        refreshedId,
+        refreshedTwinId,
         unschemedId,
         noAuthTwinId,
       ]),
@@ -1594,6 +1620,60 @@ test("an unattributed run is recorded as unattributed rather than as a blank", a
     actor: "unattributed",
     reachedAs: "unattributed",
   });
+});
+
+/**
+ * WHAT CONTENT INSPECTION JUDGES IS WHAT THE CALL WOULD SEND.
+ *
+ * CRITERION. A model that fills the reserved version key with something the inspector calls a
+ * credential does not have its call refused over it: the key is stripped before anything leaves
+ * this deployment, so it is not part of the call being judged — and what the vendor is handed is
+ * the recorded version, which is what the inspection actually ran over.
+ *
+ * REASON. `inspectToolArguments` was asked about `args`, the PRE-STRIP arguments, while the vendor
+ * is handed `vendorArgs` — the same object with the reserved key removed and the listed version
+ * merged in. Two different objects, so the gate and the call were about different things in both
+ * directions. One direction is a refusal nobody earned: a value this deployment provably discards
+ * stops a granted call, and the person is told their arguments carry credential material over
+ * material that was never going anywhere. The other is the direction that matters more, because
+ * inspection is a security boundary — whatever is merged in below the strip goes out without ever
+ * having been looked at, and a boundary that inspects a different object from the one it guards is
+ * not a boundary. The fix is one word, and the property it buys is that the two can never again be
+ * two objects.
+ *
+ * THE VENDOR'S OWN ARGUMENTS ARE ASSERTED, not just the absence of a refusal, because a refusal
+ * removed by loosening the inspector would satisfy the first half alone. What must be true is that
+ * the call went out carrying exactly what was inspected.
+ */
+test("a call is judged on the arguments it would send, not on the ones it was handed", async () => {
+  await seedApp();
+  const sent: { version: string; args: Record<string, unknown> }[] = [];
+  useAnsweringClient({
+    execute: async ({ slug, version }, args) => {
+      reached.push(slug);
+      sent.push({ version, args });
+      return answered;
+    },
+  });
+
+  const result = await store.callTool({
+    ref,
+    // A model filling in the reserved key itself, with a value the inspector reads as a provider
+    // token. Stripped unconditionally before the recorded version is merged, so it reaches nothing.
+    args: { [VERSION_ARG]: "sk-modelsuppliedvalue0123456789" },
+    botId,
+    actorId: askerId,
+  });
+
+  expect(result.isError).toBe(false);
+  // The listed revision, and no arguments at all: what the model wrote under the reserved key
+  // reached nothing, which is why refusing the call over it was a refusal nobody earned. The
+  // transport lifts the reserved key off the arguments and sends it as the version, so `args` here
+  // is what is left of what the inspection ran over.
+  expect(sent).toEqual([{ version: "20260903_00", args: {} }]);
+  expect(reached).toEqual([actionName]);
+  // And nothing was filed as refused, which is the half a person would have met on the screen.
+  expect(recordedOfType("mcp.call_rejected")).toEqual([]);
 });
 
 /**
@@ -2974,6 +3054,82 @@ test("enabling an app records its scheme where the readers read it", async () =>
   // not a refusal: what is being asserted is that the press was admitted at all.
   expect(answer.probe).toBeNull();
   expect(answer.verified).toBe(false);
+});
+
+/**
+ * ENABLING AN APP LISTS ITS ACTIONS ONTO THE ROW THAT ANSWERS FOR THE APP.
+ *
+ * CRITERION. With a row already standing at an app's url that sorts before the one Add composes,
+ * enabling that app leaves its actions where every brokered reader looks for them: the chooser
+ * answers with the app's own safe read when asked about the answering row, the record the enable
+ * hands back is that row with those actions on it, and a person holding the app is offered the
+ * Re-check the deadlock withheld.
+ *
+ * REASON. `addBrokeredApp` composed `composio-<slug>` and refreshed onto it, while `probeActionFor`
+ * is asked about the id {@link brokeredAppRow} resolves — the same single-row rule the scheme write
+ * one test above was moved onto. Where those two differ, the actions land under a name nothing
+ * reads: the chooser finds none, `checkable` is false forever, the browser draws no Re-check
+ * button, and the one press that could earn the app a verdict cannot be made. That is the
+ * `checkable`/`probe` deadlock reached through the composed id rather than through the duplicate,
+ * and it is the last site of the four rounds where a composed id stood in for the resolved row.
+ *
+ * THE ACTION ARRIVES THROUGH THE LISTING rather than being inserted afterwards, unlike every other
+ * probe fixture here, because the refresh IS what is under test: an action inserted by hand would
+ * be written at whichever id this file chose and would say nothing about where the enable put it.
+ */
+test("enabling an app lists its actions where the readers look for them", async () => {
+  useAnsweringClient({
+    listActions: async () => [
+      {
+        slug: refreshedAction,
+        description: "Says who the key belongs to.",
+        // The one label that can produce a read effect, which is the first of the probe chooser's
+        // two conditions; the empty schema is the second.
+        tags: ["readOnlyHint"],
+        inputParameters: {},
+        version: probeVersion,
+      },
+    ],
+  });
+  // The row that already answers for the app: at its url, and sorting before the `composio-` id Add
+  // is about to compose.
+  await database.insert(mcpServers).values({
+    id: refreshedTwinId,
+    title: "Refreshed App, as it was recorded before",
+    vendor: "Composio",
+    url: `composio://${refreshedToolkit}`,
+    provenance: "composio",
+    authScheme: "API_KEY",
+  });
+
+  const added = await store.addBrokeredApp({
+    slug: refreshedToolkit,
+    title: "Refreshed App",
+    by: admin,
+    connection: { kind: "fields", authScheme: "API_KEY" },
+  });
+
+  // THE CHOOSER, asked the way every brokered caller asks it: about the row the app resolves to.
+  expect(await store.probeActionFor(refreshedTwinId)).toEqual({
+    name: refreshedAction,
+    version: probeVersion,
+  });
+  // And what the enable hands its caller back is that row, carrying those actions, rather than a
+  // second row named after a convention nothing holds the app to.
+  expect(added.id).toBe(refreshedTwinId);
+  expect(added.tools.map((tool) => tool.name)).toEqual([refreshedAction]);
+
+  // AND THE READER AGREES, which is the whole point of the actions landing there: `checkable` is
+  // what the browser draws the Re-check button off, and it is computed off the resolved row.
+  await database.insert(composioConnections).values({
+    toolkit: refreshedToolkit,
+    userId: askerId,
+    verified: false,
+  });
+  const listed = await store.brokeredConnectionsFor(askerId);
+  expect(
+    listed.map((row) => ({ serverId: row.serverId, checkable: row.checkable })),
+  ).toEqual([{ serverId: refreshedTwinId, checkable: true }]);
 });
 
 /**

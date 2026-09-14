@@ -2907,11 +2907,18 @@ export function createPluginStore(options: PluginStoreOptions) {
         connection: input.connection,
       });
 
-      const id = `composio-${input.slug}`;
+      /*
+       * THE COMPOSED NAME IS SPELLED WHERE IT IS MINTED AND IS GIVEN NO BINDING TO BE REUSED FROM.
+       *
+       * It used to be `const id`, and everything below this statement then had a plausible-looking
+       * server id to reach for — which is how four review rounds each moved one site onto the
+       * resolved row and left the next one standing. See {@link _EnableNamesTheRow}: after this
+       * statement there is exactly one id in scope, and it is the answering row's.
+       */
       await database
         .insert(mcpServers)
         .values({
-          id,
+          id: `composio-${input.slug}`,
           title: input.title,
           // The broker, whoever publishes the app behind it. `vendor` is what the first-party rule
           // is checked against, and Composio is who this deployment is actually talking to.
@@ -2988,6 +2995,73 @@ export function createPluginStore(options: PluginStoreOptions) {
         });
 
       /*
+       * WHICH ROW THIS DEPLOYMENT WILL ANSWER FOR THE APP WITH, RESOLVED ONCE AND FOR EVERYTHING
+       * BELOW.
+       *
+       * CRITERION. After the upsert, every act of this method — the scheme it records, the actions
+       * it lists, the row it files on the trail and the record it hands its caller back — is about
+       * the row {@link brokeredAppRow} names for this app. The composed `composio-<slug>` is what
+       * the statement above MINTS and is a stand-in for nothing.
+       *
+       * REASON. `mcp_servers.url` has no unique index, deliberately — see {@link brokeredAppRow} —
+       * so the row this method names and the row every brokered reader resolves are allowed to be
+       * different rows, and in the ordinary two-rows-at-one-url state they are. Every act keyed on
+       * the composed id was then an act performed somewhere nothing looks. FOUR ROUNDS OF REVIEW
+       * EACH MOVED ONE OF THEM AND LEFT THE NEXT STANDING: the probe was resolved by url, then
+       * `brokeredAppRow` was introduced and the probe and the confirm routed through it, then the
+       * scheme WRITE was moved here — and the actions went on being listed under the composed name
+       * the whole time. That last one is the deadlock the single-row rule exists to close: the
+       * chooser reads actions by server id, finds none on the answering row, so `checkable` is
+       * false on every page load, the browser draws no Re-check button, and the one press that
+       * could earn the app a verdict can never be made.
+       *
+       * THE ROW IS RE-READ RATHER THAN ASSUMED, because the upsert may have created it, found it,
+       * or landed beside an older row that sorts first — and which of those happened is exactly what
+       * decides the answer. The composed name is respelled as the fallback for the unreachable case
+       * of a row this method has just written not being found at its own url, which would mean the
+       * insert above and this read disagree about what was stored; it is respelled rather than held
+       * in a binding so that nothing below can take it by mistake.
+       */
+      const answering =
+        (await brokeredAppRow(input.slug))?.id ?? `composio-${input.slug}`;
+
+      /**
+       * WHICH ROW EACH ACT OF AN ENABLE NAMES, WRITTEN DOWN BECAUSE NOTHING ELSE CAN SAY IT.
+       *
+       * Type-only and erased; see {@link Decides}. Every other roster in this file is keyed on a
+       * vocabulary the compiler already knows — {@link SchemeKind}, {@link BrokeredProbe} — and
+       * this one is keyed on the acts of a single method, because the drift being pinned is not a
+       * branch that forgot a member but a SITE that reached for the wrong name. There is no type
+       * whose inhabitants are "the things an enable does", so the checklist is the union and the
+       * roster is what forces an answer out of it: a sixth act added to `BrokeredEnableAct` fails
+       * `tsc` here until somebody says which row it is about, and the two legal answers are a closed
+       * pair rather than free text so the seam cannot drift in the direction it has drifted four
+       * times.
+       *
+       * `minted` IS THE ANSWER FOR EXACTLY ONE ACT, and that is the whole shape of the rule. The
+       * upsert has to be keyed on the composed name — it is what converts a row an administrator
+       * typed at that id into the brokered app it now is, which is a property with its own test —
+       * and every act after it is about the row the readers read.
+       */
+      type BrokeredEnableAct =
+        | "upsert"
+        | "scheme"
+        | "actions"
+        | "trail"
+        | "answer";
+      type _EnableNamesTheRow = Decides<
+        BrokeredEnableAct,
+        {
+          upsert: "minted";
+          scheme: "answering";
+          actions: "answering";
+          trail: "answering";
+          answer: "answering";
+        },
+        "minted" | "answering"
+      >;
+
+      /*
        * WRITE-ONCE, EXCEPT WHERE THERE IS NOTHING TO STRAND.
        *
        * A row's scheme is what its authorization config was created as, and every connection made
@@ -2999,26 +3073,18 @@ export function createPluginStore(options: PluginStoreOptions) {
        * With no connections there is no such dependence, so the rewrite is safe and useful — it is
        * how an operator picks up a vendor's change without removing and re-adding the app.
        *
-       * AND IT IS WRITTEN ON THE ROW THAT ANSWERS FOR THE APP, WHICH IS NOT ALWAYS THE ONE THIS
-       * METHOD NAMED.
+       * AND IT IS WRITTEN ON THE ROW THAT ANSWERS FOR THE APP, WHICH IS NOT ALWAYS THE ONE THE
+       * UPSERT NAMED.
        *
        * CRITERION. After this call, the scheme {@link brokeredAppScheme} answers with for the app is
        * the scheme this enable created its config as.
        *
-       * REASON. The statement keyed on `id` — the `composio-<slug>` composed two dozen lines above —
-       * while every reader of this column finds the app by its URL and takes the row
-       * {@link brokeredAppRow} names. `mcp_servers.url` has no unique index, deliberately, so those
-       * two are allowed to be different rows, and where they are the write and the reads were about
+       * REASON. The statement was keyed on the composed `composio-<slug>` while every reader of this
+       * column finds the app by its URL. Where those are two rows the write and the reads were about
        * different rows: an app enabled with a key that every reader calls a consent app. What the
        * person then meets is the connect form refusing them in a sentence about a sign-in screen
        * that does not exist for this app, and a Re-check button that will not press. A writer keyed
        * on a composed id has not recorded the fact; it has recorded it somewhere nothing looks.
-       *
-       * THE ROW IS RE-READ RATHER THAN ASSUMED, because the upsert above may have created it, found
-       * it, or landed beside an older row that sorts first — and which of those happened is exactly
-       * what decides the answer. `id` is the fallback for the unreachable case of a row this method
-       * has just written not being found at its own url, which would mean the insert above and the
-       * read here disagree about what was stored.
        */
       const connections = await database
         .select({ userId: composioConnections.userId })
@@ -3027,24 +3093,30 @@ export function createPluginStore(options: PluginStoreOptions) {
         .limit(1);
 
       if (connections.length === 0) {
-        const answering = await brokeredAppRow(input.slug);
         await database
           .update(mcpServers)
           .set({
             authScheme: schemeFor(input.connection),
             updatedAt: new Date(),
           })
-          .where(eq(mcpServers.id, answering?.id ?? id));
+          .where(eq(mcpServers.id, answering));
       }
 
       await recordAuditEvent(auditStore, {
         eventType: "configuration.changed",
         targetType: "mcp_server",
-        targetId: id,
+        /*
+         * THE ROW A READER WOULD GO AND LOOK AT, which is the one this deployment answers for the
+         * app with and not the one the upsert happened to key on. Where those differ the composed
+         * row exists too, so a trail naming it would send somebody to a row whose scheme, whose
+         * actions and whose Re-check button are all somewhere else — and `url` below names the app
+         * itself, so nothing about which app was enabled is lost by naming the answering row here.
+         */
+        targetId: answering,
         payload: {
           actor: input.by,
           change: "mcp_server_added",
-          server: id,
+          server: answering,
           url,
           // Named for the same reason the custom path names its own: "who enabled an app whose
           // actions nobody reviewed" is a question somebody will ask, and the answer should not
@@ -3053,13 +3125,20 @@ export function createPluginStore(options: PluginStoreOptions) {
         },
       });
 
-      // Refreshed now for the reason the paths above are: the page that enabled the app can show
-      // what it offers, and a broker that will not list it says so here rather than at first use.
-      await this.refreshTools(id);
+      /*
+       * Refreshed now for the reason the paths above are: the page that enabled the app can show
+       * what it offers, and a broker that will not list it says so here rather than at first use.
+       *
+       * ONTO THE ANSWERING ROW, which is the site this whole block is about. `mcp_tools.server_id`
+       * is what {@link probeActionFor} reads actions by and what {@link listServers} joins them on,
+       * and every brokered caller hands those the id resolved above — so actions written under the
+       * composed name are actions nothing in the brokered path can see.
+       */
+      await this.refreshTools(answering);
       const added = (await this.listServers()).find(
-        (server) => server.id === id,
+        (server) => server.id === answering,
       );
-      if (!added) throw new CatalogueEntryUnknownError(id);
+      if (!added) throw new CatalogueEntryUnknownError(answering);
       return added;
     },
 
@@ -6651,8 +6730,23 @@ export function createPluginStore(options: PluginStoreOptions) {
        * whether the arguments would carry a credential out of the deployment. It runs after policy
        * and before credentials are read or a vendor is contacted, and its result contains paths and
        * categories only: never the values it refused.
+       *
+       * IT IS ASKED ABOUT WHAT WOULD BE SENT, WHICH IS `vendorArgs` AND NOT `args`.
+       *
+       * CRITERION. The object this inspection judges is the object handed to the transport below,
+       * identically — not a version of it taken before the reserved key was stripped and the
+       * recorded one merged in.
+       *
+       * REASON. It was asked about `args`, so the gate and the call were about two different
+       * objects, and they came apart in both directions. Whatever is merged in below the strip left
+       * this deployment WITHOUT HAVING BEEN LOOKED AT, which is not a boundary at all — it is a
+       * boundary around a neighbouring value. And the reserved key, which is stripped
+       * unconditionally and provably reaches no vendor, was still judged: a model that put anything
+       * credential-shaped under `__version` had its granted call refused and its person told the
+       * arguments carry credential material, over material that was never going anywhere and a
+       * refusal no rule of this deployment's asked for.
        */
-      const contentDecision = inspectToolArguments(args);
+      const contentDecision = inspectToolArguments(vendorArgs);
       if (!contentDecision.safe) {
         await recordAuditEvent(auditStore, {
           eventType: "mcp.call_rejected",
