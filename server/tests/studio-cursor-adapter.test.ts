@@ -134,7 +134,7 @@ describe("reading the CLI as a stream of events", () => {
   test("a line that is not JSON is dropped, not quoted back as an answer", () => {
     const buffer = { rest: "" };
     const parsed = [
-      ...linesFrom(buffer, "Checking for updates...\n" + CAPTURED[4] + "\n"),
+      ...linesFrom(buffer, `Checking for updates...\n${CAPTURED[4]}\n`),
     ];
     // The CLI prints human-readable notices too. Relabelling one as the model's answer is how a
     // warning ends up quoted to a person as a result.
