@@ -18,7 +18,7 @@
  * chatter and makes a failure look like more output.
  */
 import { spawn } from "node:child_process";
-import type { AgentEvent, BackendRun, CursorBackend } from "./backend";
+import type { AgentEvent, CursorBackend } from "./backend";
 
 export type CliBackendOptions = {
   /** The executable. Named rather than found on PATH at call time, so a report can say which one. */

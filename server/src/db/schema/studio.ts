@@ -6,6 +6,7 @@
  * table here is new work for this deployment and none of it replaces an upstream one.
  */
 import {
+  boolean,
   index,
   integer,
   pgEnum,
@@ -292,3 +293,141 @@ export const studioReservations = pgTable(
     index("studio_reservations_bot_idx").on(table.botId, table.state),
   ],
 );
+
+/**
+ * The branch and worktree a task owns, for as long as it owns them.
+ *
+ * DURABLE RESOURCES, NOT SCRATCH SPACE. A worktree holds work nobody has reviewed yet, so the
+ * lifecycle that matters is not "created and deleted" but "who has it, and what is in it that would
+ * be lost". Cleanup only ever removes what this row says this task created, and only after the
+ * process that owned it is confirmed stopped.
+ */
+export const studioBranches = pgTable(
+  "studio_branches",
+  {
+    taskId: text("task_id")
+      .primaryKey()
+      .references(() => studioTasks.id, { onDelete: "cascade" }),
+    branch: text("branch").notNull(),
+    /**
+     * The commit this branch was cut from, recorded rather than inferred.
+     *
+     * A BRANCH NAME IS NOT PROOF OF ANCESTRY. A child branch named after its parent, or created from
+     * whatever HEAD happened to be, looks identical in a listing to one really cut from the parent's
+     * tip — and the difference is whether the stacked PR's diff contains the parent's changes. So the
+     * commit is written down when the branch is made and checked when the PR is opened.
+     */
+    baseCommit: text("base_commit").notNull(),
+    /** The branch this one is stacked on, when it is stacked. Null for a branch off the trunk. */
+    baseBranch: text("base_branch").notNull(),
+    /** Absolute path of the worktree, so cleanup removes what was made and nothing else. */
+    worktreePath: text("worktree_path"),
+    createdAt: createdAt(),
+  },
+  (table) => [index("studio_branches_base_idx").on(table.baseBranch)],
+);
+
+/**
+ * A pull request this deployment opened for a task.
+ *
+ * ONE ROW PER TASK, WRITTEN BEFORE THE CALL AND RECONCILED AFTER IT. Creating a PR is the classic
+ * ambiguous failure: the request times out, the PR exists, the retry opens a second one, and now two
+ * PRs claim the same work and a reviewer approves whichever they found. So a retry searches for the
+ * task's existing PR before it creates anything.
+ */
+export const studioPullRequests = pgTable(
+  "studio_pull_requests",
+  {
+    taskId: text("task_id")
+      .primaryKey()
+      .references(() => studioTasks.id, { onDelete: "cascade" }),
+    repository: text("repository").notNull(),
+    number: integer("number"),
+    url: text("url"),
+    /** What the PR was opened against. Changes when a parent merges and the child is retargeted. */
+    baseBranch: text("base_branch").notNull(),
+    headBranch: text("head_branch").notNull(),
+    /** Draft until somebody says otherwise. This deployment never opens a PR ready for review. */
+    draft: boolean("draft").notNull().default(true),
+    /**
+     * Set the moment creation is attempted, cleared when it is confirmed.
+     *
+     * The window this closes is the one between "the request left" and "the answer came back": a
+     * process that dies in it leaves this set, and the next attempt knows to search rather than
+     * create.
+     */
+    pendingSince: timestamp("pending_since", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("studio_pull_requests_repo_idx").on(table.repository)],
+);
+
+export const studioReviewVerdict = pgEnum("studio_review_verdict", [
+  "approved",
+  "changes_required",
+  "blocked",
+]);
+
+/**
+ * One review of one commit.
+ *
+ * KEYED ON THE COMMIT, WHICH IS THE WHOLE POINT. A review is a statement about a specific build, not
+ * about a task: when the author pushes again, every approval of the previous commit stops being
+ * evidence about what would be merged. Storing approval on the task loses that, and the gate then
+ * passes on the strength of somebody having approved something else.
+ *
+ * The reviewer is recorded as a real identity for the same reason: an author cannot be the sole
+ * approver, and that can only be checked if the trail says who actually looked.
+ */
+export const studioReviews = pgTable(
+  "studio_reviews",
+  {
+    id: text("id").primaryKey(),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => studioTasks.id, { onDelete: "cascade" }),
+    /** The exact commit reviewed. A different one invalidates this row as evidence. */
+    commit: text("commit").notNull(),
+    /** Which Bot or person reviewed it. Never the author. */
+    reviewerId: text("reviewer_id").notNull(),
+    /** Who wrote the commit, so the author-approves-own-work check has both halves. */
+    authorId: text("author_id").notNull(),
+    verdict: studioReviewVerdict("verdict").notNull(),
+    /** Blockers and required fixes, kept apart from improvements, which are backlog items. */
+    findings: jsonb("findings").notNull().default({}),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("studio_reviews_task_commit_idx").on(table.taskId, table.commit),
+  ],
+);
+
+/**
+ * What a task has to satisfy before it may move, and the evidence that it did.
+ *
+ * SEPARATE FROM THE TASK ROW because acceptance criteria are written before implementation and the
+ * evidence arrives after it, and a single mutable column would let the second quietly rewrite the
+ * first. A criterion that changed after the work was done is not a criterion the work met.
+ */
+export const studioAcceptance = pgTable("studio_acceptance", {
+  taskId: text("task_id")
+    .primaryKey()
+    .references(() => studioTasks.id, { onDelete: "cascade" }),
+  /** Written at Backlog -> Ready. Frozen afterwards; a change is a new Ready transition. */
+  criteria: jsonb("criteria").notNull(),
+  /** Who must review this, decided before the work rather than found afterwards. */
+  requiredReviewers: text("required_reviewers").array().notNull().default([]),
+  /** Whether a native run on a real device is a required gate for this task. */
+  requiresNativeVerification: boolean("requires_native_verification")
+    .notNull()
+    .default(false),
+  /** Whether a material experience decision needs a design direction approved first. */
+  requiresDesignApproval: boolean("requires_design_approval")
+    .notNull()
+    .default(false),
+  designApprovedAt: timestamp("design_approved_at", { withTimezone: true }),
+  createdAt: createdAt(),
+});

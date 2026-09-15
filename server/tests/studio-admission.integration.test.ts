@@ -46,9 +46,9 @@ async function clean() {
     .delete(studioReservations)
     .where(sql`${studioReservations.taskId} like ${`${suite}-%`}`);
   await database.delete(studioTasks).where(like(studioTasks.id, `${suite}-%`));
-  await database
-    .delete(studioProducts)
-    .where(like(studioProducts.id, "studio-product-%"));
+  // Every product, for the reason the delivery suite gives: one active product is a real rule, so a
+  // leftover from anything else makes this file fail against the leftover rather than its own code.
+  await database.delete(studioProducts);
   await database.delete(agents).where(like(agents.id, "studio-bot-%"));
 }
 
