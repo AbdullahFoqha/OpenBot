@@ -24,7 +24,9 @@ import {
   operationIdFor,
   runDelegationCallback,
 } from "./agents/handoff-callback";
+import { createAdmission } from "./studio/admission";
 import { createDelegationStore } from "./studio/delegation-store";
+import { loadStudioPolicy } from "./studio/policy";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
 import { createRuntimeAgentLoader } from "./agents/runtime-agents";
@@ -404,6 +406,24 @@ const handoffDesk = createHandoffDesk({
  * the capability before the hop, and the operation record around it.
  */
 const delegationStore = createDelegationStore(database);
+
+/**
+ * The studio's rules, read before anything can be admitted under them.
+ *
+ * A policy that cannot be read stops the boot. The alternative — falling back to the defaults and
+ * carrying on — is a deployment enforcing numbers nobody chose while reporting the ones in the
+ * file, and a capacity rule that is wrong in that direction is worse than none.
+ */
+const studioPolicyOutcome = await loadStudioPolicy(config.studio.policyFile);
+if (!studioPolicyOutcome.ok) {
+  throw new Error(
+    `The studio policy could not be read: ${studioPolicyOutcome.problems
+      .map((problem) => `${problem.field || "policy"} ${problem.reason}`)
+      .join("; ")}`,
+  );
+}
+const studioPolicy = studioPolicyOutcome.policy;
+const admission = createAdmission(database, studioPolicy);
 
 void recordAuditEvent(bootAuditStore, {
   eventType: "computer.policy_loaded",
@@ -1366,6 +1386,19 @@ async function runDeploymentTool(input: {
             // failing open would let an unregistered endpoint delegate because the database blinked.
             .catch(() => false),
         markVerified: (id, runId) => delegationStore.markVerified(id, runId),
+        /*
+         * Capacity at dispatch, and only where the deployment has adopted the board.
+         *
+         * A grant says a Bot MAY hand work on; a reservation says it has capacity to right now.
+         * Off by default, because a deployment with no studio tasks would otherwise refuse every
+         * hop the moment it upgraded.
+         */
+        ...(config.studio.requireReservation
+          ? {
+              hasReservation: (id: string) =>
+                admission.holdsWork(id).catch(() => false),
+            }
+          : {}),
         caps: config.handoff,
       },
       { ref: name, args, run },

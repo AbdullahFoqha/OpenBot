@@ -81,6 +81,18 @@ export type DelegationCallbackOptions = {
   mayDelegate: (botId: string) => Promise<boolean>;
   /** Recorded the first time an adapter really completes one. Best-effort; never fails the hop. */
   markVerified?: (botId: string, runId: string) => Promise<void>;
+  /**
+   * Whether this Bot is holding live studio work, checked HERE rather than at the offer.
+   *
+   * A grant is a fact about configuration and a reservation is a fact about right now. Checking
+   * capacity only when the tool list is built lets a Bot admitted an hour ago — whose task has
+   * since been suspended, released or handed to another process — keep queueing hops that consume
+   * capacity nobody reserved. The queue would happily run them.
+   *
+   * Absent means a deployment that has not adopted the studio's task admission, which behaves as
+   * every deployment did before it existed: the grant and the caps are the whole check.
+   */
+  hasReservation?: (botId: string) => Promise<boolean>;
   caps: { maxDepth: number; maxPerRun: number };
 };
 
@@ -128,6 +140,26 @@ export async function runDelegationCallback(
       text: "This Bot runs at its own endpoint and has not been registered as able to hand work on. An administrator registers that after checking the endpoint calls tools back.",
       isError: false,
     };
+  }
+
+  /*
+   * Capacity before the desk, after the capability.
+   *
+   * Ordered this way because the answers differ in kind: "your endpoint is not registered" is a
+   * configuration problem an administrator fixes, and "you are not holding work" is a state that
+   * changes by itself. Telling a Bot the second when the first is also true would send somebody
+   * looking in the wrong place.
+   */
+  if (options.hasReservation) {
+    const holding = await options
+      .hasReservation(call.run.botId)
+      .catch(() => false);
+    if (!holding) {
+      return {
+        text: "You are not holding a task in this studio right now, so there is no capacity to hand work on with. Ask for the work to be assigned first.",
+        isError: false,
+      };
+    }
   }
 
   const parsed = handoffToolParameters.safeParse(call.args);

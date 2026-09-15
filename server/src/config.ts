@@ -294,6 +294,36 @@ export type DeploymentConfig = {
    * door for them standing open.
    */
   workerSharedSecret?: string;
+  /**
+   * The Product Studio's own rules, and whether the runtime holds them.
+   *
+   * SEPARATE FROM `handoff` ON PURPOSE. `BOT_HANDOFF_MAX_DEPTH` and `BOT_HANDOFF_MAX_PER_RUN` are
+   * upstream settings about one run's delegation, and they do not and cannot express "three tasks
+   * at once across every process" — that is a count over rows, not a number carried in an
+   * assertion. Folding the two together would let a deployment believe setting the first had set
+   * the second, which is exactly the confusion the setup kit warns about.
+   */
+  studio: StudioConfig;
+};
+
+export type StudioConfig = {
+  /**
+   * Where the policy file is, when a deployment has one. Absent uses the shipped defaults.
+   *
+   * Loaded asynchronously by the runtime rather than here, because reading a file is not something
+   * `loadConfig` does and a policy that cannot be read should stop the boot where somebody is
+   * looking rather than throw inside a pure parse.
+   */
+  policyFile?: string;
+  /**
+   * Whether handing work on requires holding a studio task.
+   *
+   * OFF BY DEFAULT, and that default is the honest one: a deployment that has not created a single
+   * studio task would otherwise find every hop refused the moment it upgraded. A deployment that
+   * has adopted the board turns it on, and from then on capacity is checked at dispatch rather than
+   * only when a tool list is built.
+   */
+  requireReservation: boolean;
 };
 
 type Environment = Record<string, string | undefined>;
@@ -1031,6 +1061,20 @@ export function loadConfig(
       : {}),
     computer: computerConfig(environment),
     handoff: handoffCaps(environment),
+    studio: {
+      ...(optional(environment, "STUDIO_POLICY_FILE")
+        ? { policyFile: optional(environment, "STUDIO_POLICY_FILE") as string }
+        : {}),
+      /*
+       * Only the exact word.
+       *
+       * A safety switch read with truthiness turns `STUDIO_REQUIRE_RESERVATION=false` into `true`,
+       * which is the classic way a deployment ends up enforcing something nobody asked for. The
+       * handoff caps one file over refuse a value they cannot read for the same reason.
+       */
+      requireReservation:
+        optional(environment, "STUDIO_REQUIRE_RESERVATION") === "true",
+    },
     ...(optional(environment, "AGENT_TOOL_TOKEN")
       ? { agentToolToken: optional(environment, "AGENT_TOOL_TOKEN") as string }
       : {}),

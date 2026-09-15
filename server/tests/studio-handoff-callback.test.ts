@@ -132,6 +132,78 @@ describe("a delegating callback", () => {
     expect(seen).toHaveLength(0);
   });
 
+  test("a Bot holding no studio task cannot spend capacity nobody reserved", async () => {
+    const { desk, seen } = recordingDesk();
+    const result = await runDelegationCallback(
+      { desk, mayDelegate: always, hasReservation: async () => false, caps },
+      {
+        ref: HANDOFF_TOOL_REF,
+        args: { bot: "Engineer", task: "build the thing" },
+        run: ASSERTION,
+      },
+    );
+    expect(seen).toHaveLength(0);
+    expect(result?.text).toContain("not holding a task");
+  });
+
+  test("an unregistered endpoint is told that first, even when it also holds no task", async () => {
+    // The two answers differ in kind: one is a configuration problem an administrator fixes, the
+    // other is a state that changes by itself. Reporting the second would send somebody looking in
+    // the wrong place.
+    const { desk } = recordingDesk();
+    const result = await runDelegationCallback(
+      {
+        desk,
+        mayDelegate: async () => false,
+        hasReservation: async () => false,
+        caps,
+      },
+      {
+        ref: HANDOFF_TOOL_REF,
+        args: { bot: "Engineer", task: "build the thing" },
+        run: ASSERTION,
+      },
+    );
+    expect(result?.text).toContain("has not been registered");
+  });
+
+  test("a deployment that has not adopted the board checks the grant and the caps, as it always did", async () => {
+    const { desk, seen } = recordingDesk();
+    const result = await runDelegationCallback(
+      // No `hasReservation` at all.
+      { desk, mayDelegate: always, caps },
+      {
+        ref: HANDOFF_TOOL_REF,
+        args: { bot: "Engineer", task: "build the thing" },
+        run: ASSERTION,
+      },
+    );
+    expect(seen).toHaveLength(1);
+    expect(result?.isError).toBe(false);
+  });
+
+  test("a capacity read that fails refuses rather than letting the hop through", async () => {
+    const { desk, seen } = recordingDesk();
+    const result = await runDelegationCallback(
+      {
+        desk,
+        mayDelegate: always,
+        hasReservation: async () => {
+          throw new Error("the database blinked");
+        },
+        caps,
+      },
+      {
+        ref: HANDOFF_TOOL_REF,
+        args: { bot: "Engineer", task: "build the thing" },
+        run: ASSERTION,
+      },
+    );
+    // Failing closed costs a hop; failing open spends capacity nobody counted.
+    expect(seen).toHaveLength(0);
+    expect(result?.text).toContain("not holding a task");
+  });
+
   test("arguments that are not a handoff are refused, and nothing is sent", async () => {
     const { desk, seen } = recordingDesk();
     for (const args of [

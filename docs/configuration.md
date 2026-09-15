@@ -238,6 +238,39 @@ see the Bot can read it.
 With both caps above at zero the screen says the capability is switched off, because a grant made
 then is a row nothing will read.
 
+A Bot that runs at its own endpoint may now be granted this, but only after its endpoint has been
+registered as one that calls tools back — `POST /api/plugins/delegation`, administrators only. That
+registration is a claim about software this deployment does not run, so the row also records the
+first time the runtime actually saw that adapter complete a delegation: declared and verified are
+different things, and the register shows both. An unregistered remote Bot is refused the grant, as
+it always was, because a described tool it cannot invoke is worse than no tool — the model announces
+that it has asked somebody, and nobody was asked.
+
+## Product Studio capacity
+
+| Variable                      | Meaning                                                                                      |
+| ----------------------------- | -------------------------------------------------------------------------------------------- |
+| `STUDIO_POLICY_FILE`          | Path to a studio policy JSON file. Absent uses the shipped defaults; a file that cannot be parsed stops the boot. |
+| `STUDIO_REQUIRE_RESERVATION`  | Only the exact word `true` makes handing work on require holding a studio task. Off by default. |
+
+**These are not the handoff caps above, and setting one does not set the other.**
+`BOT_HANDOFF_MAX_DEPTH` and `BOT_HANDOFF_MAX_PER_RUN` bound one run's delegation and travel inside
+the signed run assertion. "Three execution tasks at once, across every process" cannot be expressed
+that way: it is a count over reservation rows, decided in one transaction under an advisory lock, so
+that two workers waking together cannot both read a count taken before the other had written.
+
+The defaults are one active product, three concurrent execution tasks, one primary task per Bot,
+delegation two levels deep, a 45-minute and 12-turn ceiling on one assignment, no paid fallback and
+no recurring schedules. Reviews and child tasks count against the cap; coordination does not, and
+that is the only exemption. A parent waiting on a child keeps its slot unless it suspends, which
+requires a checkpoint — a suspension with nothing written down is a cancellation calling itself a
+pause.
+
+A lease that lapses does not free a slot on its own. Taking over a lost reservation raises a fencing
+token in the same transaction, and every action a worker takes is checked against the fence it was
+admitted with, so a worker that is still running is stopped by comparison rather than by somebody
+noticing it is alive.
+
 ## Computer and supervisor
 
 | Variable                             | Meaning                                                                                   |
