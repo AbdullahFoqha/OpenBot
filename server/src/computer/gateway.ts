@@ -17,7 +17,11 @@
  * by the model is theatre: "never click Submit" is evaded by sending `{ref: "e13", name: "Continue"}`.
  * The refs are opaque to the caller precisely so that the server holds the mapping.
  */
-import { type AuditStore, recordAuditEvent } from "../audit";
+import {
+  type AuditInitiator,
+  type AuditStore,
+  recordAuditEvent,
+} from "../audit";
 import {
   ComputerStoppedError,
   ComputerUnavailableError,
@@ -94,6 +98,19 @@ export type ActionActor = {
   id: string;
   /** Null unless this is a real row in `users`, because the audit table has a foreign key to it. */
   userId?: string;
+  /**
+   * What started this, when it was not a person typing.
+   *
+   * ABSENT MEANS A PERSON, which is what every action arriving here used to be: the computer was
+   * driven by frontend tools in the browser, so there was a session behind every call. A headless
+   * run has no session and no browser, and labelling its actions as a person's would put a claim in
+   * the trail that nobody made — the trail is the product, and a trail that is confidently wrong is
+   * worse than one that is thin.
+   *
+   * Reaches the policy as well as the audit row, so `initiator.kind == "routine"` is a rule an
+   * operator can write about unattended browsing specifically.
+   */
+  initiator?: AuditInitiator;
 };
 
 export type ComputerGatewayOptions = {
@@ -515,12 +532,16 @@ export function createComputerGateway(
         : { path: "", name: "", extension: "" },
       command: subject.command ?? "",
       /*
-       * A person, and truthfully so today: a Bot's computer is driven by frontend tools in the
-       * browser, so every action arriving here came from somebody's session rather than from a
-       * schedule. #298 is the change that would make that untrue, and it is the one that has to pass
-       * the run's own initiator through instead of inheriting this.
+       * What really started this, now that it is not always a person.
+       *
+       * This used to be hardcoded to a person and was true while the only path to an action was a
+       * frontend tool in somebody's session. A headless run reaches here with no session at all, so
+       * the honest answer comes from the caller — and it comes from the authenticated runtime, never
+       * from a tool argument, for the same reason the Bot and the actor do.
+       *
+       * Absent still reads as a person, so every existing caller means exactly what it meant.
        */
-      initiator: policyInitiator(),
+      initiator: policyInitiator(actor.initiator),
       // Neutral, like the fields above: this is not an MCP call, but a `deny: mcp.effect == "write"`
       // names `mcp`, and cel-js throws on an unbound identifier — which fails closed and would refuse
       // every browser action the moment an operator wrote a rule about their tools. Empty server and
@@ -1110,6 +1131,10 @@ async function write(
     // development actor's id here makes every action fail on a constraint violation instead of being
     // recorded. Who it was is in the payload either way.
     ...(entry.actor.userId ? { actorUserId: entry.actor.userId } : {}),
+    // And what started it, so the Audit screen can tell a person's click from a routine's. Omitted
+    // rather than defaulted, because `recordAuditEvent` already reads an absent initiator as a
+    // person and two places deciding that would be two places to change it.
+    ...(entry.actor.initiator ? { initiator: entry.actor.initiator } : {}),
     payload: {
       action: entry.toolName,
       bot: entry.botId,

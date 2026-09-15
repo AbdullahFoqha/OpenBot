@@ -20,10 +20,16 @@ import { createHandoffRunner } from "./agents/handoff-runner";
 import { signHandoffDeliveryRun } from "./agents/handoff-signing";
 import { handoffTool } from "./agents/handoff-tool";
 import {
+  dedupesByArgumentsAlone,
   HANDOFF_TOOL_REF,
   operationIdFor,
   runDelegationCallback,
 } from "./agents/handoff-callback";
+import {
+  computerServerTools,
+  isServerComputerTool,
+  notAlreadyOffered,
+} from "./computer/server-tools";
 import { createAdmission } from "./studio/admission";
 import { createDelegationStore } from "./studio/delegation-store";
 import { loadStudioPolicy } from "./studio/policy";
@@ -972,7 +978,57 @@ const copilotRuntime = mountCopilotRuntime(
       route: askTheirOwnPerson,
       auditStore: bootAuditStore,
     });
-    return passing ? [passing, asking] : [asking];
+
+    /*
+     * The browser, for a run that has no browser.
+     *
+     * The computer tools are registered by the app, which means a Bot with every tab closed had no
+     * computer at all: a routine at three in the morning, and a specialist answering a hop on a
+     * replica nobody is watching, were offered nothing. These are the same actions through the same
+     * gateway — same snapshot resolution, same policy, same audit row, same control lock.
+     *
+     * OFFERED ONLY WHERE THE SURFACE HAS NOT ALREADY OFFERED THEM, and that is the whole of the
+     * double-execution guard. `input.tools` is what the caller registered: in a chat run the app
+     * has registered `computer_navigate` and friends, and adding server-owned twins would let one
+     * model call be executed by the browser and another by this process, against one browser. The
+     * names the surface sent are the names this skips, so the two sets can never overlap by
+     * construction rather than by a flag somebody has to set correctly.
+     */
+    const computer = computerGateway
+      ? computerServerTools({
+          gateway: computerGateway,
+          botId,
+          actor: { id: actorId, userId: actorId },
+          initiator: run.initiator,
+          frames: pageFrameStore,
+          /*
+           * Cancellation and capacity, checked before EVERY action rather than once at the start.
+           *
+           * A browser does not know its run ended. A click that lands after a stop is the one side
+           * effect nobody can undo, so the question is asked again each time. Only where the
+           * deployment has adopted the board: elsewhere this is every deployment's existing
+           * behaviour, which is that the policy and the control lock are the whole check.
+           */
+          ...(config.studio.requireReservation
+            ? {
+                mayAct: async () =>
+                  (await admission.holdsWork(botId).catch(() => false))
+                    ? { ok: true as const }
+                    : {
+                        ok: false as const,
+                        reason:
+                          "this run no longer holds a task in the studio, so it has stopped.",
+                      },
+              }
+            : {}),
+        })
+      : [];
+    const unattendedComputer = notAlreadyOffered(
+      computer,
+      (input.tools ?? []).map((offered) => offered.name),
+    );
+
+    return [...(passing ? [passing] : []), asking, ...unattendedComputer];
   },
   // A run started or ended on a thread; light the channel it belongs to. Fire-and-forget, keyed by
   // thread, and a scratch thread maps to no channel and signals nowhere.
@@ -1302,16 +1358,41 @@ const app = createApp(
    * signed run and the exact arguments — see `operationIdFor` — so a model cannot name one and
    * collect somebody else's answer.
    */
-  async ({ name, args, botId, actorId, initiator, run }) => {
+  async ({ name, args, botId, actorId, initiator, callId, run }) => {
     const handles =
-      name === HANDOFF_TOOL_REF || name.startsWith("host_") ? name : null;
+      name === HANDOFF_TOOL_REF ||
+      name.startsWith("host_") ||
+      isServerComputerTool(name)
+        ? name
+        : null;
     if (!handles) return null;
+
+    const act = () =>
+      runDeploymentTool({
+        name,
+        args,
+        botId,
+        actorId,
+        run,
+        ...(initiator ? { initiator } : {}),
+      });
+
+    /*
+     * Recorded only when a repeat can be told from a retry.
+     *
+     * With the adapter's call id there is no ambiguity. Without it, only the tools where an
+     * identical repeat was already treated as a repeat are recorded: a Bot may click the same
+     * button twice in one run and mean it, and answering the second from the record would drop the
+     * work while reporting success — a worse failure than the duplicate this is guarding against.
+     */
+    if (!callId && !dedupesByArgumentsAlone(name)) return act();
 
     const operationId = operationIdFor({
       botId,
       runId: run.runId,
       toolRef: name,
       args,
+      ...(callId ? { callId } : {}),
     });
     const claim = await delegationStore.claimOperation({
       operationId,
@@ -1324,14 +1405,7 @@ const app = createApp(
     // rather than refused: a retry is the adapter doing the right thing.
     if (!claim.fresh) return claim.result;
 
-    const result = await runDeploymentTool({
-      name,
-      args,
-      botId,
-      actorId,
-      run,
-      ...(initiator ? { initiator } : {}),
-    });
+    const result = await act();
     /*
      * Recorded even when the tool refused, because a refusal is an answer this side produced and a
      * retry should see the same one. Failing to record is not a reason to undo the work: the hop is
@@ -1403,6 +1477,50 @@ async function runDeploymentTool(input: {
       },
       { ref: name, args, run },
     );
+  }
+
+  /*
+   * The browser, reached from somebody else's process.
+   *
+   * A remote Bot is handed these as descriptions and calls them back here, which is the only way an
+   * endpoint-hosted Bot gets a computer at all: it cannot reach `agent-computer` itself, and it must
+   * not — the gateway is where the policy and the trail are.
+   *
+   * Built per call from the verified run, so the Bot whose computer this is and the person it is for
+   * are the deployment's statement rather than the caller's. A callback naming another Bot's
+   * computer is not refused by a check here; it is impossible, because the Bot never comes from the
+   * request.
+   */
+  if (computerGateway && isServerComputerTool(name)) {
+    const tool = computerServerTools({
+      gateway: computerGateway,
+      botId,
+      actor: { id: actorId, userId: actorId },
+      ...(initiator ? { initiator } : {}),
+      frames: pageFrameStore,
+      ...(config.studio.requireReservation
+        ? {
+            mayAct: async () =>
+              (await admission.holdsWork(botId).catch(() => false))
+                ? { ok: true as const }
+                : {
+                    ok: false as const,
+                    reason:
+                      "this run no longer holds a task in the studio, so it has stopped.",
+                  },
+          }
+        : {}),
+    }).find((candidate) => candidate.name === name);
+    if (!tool) {
+      return {
+        text: `${REFUSAL_MARKER} That computer tool is not available for this Bot right now.`,
+        isError: true,
+      };
+    }
+    const text = await tool.execute(args);
+    // A refusal from the gateway is an answer the Bot says out loud, so it is not flagged as an
+    // error: `isError` is for a call that could not be made, and this one was made and declined.
+    return { text, isError: false };
   }
 
   const tool = hostAccessTools({

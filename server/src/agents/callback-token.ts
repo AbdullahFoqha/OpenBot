@@ -256,6 +256,19 @@ export type AgentToolCallInput = {
   ref: string;
   /** The tool arguments, defaulting to `{}` when absent. */
   args: Record<string, unknown>;
+  /**
+   * The adapter's own id for this tool call, when it sends one.
+   *
+   * WHAT IT IS FOR, AND WHAT IT IS NOT. It is how a retry of one call is told apart from a second
+   * call that happens to look identical — a Bot scrolling the same page twice in one run is doing
+   * two things, and a Bot whose socket died and sent again is doing one. Nothing else keys off it:
+   * the Bot, the person and the run come from the signed assertion, so the worst a caller can do by
+   * choosing this is collect its OWN earlier answer.
+   *
+   * Absent means the adapter does not send one, which is most of them, and the deployment falls
+   * back to deduplicating only the calls where an identical repeat is already treated as a repeat.
+   */
+  callId?: string;
 };
 
 export function parseAgentToolCallInput(
@@ -268,17 +281,30 @@ export function parseAgentToolCallInput(
   if (typeof name !== "string" || !name.trim()) {
     return { ok: false, error: "A tool is required." };
   }
+  /*
+   * Read with the same suspicion as `name` and `args`, and capped.
+   *
+   * It reaches a primary key, so a caller sending a megabyte here would be a caller choosing how
+   * much of this deployment's index to spend. Anything that is not a non-empty string is simply
+   * absent, which is a well-defined state rather than a refusal: an adapter that sends nothing and
+   * one that sends nonsense both get the conservative path.
+   */
+  const rawCallId = (body as { toolCallId?: unknown }).toolCallId;
+  const callId =
+    typeof rawCallId === "string" && rawCallId.trim()
+      ? rawCallId.trim().slice(0, 200)
+      : undefined;
+
+  const ref = name
+    .trim()
+    .replace(/^mcp__/, "")
+    .replace("__", "/");
+
   const rawArgs = (body as { args?: unknown }).args;
   if (rawArgs === undefined) {
     return {
       ok: true,
-      value: {
-        ref: name
-          .trim()
-          .replace(/^mcp__/, "")
-          .replace("__", "/"),
-        args: {},
-      },
+      value: { ref, args: {}, ...(callId ? { callId } : {}) },
     };
   }
   if (!rawArgs || typeof rawArgs !== "object" || Array.isArray(rawArgs)) {
@@ -287,11 +313,9 @@ export function parseAgentToolCallInput(
   return {
     ok: true,
     value: {
-      ref: name
-        .trim()
-        .replace(/^mcp__/, "")
-        .replace("__", "/"),
+      ref,
       args: rawArgs as Record<string, unknown>,
+      ...(callId ? { callId } : {}),
     },
   };
 }

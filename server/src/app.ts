@@ -138,6 +138,8 @@ export type DeploymentToolCaller = (input: {
   botId: string;
   actorId: string;
   initiator?: AuditInitiator;
+  /** The adapter's own id for this call, when it sent one. See `AgentToolCallInput`. */
+  callId?: string;
   /**
    * The whole verified run, for the server-owned tools that need more than the Bot.
    *
@@ -1381,6 +1383,9 @@ export function createApp(
           botId: verdict.botId,
           actorId: verdict.actorId,
           initiator: verdict.initiator,
+          ...(parsedCall.value.callId
+            ? { callId: parsedCall.value.callId }
+            : {}),
           // The verified assertion, whole. Never `body.run` again: that is the string the caller
           // presented, and this is what checking it produced.
           run: verdict.run,

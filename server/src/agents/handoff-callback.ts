@@ -45,17 +45,42 @@ export function operationIdFor(input: {
   runId: string;
   toolRef: string;
   args: Record<string, unknown>;
+  /**
+   * The adapter's own id for this call, when it sent one.
+   *
+   * PREFERRED OVER THE ARGUMENTS WHEN PRESENT, because the arguments answer the wrong question for
+   * some tools. Two `computer_scroll` calls with the same `deltaY` in one run are a Bot scrolling
+   * twice, and deduplicating them would silently drop half the scrolling. The adapter's call id
+   * distinguishes a second call from a second delivery of the first, which is exactly the
+   * distinction being made.
+   */
+  callId?: string;
 }): string {
   return createHash("sha256")
     .update(
-      JSON.stringify([
-        input.botId,
-        input.runId,
-        input.toolRef,
-        canonical(input.args),
-      ]),
+      JSON.stringify(
+        input.callId
+          ? [input.botId, input.runId, input.toolRef, "call", input.callId]
+          : [input.botId, input.runId, input.toolRef, canonical(input.args)],
+      ),
     )
     .digest("hex");
+}
+
+/**
+ * Whether a repeated call to this tool, with no adapter call id, may be answered from the record.
+ *
+ * TRUE ONLY WHERE AN IDENTICAL REPEAT IS ALREADY A REPEAT. Handing the same work to the same Bot
+ * twice in one run is one hop — the handoff desk decided that long before this existed — and a host
+ * command is approved by a person per command. A browser action is not like that: a Bot may click
+ * the same button or scroll the same page twice in one run and mean it both times, and answering
+ * the second from the record would drop work while reporting success.
+ *
+ * With an adapter call id there is no guessing and this does not apply: a retry and a second call
+ * are told apart by the caller, which is the only place that really knows.
+ */
+export function dedupesByArgumentsAlone(toolRef: string): boolean {
+  return toolRef === HANDOFF_TOOL_REF || toolRef.startsWith("host_");
 }
 
 function canonical(value: unknown): unknown {
