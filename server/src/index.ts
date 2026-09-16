@@ -32,6 +32,7 @@ import {
 } from "./computer/server-tools";
 import { createAdmission } from "./studio/admission";
 import { createStudioDispatcher } from "./studio/dispatch";
+import { createNativeWorker } from "./native-worker/worker";
 import { createDelegationStore } from "./studio/delegation-store";
 import { createTaskStore } from "./studio/task-store";
 import { loadStudioPolicy } from "./studio/policy";
@@ -434,10 +435,18 @@ if (!studioPolicyOutcome.ok) {
 const studioPolicy = studioPolicyOutcome.policy;
 const admission = createAdmission(database, studioPolicy);
 const studioTaskStore = createTaskStore(database);
+/**
+ * In-process Mac device leases for Maestro / simctl (not the HTTP native-worker service).
+ * Required so quality-engineer maestroFlow can register a UDID before running.
+ */
+const studioNativeWorker = createNativeWorker({
+  token: process.env.STUDIO_NATIVE_WORKER_TOKEN ?? "studio-local-native-worker",
+});
 const studioDispatcher = createStudioDispatcher({
   database,
   admission,
   taskStore: studioTaskStore,
+  nativeWorker: studioNativeWorker,
 });
 
 void recordAuditEvent(bootAuditStore, {
