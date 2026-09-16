@@ -58,14 +58,19 @@ while (Date.now() < deadline) {
 
 const evidence = last?.evidence ?? last?.task?.evidence ?? {};
 const maestro = evidence.maestro ?? last?.maestro ?? null;
+const npmOk = Array.isArray(evidence.checkAfter)
+  ? evidence.checkAfter.every((c) => c.exitCode === 0)
+  : false;
+const maestroOk = Boolean(maestro && maestro.exitCode === 0);
 const result = {
-  pass: Boolean(maestro && maestro.exitCode === 0 && evidence.ok !== false),
+  pass: Boolean(evidence.ok === true && npmOk && maestroOk),
   taskId,
   state: last?.state ?? last?.task?.state,
   checkAfter: evidence.checkAfter ?? null,
   maestro,
   blocker: evidence.blocker ?? last?.blocker ?? null,
   worktreePath: evidence.worktreePath ?? null,
+  evidenceOk: evidence.ok ?? null,
 };
 
  // Also sniff latest maestro stamp under studio-local

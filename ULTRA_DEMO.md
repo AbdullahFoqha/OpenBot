@@ -1,40 +1,65 @@
 # Ultra demo (cold solo, ≤15 min)
 
-**Prereq:** `./studio start` → http://127.0.0.1:3010 · product `/Users/abdullah/Documents/projects/pocket-love` · Claude shim `:3013` + Cursor signed in.
+**Prereq (≤2 min):** `./studio start` → http://127.0.0.1:3010 · selected product `/Users/abdullah/Documents/projects/pocket-love` · Claude shim `:3013` + Cursor signed in · `:3012` health 200.
 
-## A) Smoke (5–8 min) — already proven
+Timer starts after prereq.
+
+## A) Smoke (5–8 min) — coding path
 
 1. New channel → **Studio Lead**.
-2. Paste (clipboard, not slow typing):
+2. Paste (clipboard):
 
 > Create `src/ultra-demo-flag.ts` exporting `const ULTRA_DEMO = true` with a one-line comment. Call `studio_run_task` now (react-native-engineer). Reply with taskId first. No clarify menus, no host_* product writes. Hand back Shipped / Evidence / Untested / Next when done.
 
 3. Pass: fresh `taskId`, worktree under Documents/projects, typecheck/tests green, draft PR, Lead handback.
 
-## B) Stretch — Test Screen (proven 2026-09-16)
+## B) Stretch — Test Screen (optional)
 
-Engineer PR #25 + QA PR #26 already shipped that path. Optional re-run uses `studio-local/ui-test/u3-engineer-first-prove.mjs` (clipboard paste).
+Engineer PR #25 + QA path already proven. Re-run: `studio-local/ui-test/u3-engineer-first-prove.mjs` (clipboard paste). Skip if short on time.
 
-## C) Native QA (Maestro) — live on quality-engineer tasks
+## C) Native QA (Maestro) — live QE path (≤5 min wall if Release app warm)
 
-One-command (auto-install + dirty-sim reset + prefer Release):
+### Preferred: same dispatcher as Lead tools (HTTP prove)
+
+```bash
+cd /Users/abdullah/Developer/openbot-studio
+node studio-local/ui-test/qe-maestro-e2e.mjs
+```
+
+Posts to `POST /api/studio/tasks` with:
+
+- `ownerBotId=quality-engineer`
+- `maestroFlow=.maestro/onboard.yaml`
+- `deviceUdid=812A595B-0FDA-4C3F-9346-088E6C07A489` (iPhone 17 Pro)
+- AC includes `maestro:` / `device:` lines
+
+Pass: `evidence.ok=true`, npm typecheck+test exit 0, **`maestro.exitCode=0`**.
+
+Evidence:
+
+- Result JSON: `studio-local/ui-test/out/qe-maestro-e2e-result.json`
+- Maestro stamp (worktree): `…/<task-worktree>/studio-local/ui-test/out/maestro/<stamp>/` (`meta.txt`, `install.log`, `reset.log`, `maestro.log`, `debug/`)
+
+Proven live: task `task-95d84d7e-1731-4ce8-afb4-d985fab64578` → stamp `2026-09-16T1425Z`.
+
+### Or via Lead/QE chat
+
+> Call `studio_run_task` with `ownerBotId=quality-engineer`, `maestroFlow=".maestro/onboard.yaml"`, `deviceUdid=812A595B-0FDA-4C3F-9346-088E6C07A489`. Prefer Release install (no Metro). Include typecheck/tests. Hand back with Maestro evidence path.
+
+### Shell-only (no studio task)
 
 ```bash
 STUDIO_INSTALL_MODE=release ./studio-local/run-maestro-flow.sh
-# evidence: studio-local/ui-test/out/maestro/<stamp>/  (expect exit=0)
+# defaults: preferred UDID, dirty-sim reset ON, clearState in onboard.yaml
+# evidence: studio-local/ui-test/out/maestro/<stamp>/
 ```
 
-Prefer iPhone 17 Pro UDID in `studio-local/MAESTRO_INVENTORY.md`. Onboard flow uses `clearState: true`; studio reset is ON by default (`STUDIO_MAESTRO_RESET=1`).
-
-Or via Lead/QE chat:
-
-> Call studio_run_task with ownerBotId=quality-engineer and maestroFlow=".maestro/onboard.yaml". Prefer Release install (no Metro). Include typecheck/tests. Hand back with Maestro evidence path.
-
-Proven exit=0: `20260916T055901Z` (reset+Release), `20260916T055953Z` (clearState alone).
+Defaults: `STUDIO_INSTALL_MODE=release` (TS + shell), `STUDIO_MAESTRO_RESET=1`, onboard `launchApp: clearState: true`.
 
 ## Fail = not ultra
 
 - Lead asks for dashboard Run Task / clarify menus when AC is clear
 - `host_*` instead of `studio_run_task`
-- Studio dies mid-chat (should be fixed — PGID isolation)
+- Studio dies mid-chat (PGID isolation should prevent)
 - Silent no-op with no taskId
+- QE Maestro blocked as “no changes” or “no native worker” (fixed: verify-only + in-process nativeWorker)

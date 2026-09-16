@@ -36,8 +36,8 @@ Ask Lead in chat → bots drive **Mac + browser** without babysitting → Engine
 3. ~~QE `maestro:` AC template~~ — `QE_AC_MAESTRO_TEMPLATE.md`; prefer Release / clearState.
 4. ~~Silent server death~~ — PGID isolation `0f6e682` live after idle restart.
 5. ~~Dirty-sim onboard~~ — `0807827` exit=0 evidence `20260916T055901Z`.
-6. Default `STUDIO_INSTALL_MODE=release` in QE TS runner env (belt-and-suspenders).
-7. Cold solo demo ≤15 min using `ULTRA_DEMO.md` + Maestro Release recipe.
+6. ~~Default `STUDIO_INSTALL_MODE=release`~~ — TS `2395912` + shell `bd195c8` (JSDoc `53fd22d`); studio on `53fd22d`.
+7. ~~Cold solo demo ≤15 min~~ — `ULTRA_DEMO.md` matches live QE E2E (`qe-maestro-e2e.mjs` / maestroFlow + Release defaults); proven task-95d84d7e…
 8. Optional: push OpenBot draft PRs #1/#2 when ready for review.
 
 ## Constraints (unchanged)
