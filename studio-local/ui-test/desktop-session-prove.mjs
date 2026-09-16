@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * P0.3 prove: TextEdit type (app scripting) + screenshot + stop on Abdullahs-MBP.
+ * P0.3 prove: TextEdit activate + type + screenshot + stop on Abdullahs-MBP.
  */
 import { access, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -34,8 +34,9 @@ try {
     body: JSON.stringify({
       app: "TextEdit",
       steps: [
-        { action: "type", text: "P03_DESKTOP_PROVE", app: "TextEdit" },
         { action: "wait", ms: 400 },
+        { action: "type", text: "P03 desktop session prove" },
+        { action: "wait", ms: 300 },
         { action: "screenshot", name: "02-typed" },
       ],
     }),
@@ -44,18 +45,10 @@ try {
   result.start = { status: startRes.status, body: startBody };
   if (!startRes.ok) throw new Error(startBody.error || `start ${startRes.status}`);
 
-  const shot =
-    startBody.session?.screenshots?.find((p) => String(p).includes("02-typed")) ||
-    startBody.session?.screenshots?.[0];
+  const shots = startBody.session?.screenshots || [];
+  const shot = shots.find((p) => p.includes("02-typed")) || shots[0];
   result.screenshotPath = shot || null;
   result.screenshotExists = shot ? await exists(shot) : false;
-
-  // clean quit via action then stop
-  await fetch(`${BASE}/api/studio/desktop/session/action`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ steps: [{ action: "quit", app: "TextEdit", saving: "no" }] }),
-  });
 
   const stopRes = await fetch(`${BASE}/api/studio/desktop/session/stop`, { method: "POST" });
   const stopBody = await stopRes.json();
@@ -63,6 +56,18 @@ try {
 
   const statusBody = await fetch(`${BASE}/api/studio/desktop/session`).then((r) => r.json());
   result.statusAfterStop = statusBody;
+
+  // Best-effort close TextEdit doc without saving (not part of pass criteria)
+  try {
+    const { spawnSync } = await import("node:child_process");
+    spawnSync(
+      "/usr/bin/osascript",
+      ["-e", 'tell application "TextEdit" to close front document saving no'],
+      { encoding: "utf8" },
+    );
+  } catch {
+    /* ignore */
+  }
 
   result.pass =
     startRes.status === 201 &&
@@ -74,11 +79,6 @@ try {
   result.error = err instanceof Error ? err.message : String(err);
   try {
     await fetch(`${BASE}/api/studio/desktop/session/stop`, { method: "POST" });
-    await fetch(`${BASE}/api/studio/desktop/session/action`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ steps: [{ action: "quit", app: "TextEdit", saving: "no" }] }),
-    }).catch(() => null);
   } catch {
     /* ignore */
   }

@@ -20,7 +20,7 @@ import {
   type BrowserStep,
 } from "./browser-session";
 import {
-  actionDesktopSession,
+  runDesktopActions,
   getDesktopSession,
   startDesktopSession,
   stopDesktopSession,
@@ -214,7 +214,7 @@ export function studioTools(options: {
               note: "Session stays open until studio_desktop_session stop. Screenshots under session.outDir.",
             });
           }
-          const result = await actionDesktopSession(steps);
+          const result = await runDesktopActions(steps);
           if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
           return JSON.stringify({ ok: true, session: result.session });
         },

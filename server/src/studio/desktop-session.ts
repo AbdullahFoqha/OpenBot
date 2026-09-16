@@ -1,16 +1,16 @@
 /**
  * P0.3 — Mac desktop GUI session (not Cursor coding).
  *
- * Drives local apps via osascript + /usr/sbin/screencapture. Evidence screenshots
- * land under studio-local/ui-test/out/desktop/<stamp>/.
+ * Drives the local Mac with osascript (System Events) + /usr/sbin/screencapture.
+ * Evidence screenshots land under studio-local/ui-test/out/desktop/<stamp>/.
  *
- * Safety (hard limits):
- * - Never escalates privileges (no sudo, no admin prompts automation).
- * - No arbitrary shell steps. Destructive OS actions (erase disk, change
- *   security, mass delete, password prompts) are out of scope and refused.
- * - UI click/keystroke via System Events needs macOS Accessibility for the
- *   process running the studio server; app-dictionary scripting (e.g. TextEdit
- *   text) works without Accessibility and is preferred for proves.
+ * Safety (hard limits — not preferences):
+ * - No privilege escalation (never sudo / admin prompts / authorization).
+ * - No arbitrary shell. Only activate / click / type / key / wait / screenshot.
+ * - Destructive OS actions (erase disk, change security prefs, send mail as user
+ *   without an explicit product tool, etc.) are OUT OF SCOPE and refused if
+ *   someone tries to smuggle them via a "shell" or "open" step.
+ * - One session at a time.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -21,11 +21,9 @@ export type DesktopStep =
   | { action: "wait"; ms: number }
   | { action: "screenshot"; name?: string }
   | { action: "activate"; app: string }
-  | { action: "open"; app: string }
-  | { action: "type"; text: string; app?: string }
-  | { action: "keystroke"; text: string }
   | { action: "click"; x: number; y: number }
-  | { action: "quit"; app: string; saving?: "yes" | "no" | "ask" };
+  | { action: "type"; text: string }
+  | { action: "key"; key: string; modifiers?: string[] };
 
 export type DesktopSessionInfo = {
   id: string;
@@ -34,27 +32,39 @@ export type DesktopSessionInfo = {
   stamp: string;
   outDir: string;
   screenshots: string[];
-  log: string[];
   startedAt: string;
   stoppedAt?: string;
   error?: string;
+  backend: "osascript+screencapture";
 };
 
-/** Apps we refuse to drive (privilege / destructive surface). */
-const DENIED_APPS = new Set(
-  [
-    "terminal",
-    "iterm",
-    "iterm2",
-    "warp",
-    "system settings",
-    "system preferences",
-    "securityagent",
-    "disk utility",
-    "keychain access",
-    "users & groups",
-  ].map((s) => s.toLowerCase()),
-);
+const ALLOWED_KEYS = new Set([
+  "return",
+  "enter",
+  "tab",
+  "escape",
+  "space",
+  "delete",
+  "backspace",
+  "up",
+  "down",
+  "left",
+  "right",
+]);
+
+const ALLOWED_MODIFIERS = new Set(["command", "option", "control", "shift"]);
+
+/** Apps we refuse to activate (security / privilege surfaces). */
+const BLOCKED_APP_PATTERNS = [
+  /system preferences/i,
+  /system settings/i,
+  /securityagent/i,
+  /password/i,
+  /keychain/i,
+  /terminal/i,
+  /iterm/i,
+  /sudo/i,
+];
 
 function repoRoot(): string {
   return process.env.STUDIO_REPO_ROOT?.trim() || process.cwd();
@@ -68,13 +78,51 @@ function stampNow(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
+function runCapture(cmd: string, args: string[], input?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => {
+      stdout += String(d);
+    });
+    child.stderr.on("data", (d) => {
+      stderr += String(d);
+    });
+    child.on("close", (code) => {
+      resolve({ code: code ?? 1, stdout, stderr });
+    });
+    child.on("error", (err) => {
+      resolve({ code: 1, stdout, stderr: err.message });
+    });
+    if (input != null) {
+      child.stdin.write(input);
+      child.stdin.end();
+    } else {
+      child.stdin.end();
+    }
+  });
+}
+
+async function osascript(script: string): Promise<void> {
+  const result = await runCapture("/usr/bin/osascript", ["-"], script);
+  if (result.code !== 0) {
+    throw new Error(result.stderr.trim() || result.stdout.trim() || `osascript failed (${result.code})`);
+  }
+}
+
 function assertSafeApp(app: string): void {
-  const key = app.trim().toLowerCase();
-  if (!key) throw new Error("app name is required.");
-  if (DENIED_APPS.has(key) || key.includes("sudo") || key.includes("password")) {
-    throw new Error(
-      `Refusing to drive app "${app}" — privilege/destructive OS surfaces are out of scope for studio_desktop_session.`,
-    );
+  const trimmed = app.trim();
+  if (!trimmed || trimmed.length > 120) {
+    throw new Error("app name/bundle is required and must be short.");
+  }
+  if (/[\r\n;`|$]/.test(trimmed)) {
+    throw new Error("app name contains unsafe characters.");
+  }
+  for (const re of BLOCKED_APP_PATTERNS) {
+    if (re.test(trimmed)) {
+      throw new Error(`Activating “${trimmed}” is blocked for safety (privilege / shell surface).`);
+    }
   }
 }
 
@@ -82,211 +130,113 @@ function escapeAppleScriptString(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-function runCommand(cmd: string[], timeoutMs = 30_000): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd[0]!, cmd.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`Command timed out: ${cmd.join(" ")}`));
-    }, timeoutMs);
-    child.stdout.on("data", (d) => {
-      stdout += String(d);
-    });
-    child.stderr.on("data", (d) => {
-      stderr += String(d);
-    });
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
-    });
-  });
-}
-
-async function osascript(lines: string): Promise<string> {
-  const result = await runCommand(["/usr/bin/osascript", "-e", lines], 45_000);
-  if (result.code !== 0) {
-    throw new Error(result.stderr || result.stdout || `osascript failed (${result.code})`);
-  }
-  return result.stdout;
-}
-
 let session: DesktopSessionInfo | null = null;
 let abortRequested = false;
 let runLock: Promise<void> | null = null;
+let shotIndex = 1;
 
 export function getDesktopSession(): DesktopSessionInfo | null {
-  return session
-    ? { ...session, screenshots: [...session.screenshots], log: [...session.log] }
-    : null;
+  return session ? { ...session, screenshots: [...session.screenshots] } : null;
 }
 
-function logLine(msg: string): void {
-  if (session) session.log.push(`${new Date().toISOString()} ${msg}`);
-}
-
-async function takeShot(name: string): Promise<string> {
+async function takeShot(name?: string): Promise<string> {
   if (!session) throw new Error("No active desktop session.");
-  const file = name.endsWith(".png") ? name : `${name}.png`;
+  const file = (name ?? `${String(shotIndex++).padStart(2, "0")}-shot`).replace(/\.png$/i, "") + ".png";
   const path = join(session.outDir, file);
-  const result = await runCommand(["/usr/sbin/screencapture", "-x", "-t", "png", path], 20_000);
+  const result = await runCapture("/usr/sbin/screencapture", ["-x", "-T", "0", path]);
   if (result.code !== 0) {
-    throw new Error(result.stderr || `screencapture failed (${result.code})`);
+    throw new Error(result.stderr.trim() || `screencapture failed (${result.code})`);
   }
   session.screenshots.push(path);
-  logLine(`screenshot ${path}`);
   return path;
 }
 
 async function activateApp(app: string): Promise<void> {
   assertSafeApp(app);
-  await osascript(`tell application "${escapeAppleScriptString(app)}" to activate`);
-  session!.app = app;
-  logLine(`activate ${app}`);
-}
-
-async function openApp(app: string): Promise<void> {
-  assertSafeApp(app);
-  const result = await runCommand(["/usr/bin/open", "-a", app], 20_000);
-  if (result.code !== 0) {
-    throw new Error(result.stderr || `open -a failed for ${app}`);
-  }
-  session!.app = app;
-  logLine(`open ${app}`);
-  await new Promise((r) => setTimeout(r, 400));
-}
-
-async function typeText(text: string, app?: string): Promise<void> {
-  if (text.length > 4000) throw new Error("type text too long (max 4000 chars).");
-  const target = (app || session?.app || "").trim();
-  // Prefer app-dictionary scripting (no Accessibility) for TextEdit.
-  if (!target || /^textedit$/i.test(target)) {
-    assertSafeApp(target || "TextEdit");
-    const escaped = escapeAppleScriptString(text);
-    await osascript(`
-tell application "TextEdit"
+  const safe = escapeAppleScriptString(app.trim());
+  // Prefer bundle id form when it looks like one (com.apple.…)
+  if (/^[a-z0-9.-]+\.[a-z0-9.-]+$/i.test(app.trim()) && app.includes(".")) {
+    await osascript(`tell application id "${safe}" to activate`);
+  } else if (/^TextEdit$/i.test(app.trim())) {
+    // Ensure a document exists so keystroke has a target
+    await osascript(`tell application "TextEdit"
   activate
-  if (count of documents) is 0 then
-    make new document with properties {text:"${escaped}"}
-  else
-    set text of front document to (text of front document) & "${escaped}"
-  end if
+  if (count of documents) is 0 then make new document
 end tell`);
-    session!.app = "TextEdit";
-    logLine(`type via TextEdit dictionary (${text.length} chars)`);
-    return;
+  } else {
+    await osascript(`tell application "${safe}" to activate`);
   }
-  // Fallback: System Events keystroke (requires Accessibility).
-  assertSafeApp(target);
-  await activateApp(target);
-  const escaped = escapeAppleScriptString(text);
-  try {
-    await osascript(`
-tell application "System Events"
-  keystroke "${escaped}"
-end tell`);
-    logLine(`keystroke via System Events (${text.length} chars)`);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `${message} — Grant Accessibility to the studio server host process, or use type with app TextEdit (dictionary scripting).`,
-    );
-  }
+  if (session) session.app = app.trim();
 }
 
-async function keystroke(text: string): Promise<void> {
-  if (text.length > 4000) throw new Error("keystroke text too long.");
-  const escaped = escapeAppleScriptString(text);
-  try {
-    await osascript(`
-tell application "System Events"
-  keystroke "${escaped}"
-end tell`);
-    logLine(`keystroke (${text.length} chars)`);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `${message} — System Events keystroke needs macOS Accessibility for the studio server process.`,
-    );
-  }
-}
-
-async function clickAt(x: number, y: number): Promise<void> {
-  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("click requires numeric x,y.");
-  if (x < 0 || y < 0 || x > 10000 || y > 10000) throw new Error("click coordinates out of range.");
-  // Prefer cliclick when installed; else System Events (needs Accessibility).
-  const which = await runCommand(["/usr/bin/which", "cliclick"], 5_000).catch(() => null);
-  if (which && which.code === 0 && which.stdout) {
-    const result = await runCommand([which.stdout, `c:${Math.round(x)},${Math.round(y)}`], 10_000);
-    if (result.code !== 0) throw new Error(result.stderr || "cliclick failed");
-    logLine(`click cliclick ${x},${y}`);
-    return;
-  }
-  try {
-    await osascript(`
-tell application "System Events"
-  click at {${Math.round(x)}, ${Math.round(y)}}
-end tell`);
-    logLine(`click System Events ${x},${y}`);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `${message} — Install cliclick or grant Accessibility for System Events click.`,
-    );
-  }
-}
-
-async function quitApp(app: string, saving: "yes" | "no" | "ask" = "no"): Promise<void> {
-  assertSafeApp(app);
-  const savingClause =
-    saving === "ask" ? "" : saving === "yes" ? " saving yes" : " saving no";
-  try {
-    await osascript(`tell application "${escapeAppleScriptString(app)}" to quit${savingClause}`);
-    logLine(`quit ${app}`);
-  } catch (err) {
-    logLine(`quit ${app} warning: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-export async function runDesktopSteps(steps: DesktopStep[]): Promise<void> {
-  if (!session) throw new Error("No active desktop session.");
-  let shotIndex = session.screenshots.length + 1;
-  for (const step of steps) {
-    if (abortRequested) throw new Error("Session aborted.");
-    switch (step.action) {
-      case "wait":
-        await new Promise((r) => setTimeout(r, Math.max(0, Math.min(step.ms, 60_000))));
-        logLine(`wait ${step.ms}ms`);
-        break;
-      case "screenshot":
-        await takeShot(step.name ?? `${String(shotIndex++).padStart(2, "0")}-shot`);
-        break;
-      case "activate":
-        await activateApp(step.app);
-        break;
-      case "open":
-        await openApp(step.app);
-        break;
-      case "type":
-        await typeText(step.text, step.app);
-        break;
-      case "keystroke":
-        await keystroke(step.text);
-        break;
-      case "click":
-        await clickAt(step.x, step.y);
-        break;
-      case "quit":
-        await quitApp(step.app, step.saving ?? "no");
-        break;
-      default:
-        throw new Error(`Unknown desktop step: ${(step as { action: string }).action}`);
+async function runStep(step: DesktopStep): Promise<void> {
+  if (abortRequested) throw new Error("Session aborted.");
+  switch (step.action) {
+    case "wait": {
+      const ms = Math.max(0, Math.min(step.ms, 30_000));
+      await new Promise((r) => setTimeout(r, ms));
+      break;
     }
+    case "screenshot":
+      await takeShot(step.name);
+      break;
+    case "activate":
+      await activateApp(step.app);
+      break;
+    case "click": {
+      const x = Math.round(step.x);
+      const y = Math.round(step.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 10000 || y > 10000) {
+        throw new Error("click x/y out of range.");
+      }
+      await osascript(`tell application "System Events" to click at {${x}, ${y}}`);
+      break;
+    }
+    case "type": {
+      if (typeof step.text !== "string" || step.text.length > 500) {
+        throw new Error("type text must be a string ≤ 500 chars.");
+      }
+      if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(step.text)) {
+        throw new Error("type text contains control characters.");
+      }
+      const safe = escapeAppleScriptString(step.text);
+      await osascript(`tell application "System Events" to keystroke "${safe}"`);
+      break;
+    }
+    case "key": {
+      const key = step.key.trim().toLowerCase();
+      if (!ALLOWED_KEYS.has(key)) {
+        throw new Error(`key "${step.key}" not in allowlist.`);
+      }
+      const mods = (step.modifiers ?? []).map((m) => m.toLowerCase());
+      for (const m of mods) {
+        if (!ALLOWED_MODIFIERS.has(m)) throw new Error(`modifier "${m}" not allowed.`);
+      }
+      const codes: Record<string, number> = {
+        return: 36,
+        enter: 76,
+        tab: 48,
+        escape: 53,
+        space: 49,
+        delete: 51,
+        backspace: 51,
+        up: 126,
+        down: 125,
+        left: 123,
+        right: 124,
+      };
+      const code = codes[key];
+      if (code == null) throw new Error(`unsupported key ${key}`);
+      if (mods.length) {
+        const using = mods.map((m) => `${m} down`).join(", ");
+        await osascript(`tell application "System Events" to key code ${code} using {${using}}`);
+      } else {
+        await osascript(`tell application "System Events" to key code ${code}`);
+      }
+      break;
+    }
+    default:
+      throw new Error(`Unknown or blocked action.`);
   }
 }
 
@@ -301,10 +251,11 @@ export async function startDesktopSession(input: {
     return { ok: false, error: "A desktop session start/stop is already in progress.", status: 409 };
   }
   if (process.platform !== "darwin") {
-    return { ok: false, error: "studio_desktop_session only runs on macOS.", status: 400 };
+    return { ok: false, error: "Desktop sessions require macOS.", status: 400 };
   }
 
   abortRequested = false;
+  shotIndex = 1;
   const stamp = stampNow();
   const outDir = join(desktopEvidenceRoot(), stamp);
   await mkdir(outDir, { recursive: true });
@@ -316,18 +267,17 @@ export async function startDesktopSession(input: {
     stamp,
     outDir,
     screenshots: [],
-    log: [],
     startedAt: new Date().toISOString(),
+    backend: "osascript+screencapture",
   };
 
   runLock = (async () => {
     try {
-      if (input.app?.trim()) {
-        await openApp(input.app.trim());
-        await new Promise((r) => setTimeout(r, 500));
-      }
+      if (input.app) await activateApp(input.app);
       await takeShot("01-start");
-      if (input.steps?.length) await runDesktopSteps(input.steps);
+      for (const step of input.steps ?? []) {
+        await runStep(step);
+      }
       if (abortRequested) throw new Error("Session aborted.");
       session!.status = "running";
       await writeFile(join(outDir, "session.json"), JSON.stringify(getDesktopSession(), null, 2));
@@ -354,25 +304,26 @@ export async function startDesktopSession(input: {
   return { ok: true, session: getDesktopSession()! };
 }
 
-export async function actionDesktopSession(
+export async function runDesktopActions(
   steps: DesktopStep[],
 ): Promise<{ ok: true; session: DesktopSessionInfo } | { ok: false; error: string; status: 400 | 409 }> {
   if (!session || session.status !== "running") {
     return { ok: false, error: "No running desktop session. Start one first.", status: 409 };
   }
-  if (!steps.length) return { ok: false, error: "steps required.", status: 400 };
-  if (runLock) return { ok: false, error: "Session busy.", status: 409 };
-  runLock = runDesktopSteps(steps)
-    .then(async () => {
-      await writeFile(join(session!.outDir, "session.json"), JSON.stringify(getDesktopSession(), null, 2));
-    })
-    .finally(() => {
-      runLock = null;
-    });
+  if (runLock) {
+    return { ok: false, error: "Desktop session is busy.", status: 409 };
+  }
+  runLock = (async () => {
+    for (const step of steps) await runStep(step);
+    await writeFile(join(session!.outDir, "session.json"), JSON.stringify(getDesktopSession(), null, 2));
+  })();
   try {
     await runLock;
   } catch (err) {
+    runLock = null;
     return { ok: false, error: err instanceof Error ? err.message : String(err), status: 400 };
+  } finally {
+    runLock = null;
   }
   return { ok: true, session: getDesktopSession()! };
 }
@@ -386,15 +337,10 @@ export async function stopDesktopSession(): Promise<{ ok: true; session: Desktop
     try {
       await runLock;
     } catch {
-      /* ignore */
+      /* start already recorded */
     }
   }
   if (session) {
-    try {
-      await takeShot("99-stop").catch(() => undefined);
-    } catch {
-      /* ignore */
-    }
     if (session.status !== "error") session.status = "stopped";
     session.stoppedAt = new Date().toISOString();
     try {
@@ -404,4 +350,48 @@ export async function stopDesktopSession(): Promise<{ ok: true; session: Desktop
     }
   }
   return { ok: true, session: getDesktopSession() };
+}
+
+/** Parse untrusted JSON steps into DesktopStep[]; skips unknown / blocked shapes. */
+export function parseDesktopSteps(raw: unknown): DesktopStep[] {
+  if (!Array.isArray(raw)) return [];
+  const steps: DesktopStep[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const s = item as Record<string, unknown>;
+    switch (s.action) {
+      case "wait":
+        if (typeof s.ms === "number") steps.push({ action: "wait", ms: s.ms });
+        break;
+      case "screenshot":
+        steps.push({ action: "screenshot", name: typeof s.name === "string" ? s.name : undefined });
+        break;
+      case "activate":
+        if (typeof s.app === "string") steps.push({ action: "activate", app: s.app });
+        break;
+      case "click":
+        if (typeof s.x === "number" && typeof s.y === "number") {
+          steps.push({ action: "click", x: s.x, y: s.y });
+        }
+        break;
+      case "type":
+        if (typeof s.text === "string") steps.push({ action: "type", text: s.text });
+        break;
+      case "key":
+        if (typeof s.key === "string") {
+          steps.push({
+            action: "key",
+            key: s.key,
+            modifiers: Array.isArray(s.modifiers)
+              ? s.modifiers.filter((m): m is string => typeof m === "string")
+              : undefined,
+          });
+        }
+        break;
+      default:
+        // shell / open / run — silently refused (not added)
+        break;
+    }
+  }
+  return steps;
 }

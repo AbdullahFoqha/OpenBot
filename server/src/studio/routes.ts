@@ -58,51 +58,12 @@ import {
   type BrowserStep,
 } from "./browser-session";
 import {
-  actionDesktopSession,
   getDesktopSession,
   startDesktopSession,
   stopDesktopSession,
-  type DesktopStep,
+  runDesktopActions,
+  parseDesktopSteps,
 } from "./desktop-session";
-
-
-function parseDesktopSteps(raw: unknown[]): DesktopStep[] {
-  const steps: DesktopStep[] = [];
-  for (const s of raw) {
-    if (!s || typeof s !== "object") continue;
-    const step = s as Record<string, unknown>;
-    if (step.action === "wait" && typeof step.ms === "number") {
-      steps.push({ action: "wait", ms: step.ms });
-    } else if (step.action === "screenshot") {
-      steps.push({
-        action: "screenshot",
-        name: typeof step.name === "string" ? step.name : undefined,
-      });
-    } else if (step.action === "activate" && typeof step.app === "string") {
-      steps.push({ action: "activate", app: step.app });
-    } else if (step.action === "open" && typeof step.app === "string") {
-      steps.push({ action: "open", app: step.app });
-    } else if (step.action === "type" && typeof step.text === "string") {
-      steps.push({
-        action: "type",
-        text: step.text,
-        app: typeof step.app === "string" ? step.app : undefined,
-      });
-    } else if (step.action === "keystroke" && typeof step.text === "string") {
-      steps.push({ action: "keystroke", text: step.text });
-    } else if (step.action === "click" && typeof step.x === "number" && typeof step.y === "number") {
-      steps.push({ action: "click", x: step.x, y: step.y });
-    } else if (step.action === "quit" && typeof step.app === "string") {
-      const saving = step.saving;
-      steps.push({
-        action: "quit",
-        app: step.app,
-        saving: saving === "yes" || saving === "no" || saving === "ask" ? saving : "no",
-      });
-    }
-  }
-  return steps;
-}
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -551,7 +512,7 @@ export function createStudioRoutes(deps: {
 
   routes.post("/desktop/session/start", async (c: Context) => {
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
-    const steps = parseDesktopSteps(Array.isArray(body?.steps) ? body!.steps : []);
+    const steps = parseDesktopSteps(body?.steps);
     const result = await startDesktopSession({
       app: typeof body?.app === "string" ? body.app : undefined,
       steps,
@@ -562,8 +523,9 @@ export function createStudioRoutes(deps: {
 
   routes.post("/desktop/session/action", async (c: Context) => {
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
-    const steps = parseDesktopSteps(Array.isArray(body?.steps) ? body!.steps : []);
-    const result = await actionDesktopSession(steps);
+    const steps = parseDesktopSteps(body?.steps ?? (body ? [body] : []));
+    if (!steps.length) return c.json({ error: "steps (or a single action) required." }, 400);
+    const result = await runDesktopActions(steps);
     if (!result.ok) return c.json({ error: result.error }, result.status);
     return c.json({ session: result.session });
   });
