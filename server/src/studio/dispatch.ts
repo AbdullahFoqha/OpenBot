@@ -14,6 +14,7 @@ import { studioProducts, studioTasks } from "../db/schema";
 import type { Admission } from "./admission";
 import { CURSOR_ENGINEER_BOT_ID, runProjectTask } from "./runner";
 import type { TaskStore } from "./task-store";
+import type { NativeWorker } from "../native-worker/worker";
 
 export const STUDIO_PRODUCT_ID = "studio-local";
 
@@ -28,6 +29,15 @@ export type SubmitStudioTaskInput = {
   ownerBotId?: string;
   /** When true, do not re-run package.json test/typecheck after the worker. */
   skipVerify?: boolean;
+  /**
+   * Path to a Maestro YAML flow file, relative to the project root or absolute.
+   * When set (and ownerBotId is quality-engineer), the runner executes Maestro after npm verification.
+   */
+  maestroFlow?: string;
+  /**
+   * iOS Simulator UDID to use for Maestro. Defaults to `STUDIO_PREFERRED_IOS_UDID`.
+   */
+  deviceUdid?: string;
 };
 
 export type SubmitStudioTaskResult =
@@ -84,8 +94,13 @@ export function createStudioDispatcher(deps: {
   database: Database;
   admission: Admission;
   taskStore: TaskStore;
+  /**
+   * Native worker for device reservation. Required for Maestro UI tests.
+   * When absent, Maestro requests will fail with a clear error message.
+   */
+  nativeWorker?: NativeWorker;
 }): StudioDispatcher {
-  const { database, admission, taskStore } = deps;
+  const { database, admission, taskStore, nativeWorker } = deps;
   const inFlight = new Map<string, InFlightRun>();
   const submitted = new Map<string, string>();
 
@@ -182,6 +197,9 @@ export function createStudioDispatcher(deps: {
         goal,
         acceptanceCriteria,
         ...(input.skipVerify ? { verifyCommands: [] } : {}),
+        ...(input.maestroFlow ? { maestroFlow: input.maestroFlow } : {}),
+        ...(input.deviceUdid ? { deviceUdid: input.deviceUdid } : {}),
+        ...(nativeWorker ? { nativeWorker } : {}),
       })
         .catch(async (err) => {
           await taskStore.markInterrupted(taskId, String(err));

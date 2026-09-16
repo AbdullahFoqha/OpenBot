@@ -24,7 +24,7 @@ const runTaskParams = z.object({
   acceptanceCriteria: z
     .string()
     .optional()
-    .describe("How to know the task succeeded. Prefer concrete file, test, and PR checks."),
+    .describe("How to know the task succeeded. Prefer concrete file, test, and PR checks. For Maestro UI verification, include a line like 'maestro: .maestro/flow.yaml'."),
   idempotencyKey: z
     .string()
     .optional()
@@ -39,6 +39,16 @@ const runTaskParams = z.object({
     .boolean()
     .optional()
     .describe("Set true only to skip automatic npm test/typecheck after the worker (rare)."),
+  maestroFlow: z
+    .string()
+    .optional()
+    .describe(
+      "Path to a Maestro YAML flow file (relative to project root or absolute). When set with ownerBotId=quality-engineer, runs Maestro UI tests after npm verification. Default device: iPhone 17 Pro (812A595B-0FDA-4C3F-9346-088E6C07A489).",
+    ),
+  deviceUdid: z
+    .string()
+    .optional()
+    .describe("iOS Simulator UDID for Maestro tests. Defaults to studio's preferred device (iPhone 17 Pro)."),
 });
 
 const taskIdParams = z.object({
@@ -76,6 +86,8 @@ export function studioTools(options: {
             idempotencyKey: parsed.data.idempotencyKey,
             ownerBotId,
             skipVerify: parsed.data.skipVerify,
+            maestroFlow: parsed.data.maestroFlow,
+            deviceUdid: parsed.data.deviceUdid,
           });
           if (!result.ok) {
             return `${REFUSAL_MARKER} ${result.error}`;
@@ -131,6 +143,7 @@ export function studioTools(options: {
                   reportedModel: evidence.reportedModel,
                   checkAfter: evidence.checkAfter,
                   worktreePath: evidence.worktreePath,
+                  maestro: evidence.maestro ?? null,
                 }
               : null,
             pullRequest:
