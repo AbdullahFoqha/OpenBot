@@ -12,6 +12,7 @@ import { REFUSAL_MARKER, type GrantedTool } from "../plugins/tools";
 import type { StudioDispatcher } from "./dispatch";
 import { STUDIO_PRODUCT_ID } from "./dispatch";
 import type { TaskStore } from "./task-store";
+import { createDynamicBot } from "./bot-catalog";
 
 const runTaskParams = z.object({
   title: z.string().min(1).describe("Short task title for the Studio queue and branch name."),
@@ -55,6 +56,31 @@ const taskIdParams = z.object({
   taskId: z.string().min(1).describe("Studio task id, e.g. task-…"),
 });
 
+
+const spawnBotParams = z.object({
+  id: z
+    .string()
+    .min(2)
+    .describe("Kebab-case bot id slug, e.g. custom-researcher-demo. Must not collide with built-ins."),
+  name: z.string().min(1).describe("Display name."),
+  title: z.string().optional().describe("Short role title chip."),
+  systemPrompt: z
+    .string()
+    .optional()
+    .describe("Role instructions. Required unless templateRoleId is set."),
+  templateRoleId: z
+    .string()
+    .optional()
+    .describe("Copy systemPrompt from a built-in (e.g. product-researcher) as a starting point."),
+  avatarSeed: z.string().optional(),
+  capabilities: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Phase 1 chat/role only by default. Include cursor_execute only when Phase 1b is enabled; default omit.",
+    ),
+});
+
 export function studioTools(options: {
   dispatcher: StudioDispatcher;
   database: Database;
@@ -67,6 +93,31 @@ export function studioTools(options: {
     if (allowedBotIds && !allowedBotIds.includes(botId)) return [];
 
     const tools: GrantedTool[] = [
+      {
+        name: "studio_spawn_bot",
+        ref: "studio/spawn_bot",
+        description:
+          "Create a custom Studio bot (Grok CreateAgent parity). Appears in the agents list with a Custom badge; chatable with the given systemPrompt. Phase 1 = chat/role only (not Cursor ownerBotId unless capabilities includes cursor_execute — Phase 1b). Prefer this over asking Abdullah to edit agents.yaml. Returns { botId, name, created: true }.",
+        parameters: spawnBotParams,
+        execute: async (args) => {
+          const parsed = spawnBotParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} id and name are required (and systemPrompt or templateRoleId).`;
+          }
+          const result = await createDynamicBot(database, parsed.data);
+          if (!result.ok) {
+            return `${REFUSAL_MARKER} ${result.error}`;
+          }
+          return JSON.stringify({
+            botId: result.bot.id,
+            name: result.bot.name,
+            created: true,
+            source: "dynamic",
+            note: "Bot is chatable now. Phase 1: chat/role only unless cursor_execute capability was set (Phase 1b).",
+          });
+        },
+      },
+
       {
         name: "studio_run_task",
         ref: "studio/run_task",

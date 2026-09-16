@@ -480,3 +480,24 @@ export const studioAcceptance = pgTable("studio_acceptance", {
   designApprovedAt: timestamp("design_approved_at", { withTimezone: true }),
   createdAt: createdAt(),
 });
+
+/**
+ * Dynamic (spawned) studio bots — CreateAgent parity overlay.
+ * Runtime catalog = built-in agents ∪ non-archived rows here.
+ * Chat works because spawn also upserts a built_in `agents` row with systemPrompt.
+ */
+export const studioDynamicBots = pgTable("studio_dynamic_bots", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  title: text("title"),
+  systemPrompt: text("system_prompt").notNull(),
+  avatarSeed: text("avatar_seed"),
+  templateRoleId: text("template_role_id"),
+  /** e.g. ["cursor_execute"] — Phase 1b; default empty = chat/role only. */
+  capabilities: jsonb("capabilities").notNull().default([]),
+  createdAt: createdAt(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+});

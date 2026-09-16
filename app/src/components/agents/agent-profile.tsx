@@ -86,6 +86,7 @@ export function AgentProfile({ agentId }: { agentId: string }) {
         <div className="flex flex-wrap justify-center gap-1.5">
           <Tag>{profile.visibility === "private" ? "Private" : "Public"}</Tag>
           {profile.systemOwned ? <Tag>System owned</Tag> : null}
+          {profile.studioDynamic ? <Tag>Custom</Tag> : null}
         </div>
       </header>
 

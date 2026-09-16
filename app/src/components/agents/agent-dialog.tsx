@@ -299,6 +299,16 @@ function GeneralSection({
           onSave={(visibility) => save({ visibility })}
           value={profile.visibility}
         />
+        {profile.studioDynamic ? (
+          <Item variant="muted">
+            <ItemContent>
+              <ItemTitle>Custom</ItemTitle>
+              <ItemDescription>
+                Spawned via studio_spawn_bot — chatable with its own prompt.
+              </ItemDescription>
+            </ItemContent>
+          </Item>
+        ) : null}
         {profile.systemOwned ? (
           <Item variant="muted">
             <ItemContent>

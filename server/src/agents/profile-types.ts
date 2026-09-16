@@ -27,6 +27,8 @@ export type AgentProfile = {
    * it. A surface only needs to know whether to offer "generate" or "rotate".
    */
   hasCallbackToken: boolean;
+  /** Spawned via studio_spawn_bot / studio_dynamic_bots (Custom badge). */
+  studioDynamic?: boolean;
 };
 
 export type CreateAgentInput = Pick<

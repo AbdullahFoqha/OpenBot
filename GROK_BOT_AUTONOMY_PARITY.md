@@ -194,4 +194,8 @@ Implement in backlog order after P0 demos. Each gets its own AC doc when started
 - No TBD placeholders for P0.1 AC  
 - Approach B explicit; A/C rejected  
 - Finalizer non-goal explicit  
-- Phase 1 vs 1b for cursor_execute called out  
+- Phase 1 vs 1b for cursor_execute called out
+
+## Implemented
+
+- **P0.1** `studio_spawn_bot` — shipped (local). Phase 1b cursor_execute follow-up.

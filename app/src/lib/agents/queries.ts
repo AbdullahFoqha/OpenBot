@@ -38,6 +38,8 @@ export type AgentProfile = {
   hasCallbackToken: boolean;
   hidden: boolean;
   systemOwned: boolean;
+  /** Spawned via studio_spawn_bot — show Custom badge. */
+  studioDynamic?: boolean;
   canManage: boolean;
   /**
    * Whether the signed-in person created this coworker.

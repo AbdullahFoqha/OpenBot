@@ -38,6 +38,13 @@ import {
   runProjectTask,
 } from "./runner";
 import type { TaskStore } from "./task-store";
+import {
+  archiveDynamicBot,
+  createDynamicBot,
+  getCatalogBot,
+  listMergedBots,
+  updateDynamicBot,
+} from "./bot-catalog";
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -448,6 +455,64 @@ export function createStudioRoutes(deps: {
       reservation: reservation ?? null,
       running: inFlight.has(taskId),
     });
+  });
+
+
+  // --- P0.1 dynamic bots (studio_spawn_bot) ---
+  routes.get("/bots", async (c: Context) => {
+    const bots = await listMergedBots(database);
+    return c.json({ bots });
+  });
+
+  routes.get("/bots/:id", async (c: Context) => {
+    const id = c.req.param("id");
+    if (!id) return c.json({ error: "id required" }, 400);
+    const bot = await getCatalogBot(database, id);
+    if (!bot) return c.json({ error: "No such bot." }, 404);
+    return c.json({ bot });
+  });
+
+  routes.post("/bots", async (c: Context) => {
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.id !== "string" || typeof body.name !== "string") {
+      return c.json({ error: "id and name are required." }, 400);
+    }
+    const result = await createDynamicBot(database, {
+      id: body.id,
+      name: body.name,
+      title: typeof body.title === "string" ? body.title : undefined,
+      systemPrompt: typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
+      templateRoleId: typeof body.templateRoleId === "string" ? body.templateRoleId : undefined,
+      avatarSeed: typeof body.avatarSeed === "string" ? body.avatarSeed : undefined,
+      capabilities: Array.isArray(body.capabilities)
+        ? body.capabilities.filter((x): x is string => typeof x === "string")
+        : undefined,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ botId: result.bot.id, name: result.bot.name, created: true, bot: result.bot }, 201);
+  });
+
+  routes.patch("/bots/:id", async (c: Context) => {
+    const id = c.req.param("id");
+    if (!id) return c.json({ error: "id required" }, 400);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) return c.json({ error: "JSON body required" }, 400);
+    const result = await updateDynamicBot(database, id, {
+      name: typeof body.name === "string" ? body.name : undefined,
+      title: typeof body.title === "string" ? body.title : undefined,
+      systemPrompt: typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
+      avatarSeed: typeof body.avatarSeed === "string" ? body.avatarSeed : undefined,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ bot: result.bot });
+  });
+
+  routes.delete("/bots/:id", async (c: Context) => {
+    const id = c.req.param("id");
+    if (!id) return c.json({ error: "id required" }, 400);
+    const result = await archiveDynamicBot(database, id);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, archived: id });
   });
 
   return routes;

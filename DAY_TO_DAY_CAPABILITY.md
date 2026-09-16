@@ -57,3 +57,5 @@ Maestro flow matrix (2026-09-16): Release+reset — onboard/expense/payday-ineli
 
 Worktree hygiene (2026-09-16): `./studio prune-worktrees` dry-run lists; `--apply --older-than 2` removes terminal-task worktrees under Documents/projects.
 Auto-prune on complete (2026-09-16): runner + markInterrupted call `pruneTaskWorktree` when terminal; `STUDIO_PRUNE_ON_COMPLETE=1` default (set `0` to keep worktrees).
+
+P0.1 studio_spawn_bot (2026-09-16): Lead tool + `POST /api/studio/bots` creates dynamic chat bots (`studio_dynamic_bots` ∪ `agents`). Custom badge in UI. Phase 1b `cursor_execute` / ownerBotId=dynamic still follow-up. Spec: GROK_BOT_AUTONOMY_PARITY.md §6.
