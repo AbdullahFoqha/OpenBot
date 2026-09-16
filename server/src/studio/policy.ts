@@ -31,6 +31,11 @@ export type StudioPolicy = {
   maxActiveExecutionTasks: number;
   /** One primary piece of work per Bot: a Bot doing two things is doing neither. */
   maxPrimaryExecutionTasksPerBot: number;
+  /**
+   * Parallel beyond 1/bot where safe (P2.2): how many `review`/`background` tasks one Bot may
+   * hold at once, in addition to its primary execution slot. Global maxActiveExecutionTasks still applies.
+   */
+  maxBackgroundExecutionTasksPerBot: number;
   /** Lead -> Specialist -> temporary leaf, expressed as a number so the check can be arithmetic. */
   maxDelegationDepth: number;
   /** How many Bots one run may address. Enforced upstream by the queue's `atMost`. */
@@ -66,6 +71,7 @@ export const DEFAULT_STUDIO_POLICY: StudioPolicy = {
   maxActiveProducts: 1,
   maxActiveExecutionTasks: 3,
   maxPrimaryExecutionTasksPerBot: 1,
+  maxBackgroundExecutionTasksPerBot: 2,
   maxDelegationDepth: 2,
   maxHandoffsPerRun: 3,
   waitingParentKeepsReservationUnlessCheckpointedAndSuspended: true,
@@ -84,6 +90,7 @@ const WHOLE_NUMBER_FIELDS = [
   "maxActiveProducts",
   "maxActiveExecutionTasks",
   "maxPrimaryExecutionTasksPerBot",
+  "maxBackgroundExecutionTasksPerBot",
   "maxDelegationDepth",
   "maxHandoffsPerRun",
   "sameFailureAttemptsBeforeReassessment",
@@ -113,6 +120,7 @@ export const ENFORCED_POLICY_FIELDS = [
   "maxActiveProducts",
   "maxActiveExecutionTasks",
   "maxPrimaryExecutionTasksPerBot",
+  "maxBackgroundExecutionTasksPerBot",
   "maxDelegationDepth",
   "countChildTasksAndReviews",
   "temporaryWorkersAreLeaves",

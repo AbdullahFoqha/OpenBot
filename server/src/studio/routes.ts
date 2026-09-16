@@ -321,6 +321,9 @@ export function createStudioRoutes(deps: {
       typeof body?.maestroFlow === "string" ? body.maestroFlow.trim() : undefined;
     const deviceUdid =
       typeof body?.deviceUdid === "string" ? body.deviceUdid.trim() : undefined;
+    const skipVerify = body?.skipVerify === true;
+    const background =
+      typeof body?.background === "boolean" ? body.background : undefined;
 
     const result = await dispatcher.submit({
       title,
@@ -330,11 +333,15 @@ export function createStudioRoutes(deps: {
       ...(ownerBotId ? { ownerBotId } : {}),
       ...(maestroFlow ? { maestroFlow } : {}),
       ...(deviceUdid ? { deviceUdid } : {}),
+      ...(skipVerify ? { skipVerify: true } : {}),
+      ...(background !== undefined ? { background } : {}),
     });
     if (!result.ok) return c.json({ error: result.error }, result.status);
     return c.json({
       taskId: result.taskId,
       ...(result.deduplicated ? { deduplicated: true } : {}),
+      ...(result.background !== undefined ? { background: result.background } : {}),
+      ...(result.kind ? { kind: result.kind } : {}),
     });
   });
 
@@ -579,6 +586,7 @@ export function createStudioRoutes(deps: {
       acceptanceCriteria: body.claim,
       idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
       ownerBotId: STUDIO_VERIFIER_BOT_ID,
+      background: true,
       maestroFlow: typeof body.maestroFlow === "string" ? body.maestroFlow : undefined,
       deviceUdid: typeof body.deviceUdid === "string" ? body.deviceUdid : undefined,
     });

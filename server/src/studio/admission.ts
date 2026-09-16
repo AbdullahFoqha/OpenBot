@@ -138,6 +138,10 @@ export type Admission = {
    * process becomes two.
    */
   holdsWork: (botId: string) => Promise<boolean>;
+  /** True when this Bot already holds a primary (execution) reservation. */
+  holdsPrimaryWork: (botId: string) => Promise<boolean>;
+  /** True when this Bot is at the background (review) per-bot cap. */
+  backgroundSlotsFull: (botId: string) => Promise<boolean>;
   /** Record what a provider said this cost. Unknown stays unknown. */
   recordUsage: (
     ticket: ReservationTicket,
@@ -431,29 +435,48 @@ export function createAdmission(
         }
 
         /*
-         * One primary task per Bot.
-         *
-         * Counted over the same occupying states: a Bot whose other task is suspended with a
-         * checkpoint is genuinely free, and one whose other task is `lost` is not, because whatever
-         * that worker is doing it is doing as this Bot.
+         * Per-bot slots (P2.2): primary execution stays at most maxPrimary; review/background
+         * may run in parallel up to maxBackground — so a Bot can verify while another primary
+         * runs elsewhere, or hold two safe background checks, without stealing the global cap's meaning.
          */
         if (counts) {
-          const [{ mine }] = await tx
-            .select({ mine: sql<number>`count(*)::int` })
-            .from(studioReservations)
-            .where(
-              and(
-                eq(studioReservations.botId, botId),
-                inArray(studioReservations.state, [...OCCUPYING]),
-                inArray(studioReservations.kind, countable as never),
-              ),
-            );
-          if (mine >= policy.maxPrimaryExecutionTasksPerBot) {
-            return {
-              ok: false as const,
-              reason: "waiting" as const,
-              detail: `${botId} already has a task in progress, and a Bot does one thing at a time here.`,
-            };
+          if (task.kind === "execution") {
+            const [{ mine }] = await tx
+              .select({ mine: sql<number>`count(*)::int` })
+              .from(studioReservations)
+              .where(
+                and(
+                  eq(studioReservations.botId, botId),
+                  inArray(studioReservations.state, [...OCCUPYING]),
+                  eq(studioReservations.kind, "execution"),
+                ),
+              );
+            if (mine >= policy.maxPrimaryExecutionTasksPerBot) {
+              return {
+                ok: false as const,
+                reason: "waiting" as const,
+                detail: `${botId} already has a primary task in progress (max ${policy.maxPrimaryExecutionTasksPerBot} per Bot).`,
+              };
+            }
+          } else if (task.kind === "review") {
+            const maxBg = policy.maxBackgroundExecutionTasksPerBot;
+            const [{ mine }] = await tx
+              .select({ mine: sql<number>`count(*)::int` })
+              .from(studioReservations)
+              .where(
+                and(
+                  eq(studioReservations.botId, botId),
+                  inArray(studioReservations.state, [...OCCUPYING]),
+                  eq(studioReservations.kind, "review"),
+                ),
+              );
+            if (mine >= maxBg) {
+              return {
+                ok: false as const,
+                reason: "waiting" as const,
+                detail: `${botId} already has ${mine} background/review task(s); max ${maxBg} parallel backgrounds per Bot.`,
+              };
+            }
           }
         }
 
@@ -718,6 +741,35 @@ export function createAdmission(
         )
         .limit(1);
       return Boolean(row);
+    },
+
+    async holdsPrimaryWork(botId) {
+      const [row] = await database
+        .select({ taskId: studioReservations.taskId })
+        .from(studioReservations)
+        .where(
+          and(
+            eq(studioReservations.botId, botId),
+            inArray(studioReservations.state, [...OCCUPYING]),
+            eq(studioReservations.kind, "execution"),
+          ),
+        )
+        .limit(1);
+      return Boolean(row);
+    },
+
+    async backgroundSlotsFull(botId) {
+      const [{ mine }] = await database
+        .select({ mine: sql<number>`count(*)::int` })
+        .from(studioReservations)
+        .where(
+          and(
+            eq(studioReservations.botId, botId),
+            inArray(studioReservations.state, [...OCCUPYING]),
+            eq(studioReservations.kind, "review"),
+          ),
+        );
+      return mine >= policy.maxBackgroundExecutionTasksPerBot;
     },
 
     async recordUsage(ticket, usage) {

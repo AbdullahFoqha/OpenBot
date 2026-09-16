@@ -69,6 +69,12 @@ const runTaskParams = z.object({
     .string()
     .optional()
     .describe("iOS Simulator UDID for Maestro tests. Defaults to studio's preferred device (iPhone 17 Pro)."),
+  background: z
+    .boolean()
+    .optional()
+    .describe(
+      "P2.2: true = review/background slot (safe parallel beyond 1 primary per Bot). Default true for studio-verifier. Engineer feature work should leave this unset/false.",
+    ),
 });
 
 const taskIdParams = z.object({
@@ -770,6 +776,7 @@ export function studioTools(options: {
             ownerBotId: STUDIO_VERIFIER_BOT_ID,
             maestroFlow: parsed.data.maestroFlow,
             deviceUdid: parsed.data.deviceUdid,
+            background: true,
           });
           if (!result.ok) {
             return `${REFUSAL_MARKER} ${result.error}`;
@@ -804,6 +811,7 @@ export function studioTools(options: {
             skipVerify: parsed.data.skipVerify,
             maestroFlow: parsed.data.maestroFlow,
             deviceUdid: parsed.data.deviceUdid,
+            background: parsed.data.background,
           });
           if (!result.ok) {
             return `${REFUSAL_MARKER} ${result.error}`;
@@ -812,6 +820,8 @@ export function studioTools(options: {
             taskId: result.taskId,
             deduplicated: result.deduplicated === true,
             ownerBotId,
+            background: result.background === true,
+            kind: result.kind ?? null,
             backend: "cursor-agent (Cursor subscription)",
             note: "Work runs asynchronously in a project worktree. Poll studio_task_status. Do not ask the person for git origin or branch.",
           });

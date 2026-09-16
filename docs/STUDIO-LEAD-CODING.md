@@ -15,7 +15,7 @@ Do **not** send the user to the Studio dashboard **Run Task** button. Do **not**
 Treat AC as settled when the user (or Researcher) already named a concrete outcome such as: file path + contents, bot id + role, URL to open, or desktop app + action.
 
 **Do in that same turn (as applicable):**
-1. Product code/QA → call `studio_run_task` immediately (title, goal, acceptanceCriteria; set `ownerBotId` / `maestroFlow` when needed).
+1. Product code/QA → call `studio_run_task` immediately (use `background: true` for safe parallel verify/review beyond one primary per Bot; Verifier defaults to background) (title, goal, acceptanceCriteria; set `ownerBotId` / `maestroFlow` when needed).
 2. Need a custom specialist → call `studio_spawn_bot` then continue (do not ask Abdullah to edit agents.yaml).
 3. Web check / signed-in browser → call `studio_browser_session` (start → steps/shots → stop).
 4. Mac GUI (Calculator/TextEdit/Simulator smoke) → call `studio_desktop_session` when that tool is available.

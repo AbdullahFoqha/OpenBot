@@ -17,7 +17,12 @@ import { getSelectedProduct } from "./products";
 import { resolveProjectPath, STUDIO_PRODUCT_ID } from "./project-path";
 export { resolveProjectPath, STUDIO_PRODUCT_ID } from "./project-path";
 
-type InFlightRun = { controller: AbortController; startedAt: number };
+type InFlightRun = {
+  controller: AbortController;
+  startedAt: number;
+  botId: string;
+  background: boolean;
+};
 
 export type SubmitStudioTaskInput = {
   title: string;
@@ -37,10 +42,16 @@ export type SubmitStudioTaskInput = {
    * iOS Simulator UDID to use for Maestro. Defaults to `STUDIO_PREFERRED_IOS_UDID`.
    */
   deviceUdid?: string;
+  /**
+   * P2.2 — run as a background/review slot (parallel beyond 1 primary per Bot).
+   * Default true for studio-verifier. Counts against maxBackgroundExecutionTasksPerBot
+   * and the global maxActiveExecutionTasks, not the primary per-bot slot.
+   */
+  background?: boolean;
 };
 
 export type SubmitStudioTaskResult =
-  | { ok: true; taskId: string; deduplicated?: boolean }
+  | { ok: true; taskId: string; deduplicated?: boolean; background?: boolean; kind?: string }
   | { ok: false; status: 400 | 409; error: string };
 
 export type StudioDispatcher = {
@@ -107,11 +118,33 @@ export function createStudioDispatcher(deps: {
         };
       }
       const ownerBotId = input.ownerBotId?.trim() || CURSOR_ENGINEER_BOT_ID;
-      if (await admission.holdsWork(ownerBotId)) {
+      const backgroundDefault =
+        ownerBotId === "studio-verifier";
+      const background =
+        input.background === true ||
+        (input.background !== false && backgroundDefault);
+      const taskKind = background ? "review" : "execution";
+
+      // Count this process's in-flight runs too — reservation rows appear only after claim(),
+      // so a double-submit before claim would otherwise sneak past the per-bot cap.
+      const inFlightForBot = [...inFlight.values()].filter((r) => r.botId === ownerBotId);
+      if (background) {
+        const bgInFlight = inFlightForBot.filter((r) => r.background).length;
+        if (bgInFlight >= 2 || (await admission.backgroundSlotsFull(ownerBotId))) {
+          return {
+            ok: false,
+            status: 409,
+            error: `Bot ${ownerBotId} is at its background/review parallel cap. Wait for one to finish or use another Bot.`,
+          };
+        }
+      } else if (
+        inFlightForBot.some((r) => !r.background) ||
+        (await admission.holdsPrimaryWork(ownerBotId))
+      ) {
         return {
           ok: false,
           status: 409,
-          error: `Bot ${ownerBotId} already has a task in progress. One primary task per bot.`,
+          error: `Bot ${ownerBotId} already has a primary task in progress. One primary per bot (use background:true for safe parallel review/verify).`,
         };
       }
 
@@ -127,7 +160,7 @@ export function createStudioDispatcher(deps: {
         id: taskId,
         productId: product.id,
         title,
-        kind: "execution",
+        kind: taskKind,
         state: "ready",
       });
       await database
@@ -136,7 +169,12 @@ export function createStudioDispatcher(deps: {
         .where(eq(studioTasks.id, taskId));
 
       const controller = new AbortController();
-      inFlight.set(taskId, { controller, startedAt: Date.now() });
+      inFlight.set(taskId, {
+        controller,
+        startedAt: Date.now(),
+        botId: ownerBotId,
+        background,
+      });
 
       void runProjectTask({
         admission,
@@ -161,7 +199,7 @@ export function createStudioDispatcher(deps: {
           inFlight.delete(taskId);
         });
 
-      return { ok: true, taskId };
+      return { ok: true, taskId, background, kind: taskKind };
     },
   };
 }

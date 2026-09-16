@@ -572,3 +572,48 @@ describe("what may be claimed at all", () => {
     expect(outcome.ok === false && outcome.reason).toBe("refused");
   });
 });
+
+describe("P2.2 background parallel beyond 1/bot", () => {
+  test("same Bot may hold two review tasks while primary stays one", async () => {
+    const execId = await ready("p22-exec");
+    const rev1 = await ready("p22-rev1", { kind: "review" });
+    const rev2 = await ready("p22-rev2", { kind: "review" });
+    const rev3 = await ready("p22-rev3", { kind: "review" });
+
+    const primary = await admission.claim({
+      taskId: execId,
+      botId: BOT_A,
+      owner: `owner-${suite}-p22a`,
+    });
+    expect(primary.ok).toBe(true);
+
+    const b1 = await admission.claim({
+      taskId: rev1,
+      botId: BOT_A,
+      owner: `owner-${suite}-p22b1`,
+    });
+    expect(b1.ok).toBe(true);
+
+    const b2 = await admission.claim({
+      taskId: rev2,
+      botId: BOT_A,
+      owner: `owner-${suite}-p22b2`,
+    });
+    expect(b2.ok).toBe(true);
+
+    const b3 = await admission.claim({
+      taskId: rev3,
+      botId: BOT_A,
+      owner: `owner-${suite}-p22b3`,
+    });
+    expect(b3.ok).toBe(false);
+
+    const secondPrimary = await ready("p22-exec2");
+    const blocked = await admission.claim({
+      taskId: secondPrimary,
+      botId: BOT_A,
+      owner: `owner-${suite}-p22a2`,
+    });
+    expect(blocked.ok).toBe(false);
+  });
+});
