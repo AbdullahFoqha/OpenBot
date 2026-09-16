@@ -92,7 +92,7 @@ export async function inspectSelectedProduct(
   await walkTsFiles(root, files);
 
   const screenFiles = files
-    .filter((f) => /Screen\.(tsx|ts|jsx|js)$/.test(f) || /\/screens\//i.test(f))
+    .filter((f) => (/Screen\.(tsx|ts|jsx|js)$/.test(f) || /\/screens\//i.test(f)) && !/\/design-system\/Screen\./.test(f))
     .map((f) => {
       const path = relative(root, f).replaceAll("\\", "/");
       return { path, name: screenNameFromPath(path) };
