@@ -1135,19 +1135,25 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
       history: copilotRuntime.history,
       lock: copilotRuntime.threadLock,
       /*
-       * A scratch thread of the addressed Bot's own, one per hop.
-       *
-       * An Intelligence thread has exactly one agent, so a second Bot cannot answer inside the first
-       * Bot's conversation however it asks. Its turn runs here instead, unmapped to any channel, and
-       * what it said comes back to the conversation that asked through the relay — in the asking
-       * Bot's voice, which is the only voice that thread admits. Minted with the deployment's own
-       * identity, like every thread this deployment starts.
+       * Fallback when the addressed Bot has no person-facing 1:1 yet (or lookup fails). Prefer
+       * `resolveForwardThread` so Product Studio specialists show the ask and reply in their own
+       * channel; scratch remains unmapped and invisible.
        */
       mintThreadId: () => threadIdentity.mint(),
       /*
+       * Run FORWARD hops in the person's existing 1:1 with that Bot (create if needed), so opening
+       * Product Researcher / Designer / … shows the handoff transcript — not only Lead's paraphrase.
+       */
+      resolveForwardThread: async ({ actorId, botId }) => {
+        const actor = await actorFor(actorId).catch(() => null);
+        if (!actor) return null;
+        const channel = await channelStore.direct(actor, botId);
+        return channel.threadId;
+      },
+      /*
        * The roster, told that a relayed answer landed. The delivery knows only the thread it ran
        * in; this resolves which channel shows that thread — a scratch thread maps to nothing and
-       * announces nowhere, which is the point of a scratch thread.
+       * announces nowhere; a direct-channel thread bumps the specialist's roster row.
        */
       announce: async (input) => {
         const [mapped] = await database

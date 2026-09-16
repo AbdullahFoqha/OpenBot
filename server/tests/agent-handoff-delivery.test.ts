@@ -439,11 +439,11 @@ describe("what the addressed Bot is actually given", () => {
 });
 
 /**
- * Lighting the asking channel while a hop runs.
+ * Lighting channels while a hop runs.
  *
- * A forward hop runs in a scratch thread nobody watches, so it signals the asking channel itself. A
- * backwards hop runs in the asking thread, whose lock the runtime already watches, so it must not
- * signal again — that would double the indicator on and off.
+ * A forward hop signals the asking channel (person waiting) and the forward thread (specialist
+ * channel when mapped, or scratch otherwise — scratch maps to no roster row). A backwards hop runs
+ * in the asking thread, whose lock the runtime already watches, so it must not signal again.
  */
 describe("the working indicator", () => {
   function withBusy() {
@@ -482,10 +482,12 @@ describe("the working indicator", () => {
       assertion: "s",
     });
 
-    // Keyed on the asking thread, not the scratch thread the run happens in.
+    // Asking channel (waiting) plus the forward thread (specialist / scratch).
     expect(busy).toEqual([
       { threadId: "thread-1", busy: true },
+      { threadId: "scratch-thread", busy: true },
       { threadId: "thread-1", busy: false },
+      { threadId: "scratch-thread", busy: false },
     ]);
   });
 
@@ -803,5 +805,126 @@ describe("what the trail is told started the hop", () => {
     expect(builtFor).toEqual([
       { actorId: "user-1", botId: "researcher", fromBotId: "assistant" },
     ]);
+  });
+});
+
+
+describe("visible specialist channel for forward hops", () => {
+  test("a forward hop runs in resolveForwardThread when provided", async () => {
+    const busy: Array<{ threadId: string; busy: boolean }> = [];
+    const announced: Array<{ threadId: string; agentId: string; text: string }> =
+      [];
+    const requests: Array<{ threadId: string }> = [];
+    const agent = {
+      threadId: "",
+      messages: [] as unknown[],
+      setMessages(messages: unknown[]) {
+        agent.messages = messages;
+      },
+      runAgent: (
+        _input: unknown,
+        config?: { onEvent?: (emitted: unknown) => void },
+      ) => {
+        for (const event of [
+          { type: "TEXT_MESSAGE_START" },
+          { type: "TEXT_MESSAGE_CONTENT", delta: "Scope is a Test Screen." },
+          { type: "TEXT_MESSAGE_END" },
+        ])
+          config?.onEvent?.({ event });
+        return Promise.resolve();
+      },
+    };
+    const deliver = createHandoffDelivery({
+      agentFor: async () => agent as unknown as AbstractAgent,
+      history: async () => PRIOR,
+      newRunId: () => "run-2",
+      mintThreadId: () => "scratch-thread",
+      resolveForwardThread: async ({ actorId, botId }) => {
+        expect(actorId).toBe(WORK.actorId);
+        expect(botId).toBe(WORK.toBotId);
+        return "researcher-channel-thread";
+      },
+      setBusy: async (input) => {
+        busy.push(input);
+      },
+      announce: async ({ threadId, agentId, text }) => {
+        announced.push({ threadId, agentId, text });
+      },
+      lock: {
+        acquire: async () => ({ runId: "platform-run" }),
+        renew: async () => {},
+        release: async () => {},
+      },
+      runner: {
+        run: (request) => {
+          requests.push({ threadId: request.threadId });
+          void (
+            request.agent as unknown as {
+              runAgent: (input: unknown, config?: unknown) => Promise<void>;
+            }
+          ).runAgent({}, {});
+          return new Observable<BaseEvent>((subscriber) => {
+            for (const event of FINISHED) subscriber.next(event);
+            subscriber.complete();
+          });
+        },
+      },
+    });
+
+    await deliver.deliver({
+      work: WORK,
+      message: "assistant has asked you to help",
+      shown:
+        "Studio Lead asked Product Researcher for this on your behalf: define scope",
+      assertion: "signed",
+    });
+
+    expect(requests[0]?.threadId).toBe("researcher-channel-thread");
+    expect(busy).toEqual([
+      { threadId: "thread-1", busy: true },
+      { threadId: "researcher-channel-thread", busy: true },
+      { threadId: "thread-1", busy: false },
+      { threadId: "researcher-channel-thread", busy: false },
+    ]);
+    expect(announced).toEqual([
+      {
+        threadId: "researcher-channel-thread",
+        agentId: WORK.toBotId,
+        text: "Scope is a Test Screen.",
+      },
+    ]);
+  });
+
+  test("falls back to mintThreadId when resolveForwardThread returns null", async () => {
+    const requests: Array<{ threadId: string }> = [];
+    const deliver = createHandoffDelivery({
+      agentFor: async () => stubAgent(),
+      history: async () => PRIOR,
+      newRunId: () => "run-2",
+      mintThreadId: () => "scratch-thread",
+      resolveForwardThread: async () => null,
+      lock: {
+        acquire: async () => ({ runId: "platform-run" }),
+        renew: async () => {},
+        release: async () => {},
+      },
+      runner: {
+        run: (request) => {
+          requests.push({ threadId: request.threadId });
+          return new Observable<BaseEvent>((subscriber) => {
+            for (const event of FINISHED) subscriber.next(event);
+            subscriber.complete();
+          });
+        },
+      },
+    });
+
+    await deliver.deliver({
+      work: WORK,
+      message: "assistant has asked you to help",
+      assertion: "signed",
+    });
+
+    expect(requests[0]?.threadId).toBe("scratch-thread");
   });
 });

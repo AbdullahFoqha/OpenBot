@@ -88,22 +88,26 @@ export function createHandoffDelivery(options: {
   runner: ThreadRunner;
   lock: ThreadLock;
   /**
-   * A fresh thread of the addressed Bot's own, where its working happens out of sight.
+   * Fallback thread for a FORWARD hop when no person-facing channel is available.
    *
-   * NOT THE CONVERSATION THAT ASKED, and this is a property of the platform rather than a choice. An
-   * Intelligence thread is owned by exactly one agent: `assertThreadAgentOwnership` refuses any other
-   * one, and the managed-channel path that relaxes USER ownership still enforces agent ownership. A
-   * second Bot answering inside the first Bot's thread is not something this platform can express
-   * today, whatever the caller does.
-   *
-   * A scratch thread rather than the Bot's own channel with the person, which is where answers used
-   * to land. Two conversations for one question meant the person read the answer somewhere they
-   * never asked anything; now the runner relays what came back through the Bot that asked, in the
-   * conversation they are actually watching, and the scratch thread is never mapped to a channel so
-   * nobody is shown it. It still exists on the platform, which is what makes the turn a recorded
-   * run rather than an unlogged model call.
+   * NOT THE CONVERSATION THAT ASKED: an Intelligence thread is owned by exactly one agent, so a
+   * second Bot cannot answer inside the first Bot's thread. Prefer `resolveForwardThread` (the
+   * addressed Bot's own 1:1 channel with the person) so the hop is visible there; mint only when
+   * that lookup fails. A scratch thread is never mapped to a channel, so nobody is shown it — the
+   * relay still carries the answer back through the Bot that asked.
    */
   mintThreadId: () => string;
+  /**
+   * The addressed Bot's person-facing conversation for a FORWARD hop, when one exists.
+   *
+   * Product Studio (and anyone watching the specialist roster) needs the ask and the reply in that
+   * Bot's own channel, not only a paraphrase on the asking Bot. Returns a thread id owned by
+   * `botId`, or null to fall back to `mintThreadId`. Ignored for backwards hops (`answerIn`).
+   */
+  resolveForwardThread?: (input: {
+    actorId: string;
+    botId: string;
+  }) => Promise<string | null>;
   /**
    * Tell the roster a conversation moved, when a turn put words in it.
    *
@@ -124,12 +128,11 @@ export function createHandoffDelivery(options: {
     text: string;
   }) => Promise<void>;
   /**
-   * Show the asking conversation as working while a FORWARD hop runs, and stop when it is over.
+   * Show conversations as working while a FORWARD hop runs, and stop when it is over.
    *
-   * Only the forward leg, and keyed on the asking thread — `work.threadId`, the conversation the
-   * person is waiting in — because that leg runs in a scratch thread nobody watches. A backwards
-   * hop runs in the asking thread itself, whose lock the runtime already lights through its own
-   * busy signal, so this leaves that leg alone rather than double it. Best-effort and paired in a
+   * Lights the asking thread (the person is waiting) and, when the hop runs in a mapped specialist
+   * channel, that thread too. A backwards hop runs in the asking thread itself, whose lock already
+   * lights it through `onRunBusy`, so this leaves that leg alone. Best-effort and paired in a
    * `finally`, so a channel never stays lit because a run threw.
    */
   setBusy?: (input: { threadId: string; busy: boolean }) => Promise<void>;
@@ -152,6 +155,7 @@ export function createHandoffDelivery(options: {
     runner,
     lock,
     mintThreadId,
+    resolveForwardThread,
     announce,
     setBusy,
     newRunId,
@@ -231,25 +235,43 @@ export function createHandoffDelivery(options: {
       /*
        * The conversation this turn runs in.
        *
-       * Named on the hop for the kind that goes backwards — the asking Bot speaking in the
-       * conversation the person is watching, to relay an answer or a failure. Every forward hop
-       * runs in a scratch thread of the addressed Bot's own, because a thread has exactly one
-       * agent; what it says there comes back to the person through the relay, not the thread.
+       * Backwards hops (`answerIn`) speak in the asking conversation so the person sees the relay.
+       * Forward hops prefer the addressed Bot's own 1:1 channel with the person (visible roster
+       * transcript: ask + reply), falling back to an unmapped scratch thread when none exists.
        */
+      let forwardThreadId: string | undefined;
+      if (!work.answerIn) {
+        const resolved = resolveForwardThread
+          ? await resolveForwardThread({
+              actorId: work.actorId,
+              botId: work.toBotId,
+            }).catch(() => null)
+          : null;
+        forwardThreadId =
+          typeof resolved === "string" && resolved.length > 0
+            ? resolved
+            : mintThreadId();
+      }
       const where: { threadId: string } = work.answerIn
         ? { threadId: work.answerIn }
-        : { threadId: mintThreadId() };
+        : { threadId: forwardThreadId! };
 
       /*
-       * A forward hop lights the asking channel while it runs, because its own run is in a scratch
-       * thread nobody sees. A backwards hop — a relay or a notice — runs in the asking thread
-       * itself, so the runtime's own thread lock already lights it through `onRunBusy`, and
-       * signalling here too would double up. So this covers only the leg the lock cannot: the
-       * addressed Bot thinking, off-screen, on behalf of a channel the person is watching.
+       * A forward hop lights the asking channel while the specialist works (person is waiting).
+       * When the hop also runs in a mapped specialist channel, light that thread too so the
+       * roster shows Working on the right Bot. A backwards hop already runs under the asking
+       * thread's lock/`onRunBusy`, so leave that alone.
        */
       const lightsAskingChannel = !work.answerIn;
+      const lightsForwardChannel =
+        lightsAskingChannel && where.threadId !== work.threadId;
       if (lightsAskingChannel) {
         await setBusy?.({ threadId: work.threadId, busy: true }).catch(
+          () => {},
+        );
+      }
+      if (lightsForwardChannel) {
+        await setBusy?.({ threadId: where.threadId, busy: true }).catch(
           () => {},
         );
       }
@@ -422,6 +444,11 @@ export function createHandoffDelivery(options: {
       } finally {
         if (lightsAskingChannel) {
           await setBusy?.({ threadId: work.threadId, busy: false }).catch(
+            () => {},
+          );
+        }
+        if (lightsForwardChannel) {
+          await setBusy?.({ threadId: where.threadId, busy: false }).catch(
             () => {},
           );
         }
