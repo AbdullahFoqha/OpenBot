@@ -86,7 +86,7 @@ const serving = {
   strictPort: true,
   proxy: {
     "/api": {
-      target: `http://localhost:${apiPort.port}`,
+      target: `http://127.0.0.1:${apiPort.port}`,
     },
   },
 };

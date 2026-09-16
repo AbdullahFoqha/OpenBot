@@ -13,6 +13,7 @@ import type { BotAccessCheck } from "./agents/profile-policy";
 import type { AgentProfileStore } from "./agents/profile-store";
 import { createAgentRoutes } from "./agents/routes";
 import type { Admission } from "./studio/admission";
+import type { StudioDispatcher } from "./studio/dispatch";
 import type { StudioPolicy } from "./studio/policy";
 import { createStudioRoutes } from "./studio/routes";
 import type { TaskStore } from "./studio/task-store";
@@ -354,6 +355,7 @@ export function createApp(
   studioAdmission?: Admission,
   studioTaskStore?: TaskStore,
   studioPolicy?: StudioPolicy,
+  studioDispatcher?: StudioDispatcher,
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -1471,6 +1473,7 @@ export function createApp(
         taskStore: studioTaskStore,
         policy: studioPolicy,
         requireUser,
+        dispatcher: studioDispatcher,
       }),
     );
   }

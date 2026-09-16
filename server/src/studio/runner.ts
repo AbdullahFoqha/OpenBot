@@ -92,10 +92,19 @@ function runGit(args: string[], cwd: string): Promise<string> {
  * before this staged first. Staging is safe here: every caller of this function operates on a
  * disposable fixture or a task's own dedicated worktree, never a shared or pushed branch.
  */
-async function diffOf(cwd: string): Promise<{ diff: string; changedFiles: string[] }> {
+async function diffOf(
+  cwd: string,
+  /**
+   * Commit the worktree was cut from. Required so a worker that commits its own work still
+   * counts as having changed the tree — `git diff --cached` against HEAD is empty after a commit,
+   * which is exactly how this studio once reported "no changes" for a real file+commit.
+   */
+  baseCommit: string,
+): Promise<{ diff: string; changedFiles: string[] }> {
   await runGit(["add", "-A"], cwd);
-  const diff = await runGit(["diff", "--no-color", "--cached"], cwd);
-  const nameOnly = await runGit(["diff", "--cached", "--name-only"], cwd);
+  // Working tree (including committed HEAD) vs the branch point — not --cached vs HEAD.
+  const diff = await runGit(["diff", "--no-color", baseCommit], cwd);
+  const nameOnly = await runGit(["diff", "--name-only", baseCommit], cwd);
   const changedFiles = nameOnly
     .split("\n")
     .map((l) => l.trim())
@@ -236,12 +245,13 @@ export async function runCodingTest(deps: {
     "Fix it so add(a, b) returns a + b. Then run `node openbot-smoke-test/check.js` to confirm it " +
     "passes. Only touch files under openbot-smoke-test/.";
 
+  const baseCommit = (await runGit(["rev-parse", "HEAD"], cwd)).trim();
   const run = await driveCursorRun({ cwd, prompt, model: deps.model });
 
   // Independent re-check: the same bytes, re-run by this process, not trusted from the agent's own
   // report of what it did.
   const checkAfter = await runCheck(cwd, ["node", "openbot-smoke-test/check.js"]);
-  const { diff, changedFiles } = await diffOf(cwd);
+  const { diff, changedFiles } = await diffOf(cwd, baseCommit);
 
   const ok = run.ok && checkAfter.exitCode === 0 && changedFiles.length > 0;
 
@@ -391,9 +401,10 @@ export async function runProjectTask(deps: {
     };
   }
 
+  const baseCommit = (await runGit(["rev-parse", "HEAD"], worktreePath)).trim();
   const prompt = `Goal:\n${deps.goal}\n\nAcceptance criteria:\n${deps.acceptanceCriteria}`;
   const run = await driveCursorRun({ cwd: worktreePath, prompt, model: deps.model });
-  const { diff, changedFiles } = await diffOf(worktreePath);
+  const { diff, changedFiles } = await diffOf(worktreePath, baseCommit);
   const ok = run.ok && changedFiles.length > 0;
 
   let blocker: string | null = ok ? null : run.blocker ?? "The worker made no changes.";

@@ -294,10 +294,20 @@ export function createCliBackend(
         : input.prompt;
       args.push(prompt);
 
+      // Drop the OpenBot control-model shim env. The server process has OPENAI_BASE_URL pointed
+      // at localhost:3013 for Bot chat; cursor-agent must use the Cursor CLI subscription login,
+      // not that fake key / local shim.
+      const childEnv = { ...process.env };
+      delete childEnv.OPENAI_BASE_URL;
+      delete childEnv.OPENAI_API_KEY;
+      delete childEnv.ANTHROPIC_API_KEY;
+      delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
+
       const child = spawnImpl(executable, args, {
         cwd: input.cwd,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
+        env: childEnv,
       });
 
       const queue: AgentEvent[] = [];

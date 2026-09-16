@@ -31,9 +31,11 @@ import {
   notAlreadyOffered,
 } from "./computer/server-tools";
 import { createAdmission } from "./studio/admission";
+import { createStudioDispatcher } from "./studio/dispatch";
 import { createDelegationStore } from "./studio/delegation-store";
 import { createTaskStore } from "./studio/task-store";
 import { loadStudioPolicy } from "./studio/policy";
+import { studioTools } from "./studio/tools";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
 import { createRuntimeAgentLoader } from "./agents/runtime-agents";
@@ -432,6 +434,11 @@ if (!studioPolicyOutcome.ok) {
 const studioPolicy = studioPolicyOutcome.policy;
 const admission = createAdmission(database, studioPolicy);
 const studioTaskStore = createTaskStore(database);
+const studioDispatcher = createStudioDispatcher({
+  database,
+  admission,
+  taskStore: studioTaskStore,
+});
 
 void recordAuditEvent(bootAuditStore, {
   eventType: "computer.policy_loaded",
@@ -592,6 +599,20 @@ const loadToolsForActor =
       auditStore: bootAuditStore,
       initiator,
     }),
+    // Same Cursor Run Task path as the Studio dashboard — subscription CLI, not API keys / host folders.
+    ...studioTools({
+      dispatcher: studioDispatcher,
+      database,
+      taskStore: studioTaskStore,
+      allowedBotIds: [
+        "studio-lead",
+        "react-native-engineer",
+        "technical-lead",
+        "product-researcher",
+        "product-designer",
+        "quality-engineer",
+      ],
+    })(botId),
   ];
 
 /** One person's standing instructions, for both the /api/settings routes and every run they start. */
@@ -1436,6 +1457,7 @@ const app = createApp(
   admission,
   studioTaskStore,
   studioPolicy,
+  studioDispatcher,
 );
 
 /** What each server-owned tool actually does, once its operation has been claimed. */

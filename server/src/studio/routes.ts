@@ -24,6 +24,12 @@ import {
   studioTasks,
 } from "../db/schema";
 import type { Admission } from "./admission";
+import {
+  createStudioDispatcher,
+  resolveProjectPath,
+  STUDIO_PRODUCT_ID,
+  type StudioDispatcher,
+} from "./dispatch";
 import type { StudioPolicy } from "./policy";
 import {
   CURSOR_ENGINEER_BOT_ID,
@@ -32,11 +38,6 @@ import {
   runProjectTask,
 } from "./runner";
 import type { TaskStore } from "./task-store";
-
-const STUDIO_PRODUCT_ID = "studio-local";
-
-/** One in-flight dispatch, tracked so Stop Task can cancel something real rather than a promise. */
-type InFlightRun = { controller: AbortController; startedAt: number };
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -62,27 +63,6 @@ async function cursorLoginStatus(): Promise<
   return /logged in/i.test(out) ? "online" : "needs_login";
 }
 
-async function resolveProjectPath(
-  inputPath: string,
-): Promise<{ ok: true; absolutePath: string; gitRoot: string } | { ok: false; reason: string }> {
-  if (!inputPath.startsWith("/")) {
-    return { ok: false, reason: "The path must be absolute." };
-  }
-  let real: string;
-  try {
-    real = await realpath(inputPath);
-  } catch {
-    return { ok: false, reason: `No such directory: ${inputPath}` };
-  }
-  const gitRoot = await tryCommand(["git", "rev-parse", "--show-toplevel"], real);
-  if (!gitRoot) {
-    return {
-      ok: false,
-      reason: `${real} is not inside a git repository, so the studio cannot give a worker its own branch there.`,
-    };
-  }
-  return { ok: true, absolutePath: real, gitRoot };
-}
 
 export function createStudioRoutes(deps: {
   database: Database;
@@ -90,15 +70,20 @@ export function createStudioRoutes(deps: {
   taskStore: TaskStore;
   policy: StudioPolicy;
   requireUser: MiddlewareHandler<{ Variables: AppVariables }>;
+  /** Shared with Bot studio_* tools so chat and the dashboard start the same Cursor run. */
+  dispatcher?: StudioDispatcher;
 }): Hono<{ Variables: AppVariables }> {
   const { database, admission, taskStore, policy, requireUser } = deps;
+  const dispatcher =
+    deps.dispatcher ??
+    createStudioDispatcher({ database, admission, taskStore });
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser);
 
   /** In-flight dispatches, by task id. Lost on a server restart, same as any other live process. */
-  const inFlight = new Map<string, InFlightRun>();
+  const inFlight = dispatcher.inFlight;
   /** Idempotency: a client-supplied key to the task id it already produced. */
-  const submitted = new Map<string, string>();
+  const submitted = dispatcher.submitted;
 
   async function ensureProduct() {
     const existing = await database
@@ -260,85 +245,25 @@ export function createStudioRoutes(deps: {
       typeof body?.acceptanceCriteria === "string" ? body.acceptanceCriteria.trim() : "";
     const idempotencyKey =
       typeof body?.idempotencyKey === "string" ? body.idempotencyKey : null;
-    if (!title || !goal) {
-      return c.json({ error: "A title and goal are required." }, 400);
-    }
 
-    if (idempotencyKey) {
-      const existingTaskId = submitted.get(idempotencyKey);
-      if (existingTaskId) return c.json({ taskId: existingTaskId, deduplicated: true });
-    }
-
-    const [product] = await database
-      .select({ localPath: studioProducts.localPath, queuePaused: studioProducts.queuePaused })
-      .from(studioProducts)
-      .where(eq(studioProducts.id, STUDIO_PRODUCT_ID))
-      .limit(1);
-    if (!product?.localPath) {
-      return c.json({ error: "Select a project before running a task." }, 400);
-    }
-    if (product.queuePaused) {
-      return c.json({
-        error: "The queue is paused. New work will not be assigned until you resume it.",
-      }, 409);
-    }
-    if (await admission.holdsWork(CURSOR_ENGINEER_BOT_ID)) {
-      return c.json({
-        error: "The Cursor Engineer already has a task in progress. One primary task per bot.",
-      }, 409);
-    }
-
-    const resolved = await resolveProjectPath(product.localPath);
-    if (!resolved.ok) return c.json({ error: resolved.reason }, 400);
-
-    const taskId = `task-${randomUUID()}`;
-    if (idempotencyKey) submitted.set(idempotencyKey, taskId);
-
-    await taskStore.createTask({
-      id: taskId,
-      productId: STUDIO_PRODUCT_ID,
-      title,
-      kind: "execution",
-      state: "ready",
-    });
-    await database
-      .update(studioTasks)
-      .set({ goal, acceptanceCriteria })
-      .where(eq(studioTasks.id, taskId));
-
-    const controller = new AbortController();
-    inFlight.set(taskId, { controller, startedAt: Date.now() });
-
-    void runProjectTask({
-      admission,
-      taskStore,
-      database,
-      productId: STUDIO_PRODUCT_ID,
-      projectPath: resolved.absolutePath,
-      taskId,
-      botId: CURSOR_ENGINEER_BOT_ID,
+    const result = await dispatcher.submit({
       title,
       goal,
       acceptanceCriteria,
-    })
-      .catch(async (err) => {
-        await taskStore.setBlocked(taskId, String(err));
-      })
-      .finally(() => {
-        inFlight.delete(taskId);
-      });
-
-    return c.json({ taskId });
+      idempotencyKey,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({
+      taskId: result.taskId,
+      ...(result.deduplicated ? { deduplicated: true } : {}),
+    });
   });
 
   routes.post("/tasks/:id/stop", async (c: Context) => {
     const taskId = c.req.param("id");
     if (!taskId) return c.json({ error: "A task id is required." }, 400);
-    const running = inFlight.get(taskId);
-    if (running) {
-      running.controller.abort();
-      inFlight.delete(taskId);
-    }
+    const wasRunning = dispatcher.abort(taskId);
+    const running = wasRunning ? { aborted: true } : null;
     // Release whatever reservation this task currently has, read fresh from the row rather than
     // trusting a ticket this request never held.
     const [reservation] = await database

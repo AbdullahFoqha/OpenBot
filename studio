@@ -96,9 +96,14 @@ cmd_start() {
     echo "control model already running"
   else
     echo "starting control model..."
-    (cd studio-local/claude-control-model && bun --env-file=../env server.ts) \
-      > "$LOGS/claude-control-model.log" 2>&1 &
-    echo $! > "$LOGS/claude-control-model.pid"
+    # nohup + disown so a closing terminal (or an agent shell) does not take the stack down —
+    # a dead :3013 presents as "Failed after 3 attempts... Cannot connect to API" in chat.
+    (
+      cd "$ROOT/studio-local/claude-control-model" || exit 1
+      nohup bun --env-file=../env server.ts >> "$LOGS/claude-control-model.log" 2>&1 &
+      echo $! > "$LOGS/claude-control-model.pid"
+      disown $! 2>/dev/null || true
+    )
     sleep 1
   fi
 
@@ -106,16 +111,34 @@ cmd_start() {
     echo "server already running"
   else
     echo "starting server..."
-    bun --env-file=studio-local/env server/src/index.ts > "$LOGS/server.log" 2>&1 &
+    nohup bun --env-file=studio-local/env server/src/index.ts > "$LOGS/server.log" 2>&1 &
     echo $! > "$LOGS/server.pid"
+    disown $! 2>/dev/null || true
   fi
 
   if pid_alive "$LOGS/app.pid" || [[ -n "$(port_owner $APP_PORT)" ]]; then
     echo "app already running"
   else
     echo "starting app..."
-    bun --env-file=studio-local/env run --filter app dev > "$LOGS/app.log" 2>&1 &
+    nohup bun --env-file=studio-local/env run --filter app dev > "$LOGS/app.log" 2>&1 &
     echo $! > "$LOGS/app.pid"
+    disown $! 2>/dev/null || true
+  fi
+
+  echo -n "waiting for control model..."
+  # Chat bots call OPENAI_BASE_URL on :3013. A dead shim shows up as
+  # "Failed after 3 attempts... Cannot connect to API" — fail start loudly instead.
+  ok=0
+  for _ in $(seq 1 20); do
+    if [[ -n "$(port_owner $CONTROL_MODEL_PORT)" ]]; then ok=1; break; fi
+    sleep 1
+  done
+  if [[ $ok -eq 1 ]]; then
+    echo " ok"
+  else
+    echo " FAILED"
+    echo "Control model is not on :$CONTROL_MODEL_PORT. Check $LOGS/claude-control-model.log"
+    exit 1
   fi
 
   echo -n "waiting for server health..."
