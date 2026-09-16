@@ -1,9 +1,8 @@
 /**
- * Bot-callable Studio tools: start Cursor CLI coding work the same way the dashboard Run Task does.
+ * Bot-callable Studio tools: start Cursor CLI work the same way the dashboard Run Task does.
  *
- * Lead (and other bots) must not invent host-folder writes or Claude Allow prompts for project
- * coding. They call studio_run_task, which admits work onto react-native-engineer and runs
- * cursor-agent on the Cursor subscription.
+ * Lead must use these for product coding/QA — not host-folder writes. Implementation runs as
+ * react-native-engineer; independent verify can run as quality-engineer.
  */
 import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
@@ -20,16 +19,26 @@ const runTaskParams = z.object({
     .string()
     .min(1)
     .describe(
-      "What the Cursor Engineer must do in the selected project (files, behavior, PR expectations).",
+      "What the worker must do in the selected project (implement, or for QA: verify/run tests on a branch/worktree).",
     ),
   acceptanceCriteria: z
     .string()
     .optional()
-    .describe("How to know the task succeeded. Prefer concrete file and PR checks."),
+    .describe("How to know the task succeeded. Prefer concrete file, test, and PR checks."),
   idempotencyKey: z
     .string()
     .optional()
     .describe("Optional key so a retried call does not start a second identical task."),
+  ownerBotId: z
+    .enum(["react-native-engineer", "quality-engineer", "technical-lead"])
+    .optional()
+    .describe(
+      "Who owns the Cursor run. Default react-native-engineer for implementation. Use quality-engineer for independent verify/QA on the local project.",
+    ),
+  skipVerify: z
+    .boolean()
+    .optional()
+    .describe("Set true only to skip automatic npm test/typecheck after the worker (rare)."),
 });
 
 const taskIdParams = z.object({
@@ -40,7 +49,6 @@ export function studioTools(options: {
   dispatcher: StudioDispatcher;
   database: Database;
   taskStore: TaskStore;
-  /** When set, only these bot ids receive the tools. Absent = all bots in this deployment. */
   allowedBotIds?: readonly string[];
 }): (botId: string) => GrantedTool[] {
   const { dispatcher, database, taskStore, allowedBotIds } = options;
@@ -53,18 +61,21 @@ export function studioTools(options: {
         name: "studio_run_task",
         ref: "studio/run_task",
         description:
-          "REQUIRED for creating or editing files in the selected Studio product repo (e.g. pocket-love), opening a feature branch, or drafting a PR. Starts the Cursor Engineer (cursor-agent on the Cursor subscription). Call this immediately when the person asks to create a file or change the project — do NOT call host_list_folders, host_write_file, or ask them whether Engineer exists / what the git origin is. Studio already has the selected project. Returns taskId; poll with studio_task_status.",
+          "REQUIRED for local product work: create/edit files in the selected project, run changes, open a feature branch/draft PR, or (ownerBotId=quality-engineer) independently verify/QA. Uses cursor-agent on the Cursor subscription in a project worktree; after implementation the studio re-runs package.json typecheck+test and only then opens a draft PR. Call immediately for project coding/QA — do NOT use host_list_folders/host_write_file or ask about Engineer/git origin. Returns taskId; poll studio_task_status (includes checkAfter).",
         parameters: runTaskParams,
         execute: async (args) => {
           const parsed = runTaskParams.safeParse(args ?? {});
           if (!parsed.success) {
             return `${REFUSAL_MARKER} title and goal are required.`;
           }
+          const ownerBotId = parsed.data.ownerBotId ?? "react-native-engineer";
           const result = await dispatcher.submit({
             title: parsed.data.title,
             goal: parsed.data.goal,
             acceptanceCriteria: parsed.data.acceptanceCriteria,
             idempotencyKey: parsed.data.idempotencyKey,
+            ownerBotId,
+            skipVerify: parsed.data.skipVerify,
           });
           if (!result.ok) {
             return `${REFUSAL_MARKER} ${result.error}`;
@@ -72,9 +83,9 @@ export function studioTools(options: {
           return JSON.stringify({
             taskId: result.taskId,
             deduplicated: result.deduplicated === true,
-            ownerBotId: "react-native-engineer",
+            ownerBotId,
             backend: "cursor-agent (Cursor subscription)",
-            note: "Coding is running asynchronously. Poll studio_task_status with this taskId. Tell the person the task id; do not ask them for git origin or branch — Studio already has the selected project.",
+            note: "Work runs asynchronously in a project worktree. Poll studio_task_status. Do not ask the person for git origin or branch.",
           });
         },
       },
@@ -82,7 +93,7 @@ export function studioTools(options: {
         name: "studio_task_status",
         ref: "studio/task_status",
         description:
-          "Read one Studio task's state, blocker, evidence (changed files), and draft PR URL if any.",
+          "Read one Studio task's state, blocker, evidence (changed files, checkAfter verify results, worktreePath), and draft PR URL if any.",
         parameters: taskIdParams,
         execute: async (args) => {
           const parsed = taskIdParams.safeParse(args ?? {});
@@ -118,17 +129,20 @@ export function studioTools(options: {
                   blocker: evidence.blocker,
                   backend: evidence.backend,
                   reportedModel: evidence.reportedModel,
+                  checkAfter: evidence.checkAfter,
+                  worktreePath: evidence.worktreePath,
                 }
               : null,
-            pullRequest: pr?.number && pr.url
-              ? {
-                  url: pr.url,
-                  number: pr.number,
-                  draft: pr.draft,
-                  headBranch: pr.headBranch,
-                  baseBranch: pr.baseBranch,
-                }
-              : null,
+            pullRequest:
+              pr?.number && pr.url
+                ? {
+                    url: pr.url,
+                    number: pr.number,
+                    draft: pr.draft,
+                    headBranch: pr.headBranch,
+                    baseBranch: pr.baseBranch,
+                  }
+                : null,
           });
         },
       },

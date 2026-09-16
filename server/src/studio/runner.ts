@@ -13,7 +13,7 @@
  * the model returned. A repair "done" only because a bot said so is exactly what this refuses to be.
  */
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Admission } from "./admission";
@@ -69,6 +69,36 @@ async function runCheck(
       resolve({ command: command.join(" "), exitCode: null, output: String(err) });
     });
   });
+}
+
+
+/**
+ * Default local verification for a product repo: package.json scripts the studio can re-run itself.
+ *
+ * Prefer `test` and `typecheck` when present. Not Maestro/device UI — that stays a QA-owned
+ * native path — but this is the floor so Engineer work is not "shipped" to a draft PR on a red build.
+ */
+export async function resolveProjectVerifyCommands(
+  projectPath: string,
+): Promise<string[][]> {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const raw = await readFile(`${projectPath}/package.json`, "utf8");
+    const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
+    const scripts = pkg.scripts ?? {};
+    const commands: string[][] = [];
+    // npm ci is not run here: the worktree shares node_modules via the project when present; agents
+    // that need a fresh install say so in the task. We invoke via npm so PATH resolution is ordinary.
+    if (typeof scripts.typecheck === "string") {
+      commands.push(["npm", "run", "typecheck", "--silent"]);
+    }
+    if (typeof scripts.test === "string") {
+      commands.push(["npm", "test", "--silent"]);
+    }
+    return commands;
+  } catch {
+    return [];
+  }
 }
 
 function runGit(args: string[], cwd: string): Promise<string> {
@@ -331,6 +361,12 @@ export async function runProjectTask(deps: {
   goal: string;
   acceptanceCriteria: string;
   model?: string;
+  /**
+   * Shell checks to re-run in the worktree after the worker exits.
+   * When omitted, discovered from the project's package.json (`typecheck`, `test`).
+   * Pass an empty array to skip verification.
+   */
+  verifyCommands?: string[][];
   /** Injected in tests so openDraft never touches a real account. */
   gh?: GhRunner;
   pushBranch?: (
@@ -401,18 +437,46 @@ export async function runProjectTask(deps: {
     };
   }
 
+  // Worktrees do not carry gitignored node_modules; link the product's so local test/typecheck work.
+  try {
+    await symlink(
+      join(deps.projectPath, "node_modules"),
+      join(worktreePath, "node_modules"),
+      "dir",
+    );
+  } catch {
+    // Already linked, or no node_modules in the product — verify will surface that clearly.
+  }
+
   const baseCommit = (await runGit(["rev-parse", "HEAD"], worktreePath)).trim();
-  const prompt = `Goal:\n${deps.goal}\n\nAcceptance criteria:\n${deps.acceptanceCriteria}`;
+  const verifyCommands =
+    deps.verifyCommands ??
+    (await resolveProjectVerifyCommands(deps.projectPath));
+  const verifyHint =
+    verifyCommands.length > 0
+      ? `\n\nLocal verification (run these in this worktree before you finish; the studio will re-run them after you exit):\n${verifyCommands.map((c) => `- \`${c.join(" ")}\``).join("\n")}`
+      : "";
+  const prompt = `You are editing a real product checkout on this Mac (worktree). Make the changes in this directory only.
+
+Goal:
+${deps.goal}
+
+Acceptance criteria:
+${deps.acceptanceCriteria}
+${verifyHint}
+
+When you are done: leave the tree buildable, run the verification commands above if listed, and commit your changes on this branch.`;
   const run = await driveCursorRun({ cwd: worktreePath, prompt, model: deps.model });
   const { diff, changedFiles } = await diffOf(worktreePath, baseCommit);
-  const ok = run.ok && changedFiles.length > 0;
+  let ok = run.ok && changedFiles.length > 0;
 
   let blocker: string | null = ok ? null : run.blocker ?? "The worker made no changes.";
   let pullRequest: RunOutcome["pullRequest"] = null;
+  let checkAfter: unknown = null;
 
   if (ok) {
     /*
-     * Commit before delivery when the worker left changes staged/uncommitted.
+     * Commit before verify/delivery when the worker left changes staged/uncommitted.
      *
      * diffOf stages for detection; a worker that wrote files but never committed leaves HEAD on
      * the branch point, and GitHub then refuses the draft PR with "No commits between main and …".
@@ -423,6 +487,22 @@ export async function runProjectTask(deps: {
     if (ahead === "0" && changedFiles.length > 0) {
       await runGit(["-c", "user.email=studio@local", "-c", "user.name=OpenBot Studio", "commit", "-q", "-m", deps.title], worktreePath);
     }
+
+    // Independent re-check in the worktree — same idea as the coding test fixture path.
+    const checkResults = [];
+    for (const command of verifyCommands) {
+      checkResults.push(await runCheck(worktreePath, command));
+    }
+    checkAfter = checkResults.length > 0 ? checkResults : null;
+    const failed = checkResults.find((c) => c.exitCode !== 0);
+    if (failed) {
+      ok = false;
+      blocker = `Local verification failed (${failed.command}, exit ${failed.exitCode}). Output tail: ${failed.output.slice(-800)}`;
+      await deps.taskStore.setBlocked(deps.taskId, blocker).catch(() => {});
+    }
+  }
+
+  if (ok) {
     const delivered = await deliverProjectDraftPr({
       database: deps.database,
       taskId: deps.taskId,
@@ -443,7 +523,7 @@ export async function runProjectTask(deps: {
       };
     } else {
       // Work and worktree stay; the person can still push. Surface why the draft PR did not open.
-      blocker = `Code changed, but the draft pull request was not opened: ${delivered.reason}`;
+      blocker = `Code changed and checks passed, but the draft pull request was not opened: ${delivered.reason}`;
       await deps.taskStore.setBlocked(deps.taskId, blocker).catch(() => {});
     }
   }
@@ -460,7 +540,7 @@ export async function runProjectTask(deps: {
       changedFiles,
       diff,
       checkBefore: null,
-      checkAfter: null,
+      checkAfter,
       ok,
       blocker,
     })
@@ -471,6 +551,7 @@ export async function runProjectTask(deps: {
         sessionId: run.sessionId,
         changedFiles,
         diff,
+        checkAfter,
         ok,
         blocker,
       },

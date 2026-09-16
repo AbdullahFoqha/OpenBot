@@ -24,6 +24,10 @@ export type SubmitStudioTaskInput = {
   goal: string;
   acceptanceCriteria?: string;
   idempotencyKey?: string | null;
+  /** Defaults to the Cursor Engineer. Pass quality-engineer for a verify-focused run. */
+  ownerBotId?: string;
+  /** When true, do not re-run package.json test/typecheck after the worker. */
+  skipVerify?: boolean;
 };
 
 export type SubmitStudioTaskResult =
@@ -134,12 +138,12 @@ export function createStudioDispatcher(deps: {
             "The queue is paused. New work will not be assigned until you resume it.",
         };
       }
-      if (await admission.holdsWork(CURSOR_ENGINEER_BOT_ID)) {
+      const ownerBotId = input.ownerBotId?.trim() || CURSOR_ENGINEER_BOT_ID;
+      if (await admission.holdsWork(ownerBotId)) {
         return {
           ok: false,
           status: 409,
-          error:
-            "The Cursor Engineer already has a task in progress. One primary task per bot.",
+          error: `Bot ${ownerBotId} already has a task in progress. One primary task per bot.`,
         };
       }
 
@@ -173,10 +177,11 @@ export function createStudioDispatcher(deps: {
         productId: STUDIO_PRODUCT_ID,
         projectPath: resolved.absolutePath,
         taskId,
-        botId: CURSOR_ENGINEER_BOT_ID,
+        botId: ownerBotId,
         title,
         goal,
         acceptanceCriteria,
+        ...(input.skipVerify ? { verifyCommands: [] } : {}),
       })
         .catch(async (err) => {
           await taskStore.setBlocked(taskId, String(err));
