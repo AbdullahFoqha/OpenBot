@@ -48,3 +48,24 @@ QE AC: prefer `STUDIO_INSTALL_MODE=release` — see `studio-local/QE_AC_MAESTRO_
 Shell parity: `install-app-on-sim.sh` defaults `STUDIO_INSTALL_MODE` to **release** (same as TS `resolveStudioInstallMode`); use `auto` explicitly for clone/expo fallbacks.
 
 Env knobs: `STUDIO_MAESTRO_RESET=0` · `STUDIO_MAESTRO_INSTALL=1` · `STUDIO_INSTALL_MODE=release|clone|expo|auto`
+
+
+## Flow matrix (Release + reset, preferred UDID)
+
+Recipe:
+
+```bash
+STUDIO_INSTALL_MODE=release STUDIO_MAESTRO_RESET=1 \
+  ./studio-local/run-maestro-flow.sh \
+  /Users/abdullah/Documents/projects/pocket-love/.maestro/<flow>.yaml \
+  812A595B-0FDA-4C3F-9346-088E6C07A489
+```
+
+| Flow | Status | Evidence stamp | Notes |
+|------|--------|----------------|-------|
+| `onboard.yaml` | **PASS** | `20260916T055901Z` (also QE E2E / Lead-tool) | `clearState` + Release |
+| `expense.yaml` | **PASS** | `20260916T144031Z` | clearState + short onboard prefix |
+| `payday-ineligible.yaml` | **PASS** | `20260916T144108Z` | clearState + short onboard; no collectPayday |
+| `payday.yaml` | needs seed | — | Requires eligible `home.collectPayday` after onboard |
+| `expense-media.yaml` | **Release gap** | `20260916T144143Z` (exit 1) | Fails at `debug.attachFakeReceipt` — those controls are `__DEV__`-only; Release binary strips them. Use a Debug/dev-client install for this flow; do not expect Release smoke PASS. |
+
