@@ -53,7 +53,7 @@ Dirty-sim (2026-09-16): `reset-app-on-sim.sh` + `STUDIO_MAESTRO_RESET=1` (defaul
 
 Lead-tool Maestro (2026-09-16): Verifier PASS task-32149d89 via studio-lead chat (`4a0fb65`); HTTP E2E PASS task-95d84d7e. Both paths green.
 
-Maestro flow matrix (2026-09-16): Release+reset — onboard/expense/payday-ineligible PASS; payday needs seed; expense-media Release/__DEV__ gap. See studio-local/maestro-smoke.md (`5ecf172`).
+Maestro flow matrix (2026-09-16): Release+reset — onboard/expense/payday-ineligible PASS; **payday Release seed** via `studio-local/maestro/payday-release-seed.yaml` (toggle OFF includes-allowance); expense-media still Release/__DEV__ gap. See studio-local/maestro-smoke.md.
 
 Worktree hygiene (2026-09-16): `./studio prune-worktrees` dry-run lists; `--apply --older-than 2` removes terminal-task worktrees under Documents/projects.
 Auto-prune on complete (2026-09-16): runner + markInterrupted call `pruneTaskWorktree` when terminal; `STUDIO_PRUNE_ON_COMPLETE=1` default (set `0` to keep worktrees).

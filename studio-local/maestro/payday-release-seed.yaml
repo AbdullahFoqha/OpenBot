@@ -1,0 +1,30 @@
+# PL-007 Release seed — Collect payday without __DEV__ clock.
+# Fresh clearState onboard with includes-allowance Switch toggled OFF so
+# startMonth = current month; after nominal payday day (15) home.collectPayday
+# is eligible on a real calendar (no debug.clockEligible).
+# Note: label tap alone does NOT toggle RN Switch; use checked:true (first Switch).
+# Two Switches on onboard (includes + Face ID); index 0 = includes-allowance.
+appId: app.pocketlove.private
+---
+- launchApp:
+    clearState: true
+- assertVisible:
+    id: "onboarding.startingAmount"
+# Toggle OFF includes-allowance (default ON). Do not use label tap — it no-ops.
+- tapOn:
+    checked: true
+    index: 0
+- tapOn:
+    id: "onboarding.save"
+- assertVisible:
+    id: "home.everydayBalance"
+- assertVisible:
+    id: "home.collectPayday"
+- tapOn:
+    id: "home.collectPayday"
+- extendedWaitUntil:
+    notVisible:
+      id: "home.collectPayday"
+    timeout: 15000
+- assertVisible:
+    id: "home.everydayBalance"

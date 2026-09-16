@@ -61,3 +61,5 @@ See `ULTRA_DEMO.md`.
 See `DAY_TO_DAY_CAPABILITY.md` for RN/QA/Maestro/Mac-browser north star beyond ultra proves.
 
 _U4 shell note (2026-09-16): `run-maestro-flow.sh` now calls `install-app-on-sim.sh` (parity with TS `installApp`)._
+
+_Payday Release seed (2026-09-16): `studio-local/maestro/payday-release-seed.yaml` PASS `20260916T150132Z` (toggle includes Switch OFF; no __DEV__). expense-media still Debug-only._
