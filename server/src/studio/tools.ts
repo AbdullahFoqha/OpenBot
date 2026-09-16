@@ -13,6 +13,7 @@ import type { StudioDispatcher } from "./dispatch";
 import { STUDIO_PRODUCT_ID } from "./dispatch";
 import type { TaskStore } from "./task-store";
 import { createDynamicBot } from "./bot-catalog";
+import type { BotMessaging } from "./bot-messaging";
 import {
   getBrowserSession,
   startBrowserSession,
@@ -94,6 +95,22 @@ const spawnBotParams = z.object({
     ),
 });
 
+
+const messageBotParams = z.object({
+  botId: z.string().min(1).describe("Target bot id, e.g. custom-researcher-demo or product-researcher."),
+  message: z.string().min(1).describe("What to tell that bot."),
+  priority: z
+    .boolean()
+    .optional()
+    .describe(
+      "true (default): wake them now (Grok SendToAgent priority). false: FYI — inbox + roster only, no wake.",
+    ),
+  fromBotId: z
+    .string()
+    .optional()
+    .describe("Sender bot id. Default studio-lead."),
+});
+
 const browserSessionParams = z.object({
   action: z
     .enum(["start", "stop", "status"])
@@ -153,13 +170,56 @@ export function studioTools(options: {
   database: Database;
   taskStore: TaskStore;
   allowedBotIds?: readonly string[];
+  botMessaging?: BotMessaging;
+  /** Default actor for headless messaging (studio local user). */
+  messagingActorId?: string;
 }): (botId: string) => GrantedTool[] {
-  const { dispatcher, database, taskStore, allowedBotIds } = options;
+  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, messagingActorId } = options;
 
   return (botId: string) => {
     if (allowedBotIds && !allowedBotIds.includes(botId)) return [];
 
     const tools: GrantedTool[] = [
+      {
+        name: "studio_message_bot",
+        ref: "studio/message_bot",
+        description:
+          "Message another Studio bot (Grok SendToAgent parity). priority=true wakes them into their chat; priority=false is FYI (inbox/roster, no wake). Works with dynamic bots from studio_spawn_bot. Prefer this for cross-bot coordination that is not a full coding handoff envelope.",
+        parameters: messageBotParams,
+        execute: async (args) => {
+          if (!botMessaging) {
+            return `${REFUSAL_MARKER} Bot messaging is not wired in this deployment.`;
+          }
+          const parsed = messageBotParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} botId and message are required.`;
+          }
+          const actorId = messagingActorId ?? "dev-local-user";
+          const result = await botMessaging.send({
+            fromBotId: parsed.data.fromBotId?.trim() || botId,
+            toBotId: parsed.data.botId.trim(),
+            message: parsed.data.message,
+            priority: parsed.data.priority,
+            actorId,
+          });
+          if (!result.ok) {
+            return `${REFUSAL_MARKER} ${result.error}`;
+          }
+          return JSON.stringify({
+            ok: true,
+            messageId: result.message.id,
+            toBotId: result.message.toBotId,
+            priority: result.message.priority,
+            woke: result.woke,
+            channelId: result.message.channelId,
+            threadId: result.message.threadId,
+            note: result.woke
+              ? "Priority message queued — recipient chat will show the ask."
+              : "FYI stored in inbox and roster; recipient is not woken.",
+          });
+        },
+      },
+
       {
         name: "studio_spawn_bot",
         ref: "studio/spawn_bot",

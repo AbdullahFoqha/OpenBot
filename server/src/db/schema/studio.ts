@@ -505,3 +505,32 @@ export const studioDynamicBots = pgTable("studio_dynamic_bots", {
     .defaultNow(),
   archivedAt: timestamp("archived_at", { withTimezone: true }),
 });
+
+
+/**
+ * P1.1 bot-to-bot messaging bus (Grok SendToAgent parity).
+ * priority=true wakes the recipient; priority=false is FYI (stored for next turn / roster).
+ */
+export const studioBotMessages = pgTable(
+  "studio_bot_messages",
+  {
+    id: text("id").primaryKey(),
+    fromBotId: text("from_bot_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    toBotId: text("to_bot_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    body: text("body").notNull(),
+    priority: boolean("priority").notNull().default(true),
+    channelId: text("channel_id"),
+    threadId: text("thread_id"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("studio_bot_messages_to_idx").on(table.toBotId, table.createdAt),
+    index("studio_bot_messages_from_idx").on(table.fromBotId, table.createdAt),
+  ],
+);

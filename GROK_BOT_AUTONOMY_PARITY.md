@@ -203,4 +203,5 @@ Implement in backlog order after P0 demos. Each gets its own AC doc when started
 - **P0.2** multi-project register/select — shipped (local).
 - **P0.4** browser agent session — shipped (local).
 - **P0.5** unattended run contract — shipped (local).
+- **P1.1** bot-to-bot messaging (priority vs FYI) — shipped (local).
 - **P0.3** Mac desktop agent session — shipped (local).

@@ -37,6 +37,7 @@ import { createDelegationStore } from "./studio/delegation-store";
 import { createTaskStore } from "./studio/task-store";
 import { loadStudioPolicy } from "./studio/policy";
 import { studioTools } from "./studio/tools";
+import { createBotMessaging } from "./studio/bot-messaging";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
 import { createRuntimeAgentLoader } from "./agents/runtime-agents";
@@ -383,6 +384,8 @@ useRoutineTools(routineStore);
  * that, because the Bot being addressed will very likely run on a different pod from the Bot that
  * addressed it, and a hop held in memory is lost the moment either is rescheduled.
  */
+let kickHandoffRef: (() => void) | undefined;
+
 const handoffDesk = createHandoffDesk({
   queue: createWorkQueue(database),
   profiles: agentProfileStore,
@@ -613,6 +616,8 @@ const loadToolsForActor =
       dispatcher: studioDispatcher,
       database,
       taskStore: studioTaskStore,
+      botMessaging: studioBotMessaging,
+      messagingActorId: "dev-local-user",
       allowedBotIds: [
         "studio-lead",
         "react-native-engineer",
@@ -1243,6 +1248,9 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
     config.databaseUrl,
     (kind) => {
       if (kind === HANDOFF_KIND) void kick();
+    kickHandoffRef = () => {
+      void kick();
+    };
     },
   );
   repeatAfterEach(kick, 2_000);
@@ -1323,6 +1331,22 @@ repeatAfterEach(async () => {
     );
   }
 }, 10_000);
+
+
+/** P1.1 messaging bus — shared work queue + channelStore; wakes handoff sweeper when priority. */
+const studioBotMessaging = createBotMessaging({
+  database,
+  queue: createWorkQueue(database),
+  channelStore,
+  actorFor: async (userId) => {
+    try {
+      return await actorFor(userId);
+    } catch {
+      return null;
+    }
+  },
+  kickHandoff: () => kickHandoffRef?.(),
+});
 
 const app = createApp(
   config,
@@ -1473,6 +1497,7 @@ const app = createApp(
   studioTaskStore,
   studioPolicy,
   studioDispatcher,
+  studioBotMessaging,
 );
 
 /** What each server-owned tool actually does, once its operation has been claimed. */
@@ -1571,6 +1596,8 @@ async function runDeploymentTool(input: {
     dispatcher: studioDispatcher,
     database,
     taskStore: studioTaskStore,
+    botMessaging: studioBotMessaging,
+    messagingActorId: "dev-local-user",
     allowedBotIds: [
       "studio-lead",
       "react-native-engineer",

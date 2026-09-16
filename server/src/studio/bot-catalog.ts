@@ -240,6 +240,8 @@ export async function createDynamicBot(
     });
   });
 
+  await grantLeadCanMessage(database, input.id);
+
   const bot = await getCatalogBot(database, input.id);
   if (!bot) return { ok: false, error: "Created but could not re-read bot.", status: 400 };
   return { ok: true, bot, created: true };

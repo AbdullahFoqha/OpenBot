@@ -64,6 +64,7 @@ import {
   runDesktopActions,
   parseDesktopSteps,
 } from "./desktop-session";
+import type { BotMessaging } from "./bot-messaging";
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -98,8 +99,10 @@ export function createStudioRoutes(deps: {
   requireUser: MiddlewareHandler<{ Variables: AppVariables }>;
   /** Shared with Bot studio_* tools so chat and the dashboard start the same Cursor run. */
   dispatcher?: StudioDispatcher;
+  /** P1.1 bot-to-bot messaging bus. */
+  botMessaging?: BotMessaging;
 }): Hono<{ Variables: AppVariables }> {
-  const { database, admission, taskStore, policy, requireUser } = deps;
+  const { database, admission, taskStore, policy, requireUser, botMessaging } = deps;
   const dispatcher =
     deps.dispatcher ??
     createStudioDispatcher({ database, admission, taskStore });
@@ -533,6 +536,46 @@ export function createStudioRoutes(deps: {
   routes.post("/desktop/session/stop", async (c: Context) => {
     const result = await stopDesktopSession();
     return c.json({ ok: true, session: result.session });
+  });
+
+
+  // --- P1.1 bot-to-bot messaging ---
+  routes.post("/bots/:id/messages", async (c: Context) => {
+    if (!botMessaging) return c.json({ error: "Bot messaging is not configured." }, 503);
+    const toBotId = c.req.param("id");
+    if (!toBotId) return c.json({ error: "id required" }, 400);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.message !== "string") {
+      return c.json({ error: "message is required." }, 400);
+    }
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const result = await botMessaging.send({
+      fromBotId: typeof body.fromBotId === "string" ? body.fromBotId : "studio-lead",
+      toBotId,
+      message: body.message,
+      priority: body.priority === false ? false : true,
+      actorId,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(
+      {
+        messageId: result.message.id,
+        priority: result.message.priority,
+        woke: result.woke,
+        channelId: result.message.channelId,
+        threadId: result.message.threadId,
+        message: result.message,
+      },
+      201,
+    );
+  });
+
+  routes.get("/bots/:id/messages", async (c: Context) => {
+    if (!botMessaging) return c.json({ error: "Bot messaging is not configured." }, 503);
+    const toBotId = c.req.param("id");
+    if (!toBotId) return c.json({ error: "id required" }, 400);
+    const messages = await botMessaging.listInbox(toBotId, 50);
+    return c.json({ messages });
   });
 
   // --- P0.4 browser agent session ---
