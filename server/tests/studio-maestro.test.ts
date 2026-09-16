@@ -7,6 +7,7 @@ import {
   parseDeviceFromCriteria,
   shouldRunMaestro,
   installApp,
+  resolveStudioInstallMode,
   STUDIO_PREFERRED_IOS_UDID,
   type InstallResult,
 } from "../src/studio/maestro";
@@ -254,15 +255,36 @@ describe("evidence output structure", () => {
       appInstalled: true,
       durationMs: 15000,
       install: {
-        status: "cloned" as const,
+        status: "release" as const,
         exitCode: 0,
         logPath: "/path/to/output/install.log",
       },
     };
 
     expect(evidence.install).toBeDefined();
-    expect(evidence.install?.status).toBe("cloned");
+    expect(evidence.install?.status).toBe("release");
     expect(evidence.install?.exitCode).toBe(0);
+  });
+});
+
+
+describe("resolveStudioInstallMode", () => {
+  test("defaults to release when unset", () => {
+    expect(resolveStudioInstallMode(undefined, {})).toBe("release");
+  });
+
+  test("honors STUDIO_INSTALL_MODE env", () => {
+    expect(resolveStudioInstallMode(undefined, { STUDIO_INSTALL_MODE: "clone" })).toBe("clone");
+    expect(resolveStudioInstallMode(undefined, { STUDIO_INSTALL_MODE: "auto" })).toBe("auto");
+    expect(resolveStudioInstallMode(undefined, { STUDIO_INSTALL_MODE: "expo" })).toBe("expo");
+  });
+
+  test("explicit mode wins over env", () => {
+    expect(resolveStudioInstallMode("expo", { STUDIO_INSTALL_MODE: "clone" })).toBe("expo");
+  });
+
+  test("unknown values fall back to release", () => {
+    expect(resolveStudioInstallMode("nope", {})).toBe("release");
   });
 });
 
@@ -277,6 +299,51 @@ describe("installApp", () => {
 
   afterEach(async () => {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+
+  test("defaults to release mode and installs DerivedData Release app", async () => {
+    const releaseApp =
+      "/Users/abdullah/Library/Developer/Xcode/DerivedData/PocketLove-x/Build/Products/Release-iphonesimulator/PocketLove.app";
+    const mockRunCommand = mock(
+      async (
+        command: string,
+        args: string[],
+      ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> => {
+        if (command === "find") {
+          return { exitCode: 0, stdout: releaseApp + "\n", stderr: "" };
+        }
+        if (command === "xcrun" && args[1] === "uninstall") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "xcrun" && args[1] === "install") {
+          expect(args[3]).toBe(releaseApp);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    );
+
+    const prev = process.env.STUDIO_INSTALL_MODE;
+    delete process.env.STUDIO_INSTALL_MODE;
+    try {
+      const result = await installApp({
+        projectPath: join(tmpDir, "project"),
+        udid: "812A595B-0FDA-4C3F-9346-088E6C07A489",
+        appId: "app.pocketlove.private",
+        outputDir: join(tmpDir, "output"),
+        // mode omitted → resolveStudioInstallMode → release
+        runCommand: mockRunCommand,
+      });
+      expect(result.status).toBe("release");
+      expect(result.exitCode).toBe(0);
+      const logContent = await readFile(result.logPath, "utf8");
+      expect(logContent).toContain("mode=release");
+      expect(logContent).toContain("RELEASE: success");
+    } finally {
+      if (prev === undefined) delete process.env.STUDIO_INSTALL_MODE;
+      else process.env.STUDIO_INSTALL_MODE = prev;
+    }
   });
 
   test("skipped status when clone-only mode fails with no donor", async () => {
@@ -397,6 +464,7 @@ describe("installApp", () => {
 
     const logContent = await readFile(result.logPath, "utf8");
     expect(logContent).toContain("EXPO: npx expo run:ios");
+    expect(logContent).toContain("--configuration Release");
     expect(logContent).toContain("Build succeeded");
   });
 

@@ -24,7 +24,7 @@ const MAESTRO_BIN_DIR = join(homedir(), ".maestro", "bin");
 const DEFAULT_APP_ID = "app.pocketlove.private";
 
 export type InstallResult = {
-  status: "skipped" | "cloned" | "expo" | "failed";
+  status: "skipped" | "cloned" | "release" | "expo" | "failed";
   exitCode: number | null;
   logPath: string;
 };
@@ -129,6 +129,23 @@ async function checkAppInstalled(udid: string, appId: string): Promise<boolean> 
   return result.exitCode === 0;
 }
 
+
+/**
+ * Install mode for Maestro sim installs.
+ * Default **release** (embedded JS) unless STUDIO_INSTALL_MODE or an explicit mode is set.
+ * Avoids Debug Metro RedBox on unattended QE runs.
+ */
+export function resolveStudioInstallMode(
+  explicit?: "release" | "clone" | "expo" | "auto" | string,
+  env: NodeJS.ProcessEnv = process.env,
+): "release" | "clone" | "expo" | "auto" {
+  const raw = String(explicit ?? env.STUDIO_INSTALL_MODE ?? "release").trim().toLowerCase();
+  if (raw === "clone" || raw === "expo" || raw === "auto" || raw === "release") {
+    return raw;
+  }
+  return "release";
+}
+
 /**
  * Attempt to install the app onto the simulator.
  *
@@ -145,7 +162,7 @@ export async function installApp(input: {
   appId: string;
   outputDir: string;
   /** Override to force a specific install mode. */
-  mode?: "clone" | "expo" | "auto";
+  mode?: "release" | "clone" | "expo" | "auto";
   /** Timeout for the install process (expo builds can take minutes). */
   timeoutMs?: number;
   /** Inject for testing. */
@@ -153,16 +170,65 @@ export async function installApp(input: {
 }): Promise<InstallResult> {
   const run = input.runCommand ?? runCommand;
   const logPath = join(input.outputDir, "install.log");
-  const mode = input.mode ?? "auto";
+  const mode = resolveStudioInstallMode(input.mode);
   const timeoutMs = input.timeoutMs ?? 10 * 60_000;
-  let logs = `install: mode=${mode} udid=${input.udid} appId=${input.appId}\n`;
+  let logs = `install: mode=${mode} udid=${input.udid} appId=${input.appId} (default release unless STUDIO_INSTALL_MODE/mode set)\n`;
 
   const appendLog = async (text: string) => {
     logs += text + "\n";
     await writeFile(logPath, logs).catch(() => {});
   };
 
+  const scriptEnv = {
+    ...process.env,
+    STUDIO_INSTALL_MODE: mode,
+  };
+
   try {
+    // Prefer the Mac shell helper (Release DerivedData → clone → expo Release).
+    // Skip when runCommand is injected (unit tests exercise in-process strategies).
+    const scriptCandidates = input.runCommand
+      ? ([] as string[])
+      : [
+      join(process.cwd(), "studio-local", "install-app-on-sim.sh"),
+      join(process.cwd(), "..", "studio-local", "install-app-on-sim.sh"),
+    ];
+    for (const script of scriptCandidates) {
+      try {
+        await access(script);
+        await appendLog(`SCRIPT: ${script} STUDIO_INSTALL_MODE=${mode}`);
+        const result = await run(script, [input.projectPath, input.udid, input.appId], {
+          timeoutMs,
+          env: scriptEnv,
+        });
+        await appendLog(result.stdout);
+        if (result.stderr) await appendLog(`stderr: ${result.stderr}`);
+        await appendLog(`SCRIPT: exit=${result.exitCode}`);
+        if (result.exitCode === 0) {
+          const status =
+            mode === "clone" ? "cloned" : mode === "expo" ? "expo" : "release";
+          return { status, exitCode: 0, logPath };
+        }
+        await appendLog("SCRIPT: non-zero — falling back to in-process strategies");
+        break;
+      } catch {
+        /* script missing — try next / fallback */
+      }
+    }
+
+    if (mode === "release" || mode === "auto") {
+      await appendLog("Attempting Release DerivedData .app install...");
+      const releaseResult = await tryInstallReleaseApp(input.udid, input.appId, run);
+      if (releaseResult.ok) {
+        await appendLog(`RELEASE: success from ${releaseResult.appPath}`);
+        return { status: "release", exitCode: 0, logPath };
+      }
+      await appendLog(`RELEASE: failed - ${releaseResult.reason}`);
+      if (mode === "release") {
+        return { status: "failed", exitCode: 1, logPath };
+      }
+    }
+
     if (mode === "auto" || mode === "clone") {
       await appendLog("Attempting clone from another simulator...");
       const cloneResult = await tryCloneFromOtherSim(input.udid, input.appId, run);
@@ -178,13 +244,16 @@ export async function installApp(input: {
       return { status: "failed", exitCode: 1, logPath };
     }
 
-    await appendLog(`EXPO: npx expo run:ios --device ${input.udid} --configuration Debug --no-bundler`);
+    // Expo fallback: Release embeds JS (no Metro).
+    await appendLog(
+      `EXPO: npx expo run:ios --device ${input.udid} --configuration Release --no-bundler`,
+    );
     await appendLog(`cwd=${input.projectPath}`);
 
     const expoResult = await run(
       "npx",
-      ["expo", "run:ios", "--device", input.udid, "--configuration", "Debug", "--no-bundler"],
-      { cwd: input.projectPath, timeoutMs },
+      ["expo", "run:ios", "--device", input.udid, "--configuration", "Release", "--no-bundler"],
+      { cwd: input.projectPath, timeoutMs, env: scriptEnv },
     );
 
     await appendLog(`EXPO: exit=${expoResult.exitCode}`);
@@ -200,6 +269,37 @@ export async function installApp(input: {
     await appendLog(`ERROR: ${err instanceof Error ? err.message : String(err)}`);
     return { status: "failed", exitCode: null, logPath };
   }
+}
+
+async function tryInstallReleaseApp(
+  targetUdid: string,
+  appId: string,
+  run: typeof runCommand,
+): Promise<{ ok: true; appPath: string } | { ok: false; reason: string }> {
+  const derived = join(homedir(), "Library/Developer/Xcode/DerivedData");
+  const findResult = await run("find", [
+    derived,
+    "-path",
+    "*Release-iphonesimulator/PocketLove.app",
+    "-type",
+    "d",
+  ]);
+  if (findResult.exitCode !== 0 || !findResult.stdout.trim()) {
+    return { ok: false, reason: "No Release-iphonesimulator PocketLove.app under DerivedData" };
+  }
+  const apps = findResult.stdout
+    .trim()
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // Prefer the last path find returned (often newest enough); shell script sorts by mtime.
+  const appPath = apps[apps.length - 1]!;
+  await run("xcrun", ["simctl", "uninstall", targetUdid, appId]);
+  const installResult = await run("xcrun", ["simctl", "install", targetUdid, appPath]);
+  if (installResult.exitCode !== 0) {
+    return { ok: false, reason: `simctl install failed: ${installResult.stderr}` };
+  }
+  return { ok: true, appPath };
 }
 
 async function tryCloneFromOtherSim(
