@@ -501,9 +501,25 @@ ${verifyHint}
 When you are done: leave the tree buildable, run the verification commands above if listed, and commit your changes on this branch.`;
   const run = await driveCursorRun({ cwd: worktreePath, prompt, model: deps.model });
   const { diff, changedFiles } = await diffOf(worktreePath, baseCommit);
-  let ok = run.ok && changedFiles.length > 0;
+  /**
+   * Quality-engineer / Maestro verify runs are allowed to change nothing in git.
+   * Requiring changedFiles hid Maestro entirely (ok stayed false → `if (ok)` skipped).
+   */
+  const verifyOnly =
+    deps.botId === "quality-engineer" ||
+    Boolean(deps.maestroFlow?.trim()) ||
+    Boolean(
+      shouldRunMaestro({
+        maestroFlow: deps.maestroFlow,
+        acceptanceCriteria: deps.acceptanceCriteria,
+        ownerBotId: deps.botId,
+      }).run,
+    );
+  let ok = run.ok && (changedFiles.length > 0 || verifyOnly);
 
-  let blocker: string | null = ok ? null : run.blocker ?? "The worker made no changes.";
+  let blocker: string | null = ok
+    ? null
+    : run.blocker ?? (verifyOnly ? "The worker did not finish cleanly." : "The worker made no changes.");
   let pullRequest: RunOutcome["pullRequest"] = null;
   let checkAfterResults: Array<{ command: string; exitCode: number | null; output: string }> | null = null;
   let maestroEvidence: MaestroEvidence | null = null;
@@ -575,7 +591,7 @@ When you are done: leave the tree buildable, run the verification commands above
     }
   }
 
-  if (ok) {
+  if (ok && changedFiles.length > 0) {
     const delivered = await deliverProjectDraftPr({
       database: deps.database,
       taskId: deps.taskId,
