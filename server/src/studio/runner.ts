@@ -131,14 +131,16 @@ async function diffOf(
    */
   baseCommit: string,
 ): Promise<{ diff: string; changedFiles: string[] }> {
-  await runGit(["add", "-A"], cwd);
+  // Exclude the studio-linked node_modules symlink — git would otherwise stage it as a new path.
+  await runGit(["add", "-A", "--", ".", ":(exclude)node_modules"], cwd);
+  await runGit(["reset", "-q", "HEAD", "--", "node_modules"], cwd);
   // Working tree (including committed HEAD) vs the branch point — not --cached vs HEAD.
-  const diff = await runGit(["diff", "--no-color", baseCommit], cwd);
-  const nameOnly = await runGit(["diff", "--name-only", baseCommit], cwd);
+  const diff = await runGit(["diff", "--no-color", baseCommit, "--", ".", ":(exclude)node_modules"], cwd);
+  const nameOnly = await runGit(["diff", "--name-only", baseCommit, "--", ".", ":(exclude)node_modules"], cwd);
   const changedFiles = nameOnly
     .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean);
+    .filter((l) => l && l !== "node_modules" && !l.startsWith("node_modules/"));
   return { diff, changedFiles };
 }
 
