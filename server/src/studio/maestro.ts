@@ -152,9 +152,11 @@ export function resolveStudioInstallMode(
  * Prefers spawning `studio-local/install-app-on-sim.sh` relative to the openbot-studio repo root.
  * Falls back to direct simctl clone logic if the script is not available.
  *
- * Install strategies (in order):
- * 1. Clone from another sim that has the app (fast path)
- * 2. Expo build (npx expo run:ios --device <udid> --configuration Debug --no-bundler)
+ * Install strategies (default mode=release; STUDIO_INSTALL_MODE overrides):
+ * 1. studio-local/install-app-on-sim.sh when present (Release DerivedData → …)
+ * 2. Release DerivedData PocketLove.app via simctl install
+ * 3. Clone from another sim (auto/clone)
+ * 4. Expo Release: npx expo run:ios --device <udid> --configuration Release --no-bundler
  */
 export async function installApp(input: {
   projectPath: string;
@@ -567,13 +569,13 @@ export async function runMaestro(
         const blockerPath = join(outputDir, "blocker.txt");
         await writeFile(
           blockerPath,
-          `APP_NOT_INSTALLED:${appId} on ${udid} — install Debug build, then re-run.\n` +
+          `APP_NOT_INSTALLED:${appId} on ${udid} — install Release build, then re-run.\n` +
             `Hint: preferred free sim is iPhone 17 Pro (${STUDIO_PREFERRED_IOS_UDID}).\n` +
             `Set STUDIO_MAESTRO_INSTALL=1 to force auto-install.\n`,
         );
         return {
           ok: false,
-          reason: `App ${appId} not installed on simulator ${udid}. Install the Debug build first, or set STUDIO_MAESTRO_INSTALL=1.`,
+          reason: `App ${appId} not installed on simulator ${udid}. Install the Release build first, or set STUDIO_MAESTRO_INSTALL=1.`,
           evidence,
         };
       }
