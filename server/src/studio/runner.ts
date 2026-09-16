@@ -411,6 +411,18 @@ export async function runProjectTask(deps: {
   let pullRequest: RunOutcome["pullRequest"] = null;
 
   if (ok) {
+    /*
+     * Commit before delivery when the worker left changes staged/uncommitted.
+     *
+     * diffOf stages for detection; a worker that wrote files but never committed leaves HEAD on
+     * the branch point, and GitHub then refuses the draft PR with "No commits between main and …".
+     */
+    const ahead = (
+      await runGit(["rev-list", "--count", `${baseCommit}..HEAD`], worktreePath)
+    ).trim();
+    if (ahead === "0" && changedFiles.length > 0) {
+      await runGit(["-c", "user.email=studio@local", "-c", "user.name=OpenBot Studio", "commit", "-q", "-m", deps.title], worktreePath);
+    }
     const delivered = await deliverProjectDraftPr({
       database: deps.database,
       taskId: deps.taskId,
