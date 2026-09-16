@@ -67,7 +67,7 @@ STUDIO_INSTALL_MODE=release STUDIO_MAESTRO_RESET=1 \
 | `expense.yaml` | **PASS** | `20260916T144031Z` | clearState + short onboard prefix |
 | `payday-ineligible.yaml` | **PASS** | `20260916T144108Z` | clearState + short onboard; no collectPayday |
 | `payday.yaml` / `payday-release-seed.yaml` | **PASS** | `20260916T150132Z` (spare UDID `3F1D6808…`) | Toggle OFF includes Switch via `checked: true` index 0; product `.maestro/payday.yaml` still lacks seed |
-| `expense-media.yaml` | **Release gap** | `20260916T144143Z` (exit 1) | Fails at `debug.attachFakeReceipt` — those controls are `__DEV__`-only; Release binary strips them. Use a Debug/dev-client install for this flow; do not expect Release smoke PASS. |
+| `expense-media.yaml` | **Release gap** | `20260916T144143Z` (exit 1) | Fails at `debug.attachFakeReceipt` — `__DEV__`-only controls; Release strips them. **Debug prove is manual** (install Debug + Metro); not part of Release smoke. |
 
 
 ## Payday Release seed (no __DEV__ clock)
