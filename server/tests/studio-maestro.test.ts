@@ -135,6 +135,7 @@ describe("runMaestro with mock native worker", () => {
     tmpDir = await mkdtemp(join(tmpdir(), "maestro-test-"));
     await mkdir(join(tmpDir, "project"), { recursive: true });
     await mkdir(join(tmpDir, "worktree"), { recursive: true });
+    await mkdir(join(tmpDir, "project", ".maestro"), { recursive: true });
     await writeFile(
       join(tmpDir, "project", ".maestro", "test.yaml"),
       "appId: app.test\n---\n- tapOn: Login",
