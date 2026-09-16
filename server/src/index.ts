@@ -42,6 +42,7 @@ import { createStudioChannelBus } from "./studio/studio-channels";
 import { createStudioMemoryStore } from "./studio/studio-memory";
 import { createStudioSkillPackStore } from "./studio/studio-skill-packs";
 import { createStudioRoutineBus } from "./studio/studio-routines";
+import { createStudioMcpBus } from "./studio/studio-mcp-connectors";
 import { ensureStudioVerifierBot } from "./studio/studio-verifier";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
@@ -626,6 +627,7 @@ const loadToolsForActor =
       studioMemory,
       skillPackStore,
       studioRoutineBus,
+      studioMcpBus,
       messagingActorId: "dev-local-user",
       allowedBotIds: [
         "studio-lead",
@@ -1372,6 +1374,13 @@ const studioChannelBus = createStudioChannelBus({
 
 const studioMemory = createStudioMemoryStore(database);
 const skillPackStore = createStudioSkillPackStore(database);
+const studioMcpBus = createStudioMcpBus({
+  pluginStore,
+  connect: {
+    publicUrl: config.publicUrl,
+    encryptionKey: config.keyEncryptionKey,
+  },
+});
 const studioRoutineBus = createStudioRoutineBus({
   routineStore,
   channelStore,
@@ -1542,6 +1551,7 @@ const app = createApp(
   studioMemory,
   skillPackStore,
   studioRoutineBus,
+  studioMcpBus,
 );
 
 /** What each server-owned tool actually does, once its operation has been claimed. */
@@ -1645,6 +1655,7 @@ async function runDeploymentTool(input: {
     studioMemory,
     skillPackStore,
     studioRoutineBus,
+    studioMcpBus,
     messagingActorId: "dev-local-user",
     allowedBotIds: [
       "studio-lead",

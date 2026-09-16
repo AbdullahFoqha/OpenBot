@@ -21,6 +21,7 @@ import type { StudioChannelBus } from "./studio/studio-channels";
 import type { StudioMemoryStore } from "./studio/studio-memory";
 import type { StudioSkillPackStore } from "./studio/studio-skill-packs";
 import type { StudioRoutineBus } from "./studio/studio-routines";
+import type { StudioMcpBus } from "./studio/studio-mcp-connectors";
 import type { TaskStore } from "./studio/task-store";
 import {
   AuditQueryError,
@@ -366,6 +367,7 @@ export function createApp(
   studioMemory?: StudioMemoryStore,
   skillPackStore?: StudioSkillPackStore,
   studioRoutineBus?: StudioRoutineBus,
+  studioMcpBus?: StudioMcpBus,
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -1489,6 +1491,7 @@ export function createApp(
         studioMemory,
         skillPackStore,
         studioRoutineBus,
+        studioMcpBus,
       }),
     );
   }

@@ -18,6 +18,7 @@ import type { StudioChannelBus } from "./studio-channels";
 import type { StudioMemoryStore } from "./studio-memory";
 import type { StudioSkillPackStore } from "./studio-skill-packs";
 import type { StudioRoutineBus } from "./studio-routines";
+import type { StudioMcpBus } from "./studio-mcp-connectors";
 import { STUDIO_VERIFIER_BOT_ID } from "./studio-verifier";
 import {
   getBrowserSession,
@@ -287,6 +288,19 @@ const routineIdParams = z.object({
   routineId: z.string().min(1).describe("Routine id (routine_…)."),
 });
 
+
+const mcpInstallParams = z.object({
+  key: z
+    .string()
+    .min(1)
+    .describe("Catalogue key (e.g. routines, google-drive, notion)."),
+  instanceHost: z.string().optional().describe("Only for per-instance catalogue entries."),
+});
+
+const mcpServerIdParams = z.object({
+  serverId: z.string().min(1).describe("Installed server id / catalogue key."),
+});
+
 export function studioTools(options: {
   dispatcher: StudioDispatcher;
   database: Database;
@@ -298,10 +312,12 @@ export function studioTools(options: {
   skillPackStore?: StudioSkillPackStore;
   /** P2.1 scheduled routines (wraps RoutineStore). */
   studioRoutineBus?: StudioRoutineBus;
+  /** P2.3 MCP connector install/auth. */
+  studioMcpBus?: StudioMcpBus;
   /** Default actor for headless messaging (studio local user). */
   messagingActorId?: string;
 }): (botId: string) => GrantedTool[] {
-  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, studioMemory, skillPackStore, studioRoutineBus, messagingActorId } = options;
+  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, studioMemory, skillPackStore, studioRoutineBus, studioMcpBus, messagingActorId } = options;
 
   return (botId: string) => {
     if (allowedBotIds && !allowedBotIds.includes(botId)) return [];
@@ -370,6 +386,96 @@ export function studioTools(options: {
             ? await skillPackStore.listForBot(parsed.data.botId)
             : await skillPackStore.list();
           return JSON.stringify({ ok: true, packs, count: packs.length });
+        },
+      },
+
+
+      {
+        name: "studio_mcp_catalogue",
+        ref: "studio/mcp_catalogue",
+        description:
+          "List curated MCP connectors (install/auth status). Use before studio_mcp_install or studio_mcp_connect.",
+        parameters: z.object({}),
+        execute: async () => {
+          if (!studioMcpBus) {
+            return `${REFUSAL_MARKER} Studio MCP connectors are not wired in this deployment.`;
+          }
+          const actorId = messagingActorId ?? "dev-local-user";
+          const result = await studioMcpBus.catalogue(actorId);
+          return JSON.stringify({ ok: true, ...result });
+        },
+      },
+      {
+        name: "studio_mcp_install",
+        ref: "studio/mcp_install",
+        description:
+          "Install a curated MCP connector from the catalogue (URL pinned; no arbitrary hosts). Then use studio_mcp_connect for user-oauth connectors.",
+        parameters: mcpInstallParams,
+        execute: async (args) => {
+          if (!studioMcpBus) {
+            return `${REFUSAL_MARKER} Studio MCP connectors are not wired in this deployment.`;
+          }
+          const parsed = mcpInstallParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} key is required.`;
+          }
+          const result = await studioMcpBus.install({
+            key: parsed.data.key.trim(),
+            instanceHost: parsed.data.instanceHost,
+            by: messagingActorId ?? "dev-local-user",
+          });
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({ ok: true, server: result.server });
+        },
+      },
+      {
+        name: "studio_mcp_status",
+        ref: "studio/mcp_status",
+        description:
+          "Auth/install status for installed MCP connectors (or one serverId). Values: ready | needs_install | needs_auth | needs_public_url | error.",
+        parameters: z.object({
+          serverId: z.string().optional(),
+        }),
+        execute: async (args) => {
+          if (!studioMcpBus) {
+            return `${REFUSAL_MARKER} Studio MCP connectors are not wired in this deployment.`;
+          }
+          const serverId =
+            typeof (args as { serverId?: string } | null)?.serverId === "string"
+              ? (args as { serverId: string }).serverId
+              : undefined;
+          const actorId = messagingActorId ?? "dev-local-user";
+          const result = await studioMcpBus.status(actorId, serverId);
+          return JSON.stringify({ ok: true, ...result });
+        },
+      },
+      {
+        name: "studio_mcp_connect",
+        ref: "studio/mcp_connect",
+        description:
+          "Start per-person OAuth for an installed user-oauth MCP connector. Returns authorizationUrl for the human to open. Builtin connectors need install only.",
+        parameters: mcpServerIdParams,
+        execute: async (args) => {
+          if (!studioMcpBus) {
+            return `${REFUSAL_MARKER} Studio MCP connectors are not wired in this deployment.`;
+          }
+          const parsed = mcpServerIdParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} serverId is required.`;
+          }
+          const actorId = messagingActorId ?? "dev-local-user";
+          const result = await studioMcpBus.connectStart({
+            serverId: parsed.data.serverId.trim(),
+            userId: actorId,
+            by: actorId,
+          });
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({
+            ok: true,
+            serverId: result.serverId,
+            authorizationUrl: result.authorizationUrl,
+            note: "Open authorizationUrl in a browser to complete consent, then studio_mcp_status.",
+          });
         },
       },
 

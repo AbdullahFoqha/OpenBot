@@ -69,6 +69,7 @@ import type { StudioChannelBus } from "./studio-channels";
 import type { StudioMemoryStore } from "./studio-memory";
 import type { StudioSkillPackStore } from "./studio-skill-packs";
 import type { StudioRoutineBus } from "./studio-routines";
+import type { StudioMcpBus } from "./studio-mcp-connectors";
 import {
   ensureStudioVerifierBot,
   STUDIO_VERIFIER_BOT_ID,
@@ -117,8 +118,10 @@ export function createStudioRoutes(deps: {
   skillPackStore?: StudioSkillPackStore;
   /** P2.1 routines. */
   studioRoutineBus?: StudioRoutineBus;
+  /** P2.3 MCP connectors. */
+  studioMcpBus?: StudioMcpBus;
 }): Hono<{ Variables: AppVariables }> {
-  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus, studioMemory, skillPackStore, studioRoutineBus } = deps;
+  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus, studioMemory, skillPackStore, studioRoutineBus, studioMcpBus } = deps;
   const dispatcher =
     deps.dispatcher ??
     createStudioDispatcher({ database, admission, taskStore });
@@ -601,6 +604,58 @@ export function createStudioRoutes(deps: {
     );
   });
 
+
+
+  // --- P2.3 MCP connectors ---
+  routes.get("/mcp/catalogue", async (c: Context) => {
+    if (!studioMcpBus) return c.json({ error: "Studio MCP is not configured." }, 503);
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const result = await studioMcpBus.catalogue(actorId);
+    return c.json(result);
+  });
+
+  routes.post("/mcp/install", async (c: Context) => {
+    if (!studioMcpBus) return c.json({ error: "Studio MCP is not configured." }, 503);
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const body = (await c.req.json().catch(() => null)) as {
+      key?: string;
+      instanceHost?: string;
+    } | null;
+    if (!body?.key?.trim()) return c.json({ error: "key is required." }, 400);
+    const result = await studioMcpBus.install({
+      key: body.key.trim(),
+      instanceHost: body.instanceHost,
+      by: actorId,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, server: result.server }, 201);
+  });
+
+  routes.get("/mcp/status", async (c: Context) => {
+    if (!studioMcpBus) return c.json({ error: "Studio MCP is not configured." }, 503);
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const serverId = c.req.query("serverId") || undefined;
+    const result = await studioMcpBus.status(actorId, serverId);
+    return c.json(result);
+  });
+
+  routes.post("/mcp/connect", async (c: Context) => {
+    if (!studioMcpBus) return c.json({ error: "Studio MCP is not configured." }, 503);
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const body = (await c.req.json().catch(() => null)) as { serverId?: string } | null;
+    if (!body?.serverId?.trim()) return c.json({ error: "serverId is required." }, 400);
+    const result = await studioMcpBus.connectStart({
+      serverId: body.serverId.trim(),
+      userId: actorId,
+      by: actorId,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({
+      ok: true,
+      serverId: result.serverId,
+      authorizationUrl: result.authorizationUrl,
+    });
+  });
 
   // --- P2.1 routines ---
   routes.get("/routines", async (c: Context) => {
