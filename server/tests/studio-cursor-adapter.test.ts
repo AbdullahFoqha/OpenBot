@@ -153,7 +153,7 @@ describe("refusing to run somewhere it cannot be confined", () => {
     const run = await backend.start({
       prompt: "edit the file",
       cwd: "/tmp/worktree",
-      model: "cursor-grok-4.6-xhigh",
+      model: "cursor-grok-4.6-high",
     });
     const events = [];
     for await (const event of run.events) events.push(event);
@@ -220,7 +220,7 @@ describe("running out of usage", () => {
     const run = await backend.start({
       prompt: "make the change",
       cwd: "/tmp/worktree",
-      model: "cursor-grok-4.6-xhigh",
+      model: "cursor-grok-4.6-high",
     });
     const events = [];
     for await (const event of run.events) events.push(event);

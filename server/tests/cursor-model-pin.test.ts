@@ -6,14 +6,14 @@ import {
 } from "../src/studio/runner";
 
 describe("Cursor harness model pin", () => {
-  test("default is cursor-grok-4.6-xhigh", () => {
-    expect(DEFAULT_MODEL).toBe("cursor-grok-4.6-xhigh");
-    expect(ALLOWED_CURSOR_MODELS).toEqual(["cursor-grok-4.6-xhigh"]);
+  test("default is cursor-grok-4.6-high", () => {
+    expect(DEFAULT_MODEL).toBe("cursor-grok-4.6-high");
+    expect(ALLOWED_CURSOR_MODELS).toEqual(["cursor-grok-4.6-high"]);
   });
 
   test("allowlisted passthrough", () => {
-    expect(resolveCursorHarnessModel("cursor-grok-4.6-xhigh")).toBe(
-      "cursor-grok-4.6-xhigh",
+    expect(resolveCursorHarnessModel("cursor-grok-4.6-high")).toBe(
+      "cursor-grok-4.6-high",
     );
   });
 

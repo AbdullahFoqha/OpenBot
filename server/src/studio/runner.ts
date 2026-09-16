@@ -34,7 +34,7 @@ import { pruneTaskWorktree } from "./prune-worktree";
 
 export const CURSOR_ENGINEER_BOT_ID = "react-native-engineer";
 /** Abdullah pin (manual until changed): Cursor harness workers only. */
-export const DEFAULT_MODEL = "cursor-grok-4.6-xhigh";
+export const DEFAULT_MODEL = "cursor-grok-4.6-high";
 /** Only these Cursor CLI models may run via driveCursorRun / studio_run_task. */
 export const ALLOWED_CURSOR_MODELS = [DEFAULT_MODEL] as const;
 export type AllowedCursorModel = (typeof ALLOWED_CURSOR_MODELS)[number];
@@ -54,7 +54,7 @@ export function resolveCursorHarnessModel(requested?: string | null): AllowedCur
         type: "cursor-model-pin",
         requested: trimmed,
         using: DEFAULT_MODEL,
-        note: "Rejected non-allowlisted Cursor harness model; Abdullah pin is cursor-grok-4.6-xhigh only.",
+        note: "Rejected non-allowlisted Cursor harness model; Abdullah pin is cursor-grok-4.6-high only.",
       }),
     );
   }
