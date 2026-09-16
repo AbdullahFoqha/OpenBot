@@ -68,6 +68,10 @@ import type { BotMessaging } from "./bot-messaging";
 import type { StudioChannelBus } from "./studio-channels";
 import type { StudioMemoryStore } from "./studio-memory";
 import type { StudioSkillPackStore } from "./studio-skill-packs";
+import {
+  ensureStudioVerifierBot,
+  STUDIO_VERIFIER_BOT_ID,
+} from "./studio-verifier";
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -550,6 +554,41 @@ export function createStudioRoutes(deps: {
 
 
 
+
+
+  // --- P1.5 Studio Verifier ---
+  routes.post("/verifier/ensure", async (c: Context) => {
+    const result = await ensureStudioVerifierBot(database);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json({ botId: result.botId, created: result.created });
+  });
+
+  routes.post("/verify", async (c: Context) => {
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.claim !== "string" || typeof body.title !== "string") {
+      return c.json({ error: "title and claim are required." }, 400);
+    }
+    const ensured = await ensureStudioVerifierBot(database);
+    if (!ensured.ok) return c.json({ error: ensured.error }, 400);
+    const result = await dispatcher.submit({
+      title: body.title,
+      goal: body.claim,
+      acceptanceCriteria: body.claim,
+      idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
+      ownerBotId: STUDIO_VERIFIER_BOT_ID,
+      maestroFlow: typeof body.maestroFlow === "string" ? body.maestroFlow : undefined,
+      deviceUdid: typeof body.deviceUdid === "string" ? body.deviceUdid : undefined,
+    });
+    if (!result.ok) return c.json({ error: result.error }, 409);
+    return c.json(
+      {
+        taskId: result.taskId,
+        ownerBotId: STUDIO_VERIFIER_BOT_ID,
+        deduplicated: result.deduplicated === true,
+      },
+      201,
+    );
+  });
 
   // --- P1.4 skill packs ---
   routes.get("/skill-packs", async (c: Context) => {

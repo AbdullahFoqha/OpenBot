@@ -77,3 +77,5 @@ P1.3 durable memory (2026-09-16): `studio_memory_write` / `studio_memory_recall`
 Cursor harness pin (2026-09-16): `studio_run_task` / driveCursorRun allowlist is only `cursor-grok-4.6-xhigh` (`resolveCursorHarnessModel`). Non-allowlisted model args are forced to that id. Lead Claude control-model shim is separate.
 
 P1.4 skill packs (2026-09-16): `studio_skill_pack_create` / `_attach` / `_list`; `POST/GET /api/studio/skill-packs` + attach + per-bot list. Attach upserts skills + plugin_grants. Prove: `studio-local/ui-test/p14-skill-packs-prove.mjs`.
+
+P1.5 Studio Verifier (2026-09-16): bot `studio-verifier` (evidence-only Cursor worker); Lead tool `studio_verify_claim`; `POST /api/studio/verify` + `/verifier/ensure`. No feature implement. Prove: `studio-local/ui-test/p15-verifier-prove.mjs`. Harness still `cursor-grok-4.6-xhigh`.

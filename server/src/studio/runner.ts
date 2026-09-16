@@ -18,6 +18,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Admission } from "./admission";
 import { createCliBackend } from "../cursor-adapter/cli-backend";
+import {
+  buildVerifierWorkerPrompt,
+  isStudioVerifierBot,
+} from "./studio-verifier";
 import type { AgentEvent } from "../cursor-adapter/backend";
 import type { Database } from "../db/client";
 import { studioEvidence } from "../db/schema";
@@ -517,7 +521,13 @@ export async function runProjectTask(deps: {
     verifyCommands.length > 0
       ? `\n\nLocal verification (run these in this worktree before you finish; the studio will re-run them after you exit):\n${verifyCommands.map((c) => `- \`${c.join(" ")}\``).join("\n")}`
       : "";
-  const prompt = `You are editing a real product checkout on this Mac (worktree). Make the changes in this directory only.
+  const prompt = isStudioVerifierBot(deps.botId)
+    ? buildVerifierWorkerPrompt({
+        goal: deps.goal,
+        acceptanceCriteria: deps.acceptanceCriteria,
+        verifyHint,
+      })
+    : `You are editing a real product checkout on this Mac (worktree). Make the changes in this directory only.
 
 Goal:
 ${deps.goal}
@@ -535,6 +545,7 @@ When you are done: leave the tree buildable, run the verification commands above
    */
   const verifyOnly =
     deps.botId === "quality-engineer" ||
+    isStudioVerifierBot(deps.botId) ||
     Boolean(deps.maestroFlow?.trim()) ||
     Boolean(
       shouldRunMaestro({

@@ -207,4 +207,5 @@ Implement in backlog order after P0 demos. Each gets its own AC doc when started
 - **P1.2** channels / multi-bot rooms — shipped (local).
 - **P1.3** durable memory per bot + shared user — shipped (local).
 - **P1.4** skills pack attachable to roles — shipped (local).
+- **P1.5** in-studio Verifier bot (Mac evidence only) — shipped (local).
 - **P0.3** Mac desktop agent session — shipped (local).

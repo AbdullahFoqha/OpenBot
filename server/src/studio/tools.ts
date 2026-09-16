@@ -17,6 +17,7 @@ import type { BotMessaging } from "./bot-messaging";
 import type { StudioChannelBus } from "./studio-channels";
 import type { StudioMemoryStore } from "./studio-memory";
 import type { StudioSkillPackStore } from "./studio-skill-packs";
+import { STUDIO_VERIFIER_BOT_ID } from "./studio-verifier";
 import {
   getBrowserSession,
   startBrowserSession,
@@ -48,10 +49,10 @@ const runTaskParams = z.object({
     .optional()
     .describe("Optional key so a retried call does not start a second identical task."),
   ownerBotId: z
-    .enum(["react-native-engineer", "quality-engineer", "technical-lead"])
+    .enum(["react-native-engineer", "quality-engineer", "technical-lead", "studio-verifier"])
     .optional()
     .describe(
-      "Who owns the Cursor run. Default react-native-engineer for implementation. Use quality-engineer for independent verify/QA on the local project.",
+      "Who owns the Cursor run. Default react-native-engineer for implementation. Use quality-engineer for QA/Maestro; use studio-verifier for Mac-evidence-only claim checks (no feature implement).",
     ),
   skipVerify: z
     .boolean()
@@ -233,6 +234,18 @@ const skillPackAttachParams = z.object({
 
 const skillPackListParams = z.object({
   botId: z.string().optional().describe("If set, list packs attached to this bot; else list all packs."),
+});
+
+
+const verifyClaimParams = z.object({
+  title: z.string().min(1).describe("Short verify task title."),
+  claim: z
+    .string()
+    .min(1)
+    .describe("The claim or acceptance criteria to verify with Mac evidence only."),
+  idempotencyKey: z.string().optional(),
+  maestroFlow: z.string().optional().describe("Optional Maestro flow if native UI evidence is required."),
+  deviceUdid: z.string().optional(),
 });
 
 export function studioTools(options: {
@@ -566,6 +579,38 @@ export function studioTools(options: {
             ok: true,
             session: result.session,
             note: "Session stays open until studio_browser_session stop. Screenshots are under session.outDir.",
+          });
+        },
+      },
+
+      {
+        name: "studio_verify_claim",
+        ref: "studio/verify_claim",
+        description:
+          "Assign the Studio Verifier (Mac evidence only, no feature implement). Creates a studio_run_task owned by studio-verifier. Prefer this over asking Engineer to self-check. Poll studio_task_status; expect Verdict PASS|FAIL|BLOCKED with evidence.",
+        parameters: verifyClaimParams,
+        execute: async (args) => {
+          const parsed = verifyClaimParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} title and claim are required.`;
+          }
+          const result = await dispatcher.submit({
+            title: parsed.data.title,
+            goal: parsed.data.claim,
+            acceptanceCriteria: parsed.data.claim,
+            idempotencyKey: parsed.data.idempotencyKey,
+            ownerBotId: STUDIO_VERIFIER_BOT_ID,
+            maestroFlow: parsed.data.maestroFlow,
+            deviceUdid: parsed.data.deviceUdid,
+          });
+          if (!result.ok) {
+            return `${REFUSAL_MARKER} ${result.error}`;
+          }
+          return JSON.stringify({
+            taskId: result.taskId,
+            ownerBotId: STUDIO_VERIFIER_BOT_ID,
+            deduplicated: result.deduplicated === true,
+            note: "Verifier runs evidence-only on the Mac. Poll studio_task_status.",
           });
         },
       },

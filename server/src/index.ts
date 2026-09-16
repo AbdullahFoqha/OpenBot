@@ -41,6 +41,7 @@ import { createBotMessaging } from "./studio/bot-messaging";
 import { createStudioChannelBus } from "./studio/studio-channels";
 import { createStudioMemoryStore } from "./studio/studio-memory";
 import { createStudioSkillPackStore } from "./studio/studio-skill-packs";
+import { ensureStudioVerifierBot } from "./studio/studio-verifier";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
 import { createRuntimeAgentLoader } from "./agents/runtime-agents";
@@ -631,6 +632,7 @@ const loadToolsForActor =
         "product-researcher",
         "product-designer",
         "quality-engineer",
+        "studio-verifier",
       ],
     })(botId),
   ];
@@ -1368,6 +1370,10 @@ const studioChannelBus = createStudioChannelBus({
 
 const studioMemory = createStudioMemoryStore(database);
 const skillPackStore = createStudioSkillPackStore(database);
+void ensureStudioVerifierBot(database).then((r) => {
+  if (!r.ok) console.warn("[studio-verifier]", r.error);
+  else if (r.created) console.info("[studio-verifier] seeded", r.botId);
+});
 
 const app = createApp(
   config,
@@ -1632,6 +1638,7 @@ async function runDeploymentTool(input: {
       "product-researcher",
       "product-designer",
       "quality-engineer",
+      "studio-verifier",
     ],
   })(botId).find((candidate) => candidate.name === name);
   if (studioTool) {
