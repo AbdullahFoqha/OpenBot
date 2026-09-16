@@ -76,12 +76,24 @@ cmd_check() {
 }
 
 cmd_start() {
+  # --no-open: keep processes up without focusing/relaunching the browser (used by keepalive).
+  # --open: always open the app URL even when everything was already running.
+  local no_open=0 force_open=0
+  for arg in "$@"; do
+    case "$arg" in
+      --no-open) no_open=1 ;;
+      --open) force_open=1 ;;
+    esac
+  done
+  local started_any=0
+
   # Postgres: reused if already up, started only if not — idempotent by construction.
   if ! $PG/pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
     echo "starting postgres..."
     $PG/pg_ctl -D "$PGDATA" \
       -o "-p 5433 -k $PGDATA -c listen_addresses=127.0.0.1" \
       -l "$PGDATA/server.log" start
+    started_any=1
     sleep 2
   else
     echo "postgres already running"
@@ -95,6 +107,7 @@ cmd_start() {
   if pid_alive "$LOGS/claude-control-model.pid" || [[ -n "$(port_owner $CONTROL_MODEL_PORT)" ]]; then
     echo "control model already running"
   else
+    started_any=1
     echo "starting control model..."
     # nohup + disown so a closing terminal (or an agent shell) does not take the stack down —
     # a dead :3013 presents as "Failed after 3 attempts... Cannot connect to API" in chat.
@@ -110,6 +123,7 @@ cmd_start() {
   if pid_alive "$LOGS/server.pid" || [[ -n "$(port_owner $SERVER_PORT)" ]]; then
     echo "server already running"
   else
+    started_any=1
     echo "starting server..."
     nohup bun --env-file=studio-local/env server/src/index.ts > "$LOGS/server.log" 2>&1 &
     echo $! > "$LOGS/server.pid"
@@ -119,6 +133,7 @@ cmd_start() {
   if pid_alive "$LOGS/app.pid" || [[ -n "$(port_owner $APP_PORT)" ]]; then
     echo "app already running"
   else
+    started_any=1
     echo "starting app..."
     nohup bun --env-file=studio-local/env run --filter app dev > "$LOGS/app.log" 2>&1 &
     echo $! > "$LOGS/app.pid"
@@ -160,7 +175,14 @@ cmd_start() {
   fi
 
   echo "Studio is up: $APP_URL"
-  open "$APP_URL"
+  # Do not reopen the browser on every keepalive tick — that was relaunching the tab every ~2 min.
+  if [[ $no_open -eq 1 ]]; then
+    :
+  elif [[ $force_open -eq 1 || $started_any -eq 1 ]]; then
+    open "$APP_URL"
+  else
+    echo "(browser left alone — already running; pass --open to focus it)"
+  fi
 }
 
 cmd_open() {
