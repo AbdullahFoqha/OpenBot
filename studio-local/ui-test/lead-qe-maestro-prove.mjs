@@ -2,6 +2,12 @@
 /**
  * Lead-tool path: Studio Lead chat → studio_run_task(ownerBotId=quality-engineer, maestroFlow).
  * Clipboard paste (pbcopy), then poll /api/studio/tasks/:id until Maestro exit 0.
+ *
+ * Verifier caveat (task-32149d89): Lead channel pages reuse prior chat history.
+ * Regexes for "I need clarification" / "cut off after" can match STALE messages and
+ * falsely set clarified/cutOff. Once a new taskId exists, prefer task DB state
+ * (evidence.ok, maestro.exitCode, npm checks) for pass/fail — never fail the prove
+ * solely on clarified/cutOff when taskId is present.
  */
 import { chromium } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -87,10 +93,13 @@ try {
   while (Date.now() < chatDeadline && !result.taskId) {
     await page.waitForTimeout(5000);
     body = await page.locator("body").innerText();
-    result.clarified = /Could you clarify|I need clarification|A few possibilities|what would you like me to demonstrate/i.test(
-      body,
-    );
-    result.cutOff = /cut off after/i.test(body);
+    // Only treat clarify/cutOff as signals BEFORE we have a taskId (stale Lead history otherwise).
+    if (!result.taskId) {
+      result.clarified = /Could you clarify|I need clarification|A few possibilities|what would you like me to demonstrate/i.test(
+        body,
+      );
+      result.cutOff = /cut off after/i.test(body);
+    }
     result.usedHost = /host_list_folders|host_write_file/i.test(body);
     const ids = [...body.slice(-8000).matchAll(/task-[0-9a-f-]{10,}/gi)]
       .map((m) => m[0].toLowerCase())
@@ -133,6 +142,11 @@ try {
   while (Date.now() < pollDeadline) {
     await page.waitForTimeout(5000);
     body = await page.locator("body").innerText();
+    // Stale history must not keep clarified/cutOff sticky after task exists.
+    if (result.taskId) {
+      result.clarified = false;
+      result.cutOff = false;
+    }
     result.handback =
       /Shipped:/i.test(body) && /Evidence:/i.test(body);
     const res = await fetch(`${BASE}/api/studio/tasks/${result.taskId}`);
@@ -163,15 +177,14 @@ try {
     ? result.checkAfter.every((c) => c.exitCode === 0)
     : false;
   const maestroOk = Boolean(result.maestro && result.maestro.exitCode === 0);
-  // Clarified only fails the Lead-tool prove if Lead never created a task.
-  // Chat history / role text can false-positive the clarify regex after success.
+  // Pass/fail prefers task DB: evidence.ok + npm + Maestro exit.
+  // clarified/cutOff only matter when Lead never produced a taskId.
   result.pass =
     Boolean(result.taskId) &&
     !result.usedHost &&
     result.evidenceOk === true &&
     npmOk &&
-    maestroOk &&
-    !(result.clarified && !result.taskId);
+    maestroOk;
 
   console.log("---RESULT_JSON---");
   console.log(
