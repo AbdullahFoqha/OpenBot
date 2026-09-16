@@ -73,3 +73,5 @@ P1.1 bot messaging (2026-09-16): `studio_message_bot` + `POST/GET /api/studio/bo
 P1.2 multi-bot rooms (2026-09-16): `studio_create_channel` / `studio_channel_message`; `POST/GET /api/studio/channels`. Prove: `studio-local/ui-test/p12-channels-prove.mjs`.
 
 P1.3 durable memory (2026-09-16): `studio_memory_write` / `studio_memory_recall`; `POST/GET /api/studio/bots/:id/memory` + `/api/studio/memory/user`. Tiers profile/log/note; scopes agent/user. Prove: `studio-local/ui-test/p13-memory-prove.mjs`.
+
+Cursor harness pin (2026-09-16): `studio_run_task` / driveCursorRun allowlist is only `cursor-grok-4.6-xhigh` (`resolveCursorHarnessModel`). Non-allowlisted model args are forced to that id. Lead Claude control-model shim is separate.

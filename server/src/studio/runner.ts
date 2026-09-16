@@ -29,7 +29,33 @@ import { runMaestro, shouldRunMaestro, type MaestroEvidence } from "./maestro";
 import { pruneTaskWorktree } from "./prune-worktree";
 
 export const CURSOR_ENGINEER_BOT_ID = "react-native-engineer";
+/** Abdullah pin (manual until changed): Cursor harness workers only. */
 export const DEFAULT_MODEL = "cursor-grok-4.6-xhigh";
+/** Only these Cursor CLI models may run via driveCursorRun / studio_run_task. */
+export const ALLOWED_CURSOR_MODELS = [DEFAULT_MODEL] as const;
+export type AllowedCursorModel = (typeof ALLOWED_CURSOR_MODELS)[number];
+
+/**
+ * Hard-pin the Cursor harness model. Non-allowlisted values (or empty) become DEFAULT_MODEL.
+ * Lead chat control-model (Claude shim) is unrelated — this is for cursor-agent workers only.
+ */
+export function resolveCursorHarnessModel(requested?: string | null): AllowedCursorModel {
+  const trimmed = requested?.trim() ?? "";
+  if (trimmed && (ALLOWED_CURSOR_MODELS as readonly string[]).includes(trimmed)) {
+    return trimmed as AllowedCursorModel;
+  }
+  if (trimmed && trimmed !== DEFAULT_MODEL) {
+    console.warn(
+      JSON.stringify({
+        type: "cursor-model-pin",
+        requested: trimmed,
+        using: DEFAULT_MODEL,
+        note: "Rejected non-allowlisted Cursor harness model; Abdullah pin is cursor-grok-4.6-xhigh only.",
+      }),
+    );
+  }
+  return DEFAULT_MODEL;
+}
 
 export type RunOutcome = {
   ok: boolean;
@@ -181,10 +207,11 @@ export async function driveCursorRun(input: {
   events: AgentEvent[];
 }> {
   const backend = createCliBackend({ acknowledgeUnconfined: true });
+  const model = resolveCursorHarnessModel(input.model);
   const run = await backend.start({
     prompt: input.prompt,
     cwd: input.cwd,
-    model: input.model ?? DEFAULT_MODEL,
+    model,
     signal: input.signal,
   });
   const events: AgentEvent[] = [];
@@ -274,7 +301,7 @@ export async function runCodingTest(deps: {
     return {
       ok: false,
       backend: "cli",
-      requestedModel: deps.model ?? DEFAULT_MODEL,
+      requestedModel: resolveCursorHarnessModel(deps.model),
       reportedModel: null,
       sessionId: null,
       worktreePath: "",
@@ -296,7 +323,7 @@ export async function runCodingTest(deps: {
     "passes. Only touch files under openbot-smoke-test/.";
 
   const baseCommit = (await runGit(["rev-parse", "HEAD"], cwd)).trim();
-  const run = await driveCursorRun({ cwd, prompt, model: deps.model });
+  const run = await driveCursorRun({ cwd, prompt, model: resolveCursorHarnessModel(deps.model) });
 
   // Independent re-check: the same bytes, re-run by this process, not trusted from the agent's own
   // report of what it did.
@@ -310,7 +337,7 @@ export async function runCodingTest(deps: {
     .values({
       taskId,
       backend: "cli",
-      requestedModel: deps.model ?? DEFAULT_MODEL,
+      requestedModel: resolveCursorHarnessModel(deps.model),
       reportedModel: run.reportedModel,
       sessionId: run.sessionId,
       worktreePath: cwd,
@@ -330,7 +357,7 @@ export async function runCodingTest(deps: {
   return {
     ok,
     backend: "cli",
-    requestedModel: deps.model ?? DEFAULT_MODEL,
+    requestedModel: resolveCursorHarnessModel(deps.model),
     reportedModel: run.reportedModel,
     sessionId: run.sessionId,
     worktreePath: cwd,
@@ -417,7 +444,7 @@ export async function runProjectTask(deps: {
     return {
       ok: false,
       backend: "cli",
-      requestedModel: deps.model ?? DEFAULT_MODEL,
+      requestedModel: resolveCursorHarnessModel(deps.model),
       reportedModel: null,
       sessionId: null,
       worktreePath: "",
@@ -458,7 +485,7 @@ export async function runProjectTask(deps: {
     return {
       ok: false,
       backend: "cli",
-      requestedModel: deps.model ?? DEFAULT_MODEL,
+      requestedModel: resolveCursorHarnessModel(deps.model),
       reportedModel: null,
       sessionId: null,
       worktreePath,
@@ -500,7 +527,7 @@ ${deps.acceptanceCriteria}
 ${verifyHint}
 
 When you are done: leave the tree buildable, run the verification commands above if listed, and commit your changes on this branch.`;
-  const run = await driveCursorRun({ cwd: worktreePath, prompt, model: deps.model });
+  const run = await driveCursorRun({ cwd: worktreePath, prompt, model: resolveCursorHarnessModel(deps.model) });
   const { diff, changedFiles } = await diffOf(worktreePath, baseCommit);
   /**
    * Quality-engineer / Maestro verify runs are allowed to change nothing in git.
@@ -638,7 +665,7 @@ When you are done: leave the tree buildable, run the verification commands above
     .values({
       taskId: deps.taskId,
       backend: "cli",
-      requestedModel: deps.model ?? DEFAULT_MODEL,
+      requestedModel: resolveCursorHarnessModel(deps.model),
       reportedModel: run.reportedModel,
       sessionId: run.sessionId,
       worktreePath,
@@ -674,7 +701,7 @@ When you are done: leave the tree buildable, run the verification commands above
   return {
     ok,
     backend: "cli",
-    requestedModel: deps.model ?? DEFAULT_MODEL,
+    requestedModel: resolveCursorHarnessModel(deps.model),
     reportedModel: run.reportedModel,
     sessionId: run.sessionId,
     worktreePath,
