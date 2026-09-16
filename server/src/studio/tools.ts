@@ -11,6 +11,10 @@ import { studioEvidence, studioPullRequests, studioTasks } from "../db/schema";
 import { REFUSAL_MARKER, type GrantedTool } from "../plugins/tools";
 import type { StudioDispatcher } from "./dispatch";
 import { STUDIO_PRODUCT_ID } from "./dispatch";
+import {
+  formatProductInspectForChat,
+  inspectSelectedProduct,
+} from "./product-inspect";
 import type { TaskStore } from "./task-store";
 import { createDynamicBot } from "./bot-catalog";
 import type { BotMessaging } from "./bot-messaging";
@@ -1075,6 +1079,21 @@ export function studioTools(options: {
                   }
                 : null,
           });
+        },
+      },
+
+      {
+        name: "studio_inspect_product",
+        ref: "studio/inspect_product",
+        description:
+          "READ-ONLY inventory of the selected product: *Screen files, navigator routes, typed routes. Use for questions like list our screens / what screens exist. Paste the returned text into chat as the answer. Do NOT call studio_run_task for read-only inventory.",
+        parameters: z.object({}),
+        execute: async () => {
+          const inspected = await inspectSelectedProduct(database);
+          if (!inspected.ok) {
+            return `${REFUSAL_MARKER} ${inspected.error}`;
+          }
+          return formatProductInspectForChat(inspected.result);
         },
       },
       {

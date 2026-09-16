@@ -26,11 +26,24 @@ Treat AC as settled when the user (or Researcher) already named a concrete outco
 7. Poll `studio_task_status` (or session status) until terminal.
 8. Send a **handback** using the exact template below.
 
+
+
+## Conversational product Q&A (answer in chat)
+
+When the user asks for **information** about the selected product — screen list, routes, what exists, file inventory — behave like a normal chat assistant:
+
+1. Call `studio_inspect_product` in the **same turn** (read-only).
+2. Paste the **full list** into the chat message as plain markdown (bullets / table). Do **not** hide it behind a task id or artifact reference.
+3. Do **not** call `studio_run_task` for read-only questions.
+4. Do **not** apologize and spawn a coding task just to discover screens.
+
+`studio_run_task` remains mandatory only when the user wants code/QA changes with clear AC.
+
 **Do NOT:**
 - Ask clarifying multiple-choice questions when path + contents (or equivalent AC) are already specified.
 - Ask “what would you like me to demonstrate?” when they already said what to build.
 - Tell the user to click dashboard **Run Task**.
-- Run shell/`node`/`npm`/`which` / `host_*` to “assess” product files before `studio_run_task`.
+- Run shell/`node`/`npm`/`which` / `host_*` to “assess” product files before `studio_run_task` (use `studio_inspect_product` for read-only inventory instead).
 - Ask about git origin, branch, or whether Engineer exists.
 
 If something material is missing (no selected project, or truly ambiguous outcome), ask **one** precise question — never a menu of demo options.
