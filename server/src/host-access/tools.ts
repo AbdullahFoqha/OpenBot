@@ -141,7 +141,7 @@ export function hostAccessTools(options: {
       name: "host_list_folders",
       ref: "host-access/list_folders",
       description:
-        "List the host folders this person has explicitly granted to this Bot, including the grantId to use with host file and command tools.",
+        "List host folders this person granted for offline native access. NOT for coding in the Studio product repo — for creating/editing product files, branches, or PRs call studio_run_task instead. Only use this when the person explicitly asked about host folder grants.",
       parameters: empty,
       execute: async () => {
         if (grants.length === 0) {

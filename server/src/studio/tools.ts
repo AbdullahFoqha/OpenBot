@@ -53,7 +53,7 @@ export function studioTools(options: {
         name: "studio_run_task",
         ref: "studio/run_task",
         description:
-          "Start autonomous coding on the selected Studio project via the Cursor Engineer (cursor-agent CLI on the Cursor subscription). Use this to create/edit files, open a feature branch, and draft a PR. Do NOT use host_write_file or claim a Claude Code Allow prompt is required. Returns a taskId to poll with studio_task_status.",
+          "REQUIRED for creating or editing files in the selected Studio product repo (e.g. pocket-love), opening a feature branch, or drafting a PR. Starts the Cursor Engineer (cursor-agent on the Cursor subscription). Call this immediately when the person asks to create a file or change the project — do NOT call host_list_folders, host_write_file, or ask them whether Engineer exists / what the git origin is. Studio already has the selected project. Returns taskId; poll with studio_task_status.",
         parameters: runTaskParams,
         execute: async (args) => {
           const parsed = runTaskParams.safeParse(args ?? {});

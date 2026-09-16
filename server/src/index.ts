@@ -1552,6 +1552,24 @@ async function runDeploymentTool(input: {
     return { text, isError: false };
   }
 
+  const studioTool = studioTools({
+    dispatcher: studioDispatcher,
+    database,
+    taskStore: studioTaskStore,
+    allowedBotIds: [
+      "studio-lead",
+      "react-native-engineer",
+      "technical-lead",
+      "product-researcher",
+      "product-designer",
+      "quality-engineer",
+    ],
+  })(botId).find((candidate) => candidate.name === name);
+  if (studioTool) {
+    const text = await studioTool.execute(args);
+    return { text, isError: text.startsWith(REFUSAL_MARKER) };
+  }
+
   const tool = hostAccessTools({
     broker: hostAccessBroker,
     botId,
@@ -1561,7 +1579,7 @@ async function runDeploymentTool(input: {
   }).find((candidate) => candidate.name === name);
   if (!tool) {
     return {
-      text: `${REFUSAL_MARKER} That host tool is not available for this Bot right now.`,
+      text: `${REFUSAL_MARKER} That tool is not available for this Bot right now.`,
       isError: true,
     };
   }
