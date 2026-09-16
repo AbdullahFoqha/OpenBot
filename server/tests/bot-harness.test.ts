@@ -11,7 +11,7 @@ import {
 } from "../src/studio/runner";
 
 describe("bot chat harness map", () => {
-  test("Cursor chat bots map to cursor-grok-4.6-high", () => {
+  test("built-in Studio bots default to Claude chat", () => {
     for (const id of [
       "studio-lead",
       "product-researcher",
@@ -19,26 +19,28 @@ describe("bot chat harness map", () => {
       "react-native-engineer",
       "quality-engineer",
       "studio-verifier",
+      "product-designer",
     ]) {
-      expect(harnessForBot(id)).toEqual({
-        kind: "cursor",
-        model: CURSOR_CHAT_MODEL,
-      });
-      expect(chatModelForBot(id)).toBe(CURSOR_CHAT_MODEL);
+      expect(harnessForBot(id).kind).toBe("claude");
+      expect(chatModelForBot(id)).toBe(`claude:${CLAUDE_CHAT_MODEL}`);
     }
   });
 
-  test("product-designer stays on Claude (package default preferred)", () => {
-    expect(harnessForBot("product-designer").kind).toBe("claude");
-    expect(chatModelForBot("product-designer")).toBe(`claude:${CLAUDE_CHAT_MODEL}`);
+  test("product-designer prefers package Claude default when provided", () => {
     expect(chatModelForBot("product-designer", "claude-sonnet-4-5")).toBe(
       "claude:claude-sonnet-4-5",
     );
   });
 
-  test("unknown bots default to Cursor chat", () => {
-    expect(harnessForBot("custom-researcher-demo").kind).toBe("cursor");
-    expect(chatModelForBot("custom-researcher-demo")).toBe(CURSOR_CHAT_MODEL);
+  test("unknown bots default to Claude chat", () => {
+    expect(harnessForBot("custom-researcher-demo").kind).toBe("claude");
+    expect(chatModelForBot("custom-researcher-demo")).toBe(
+      `claude:${CLAUDE_CHAT_MODEL}`,
+    );
+  });
+
+  test("CURSOR_CHAT_MODEL encoding remains available for picker", () => {
+    expect(CURSOR_CHAT_MODEL.startsWith("cursor:")).toBe(true);
   });
 });
 

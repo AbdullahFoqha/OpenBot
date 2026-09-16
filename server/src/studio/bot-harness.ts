@@ -20,33 +20,36 @@ export type BotHarness = {
   model: string;
 };
 
-/** Built-in (and verifier) bots that should chat on Cursor subscription. */
-const CURSOR_CHAT_BOT_IDS = new Set<string>([
+/**
+ * Optional Cursor-subscription chat bots. Empty by default: Studio chat uses the
+ * Claude control-model (reliable tool loops). Pick Cursor per-channel in the UI.
+ */
+const CURSOR_CHAT_BOT_IDS = new Set<string>([]);
+
+/** Explicit Claude chat bots (control-model / Claude Agent SDK). */
+const CLAUDE_CHAT_BOT_IDS = new Set<string>([
   "studio-lead",
   "product-researcher",
   "technical-lead",
   "react-native-engineer",
   "quality-engineer",
   "studio-verifier",
+  "product-designer",
 ]);
-
-/** Explicit Claude chat bots (control-model / Claude Agent SDK). */
-const CLAUDE_CHAT_BOT_IDS = new Set<string>(["product-designer"]);
 
 /**
  * Resolve which chat backend a built_in bot should use.
- * Unknown / dynamic bots default to Cursor so new studio bots do not silently
- * reopen Claude spend.
+ * Default Claude — Cursor CLI chat is opt-in via the channel model picker.
  */
 export function harnessForBot(botId: string): BotHarness {
   const id = botId.trim();
-  if (CLAUDE_CHAT_BOT_IDS.has(id)) {
-    return { kind: "claude", model: CLAUDE_CHAT_MODEL };
-  }
   if (CURSOR_CHAT_BOT_IDS.has(id)) {
     return { kind: "cursor", model: CURSOR_CHAT_MODEL };
   }
-  return { kind: "cursor", model: CURSOR_CHAT_MODEL };
+  if (CLAUDE_CHAT_BOT_IDS.has(id)) {
+    return { kind: "claude", model: CLAUDE_CHAT_MODEL };
+  }
+  return { kind: "claude", model: CLAUDE_CHAT_MODEL };
 }
 
 /**
