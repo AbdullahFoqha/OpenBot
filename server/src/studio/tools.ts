@@ -17,6 +17,7 @@ import type { BotMessaging } from "./bot-messaging";
 import type { StudioChannelBus } from "./studio-channels";
 import type { StudioMemoryStore } from "./studio-memory";
 import type { StudioSkillPackStore } from "./studio-skill-packs";
+import type { StudioRoutineBus } from "./studio-routines";
 import { STUDIO_VERIFIER_BOT_ID } from "./studio-verifier";
 import {
   getBrowserSession,
@@ -248,6 +249,38 @@ const verifyClaimParams = z.object({
   deviceUdid: z.string().optional(),
 });
 
+
+const routineCreateParams = z.object({
+  instruction: z
+    .string()
+    .min(1)
+    .describe(
+      "Standing instruction for the Bot when the schedule fires. For unattended Studio work, tell Lead to call studio_run_task with a concrete title/goal/AC.",
+    ),
+  cron: z
+    .string()
+    .min(1)
+    .describe(
+      "Five-field cron (min hour day-of-month month day-of-week). Floor: at most every 15 minutes.",
+    ),
+  timezone: z
+    .string()
+    .optional()
+    .describe("IANA timezone. Default America/New_York."),
+  agentId: z
+    .string()
+    .optional()
+    .describe("Which Bot runs the turn. Default studio-lead."),
+  channelId: z
+    .string()
+    .optional()
+    .describe("Optional shared channel id. Default: DM with the agent."),
+});
+
+const routineIdParams = z.object({
+  routineId: z.string().min(1).describe("Routine id (routine_…)."),
+});
+
 export function studioTools(options: {
   dispatcher: StudioDispatcher;
   database: Database;
@@ -257,10 +290,12 @@ export function studioTools(options: {
   studioChannelBus?: StudioChannelBus;
   studioMemory?: StudioMemoryStore;
   skillPackStore?: StudioSkillPackStore;
+  /** P2.1 scheduled routines (wraps RoutineStore). */
+  studioRoutineBus?: StudioRoutineBus;
   /** Default actor for headless messaging (studio local user). */
   messagingActorId?: string;
 }): (botId: string) => GrantedTool[] {
-  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, studioMemory, skillPackStore, messagingActorId } = options;
+  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, studioMemory, skillPackStore, studioRoutineBus, messagingActorId } = options;
 
   return (botId: string) => {
     if (allowedBotIds && !allowedBotIds.includes(botId)) return [];
@@ -332,6 +367,139 @@ export function studioTools(options: {
         },
       },
 
+      {
+        name: "studio_routine_create",
+        ref: "studio/routine_create",
+        description:
+          "Create a scheduled studio routine (Grok routines parity). Cron fires an unattended Bot turn; instruct studio-lead to call studio_run_task for product work. Floor: every 15 minutes max.",
+        parameters: routineCreateParams,
+        execute: async (args) => {
+          if (!studioRoutineBus) {
+            return `${REFUSAL_MARKER} Studio routines are not wired in this deployment.`;
+          }
+          const parsed = routineCreateParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} instruction and cron are required.`;
+          }
+          const ownerUserId = messagingActorId ?? "dev-local-user";
+          const agentId = parsed.data.agentId?.trim() || "studio-lead";
+          const result = await studioRoutineBus.create({
+            ownerUserId,
+            agentId,
+            instruction: parsed.data.instruction,
+            cron: parsed.data.cron,
+            timezone: parsed.data.timezone,
+            channelId: parsed.data.channelId,
+          });
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({
+            ok: true,
+            routine: {
+              id: result.routine.id,
+              agentId: result.routine.agentId,
+              channelId: result.routine.channelId,
+              instruction: result.routine.instruction,
+              cron: result.routine.cron,
+              timezone: result.routine.timezone,
+              enabled: result.routine.enabled,
+              nextRunAt: result.routine.nextRunAt.toISOString(),
+            },
+          });
+        },
+      },
+      {
+        name: "studio_routine_list",
+        ref: "studio/routine_list",
+        description: "List this user's studio routines (id, schedule, enabled, nextRunAt, channel).",
+        parameters: z.object({}),
+        execute: async () => {
+          if (!studioRoutineBus) {
+            return `${REFUSAL_MARKER} Studio routines are not wired in this deployment.`;
+          }
+          const ownerUserId = messagingActorId ?? "dev-local-user";
+          const routines = await studioRoutineBus.list(ownerUserId);
+          return JSON.stringify({
+            ok: true,
+            count: routines.length,
+            routines: routines.map((r) => ({
+              id: r.id,
+              agentId: r.agentId,
+              instruction: r.instruction,
+              schedule: r.schedule,
+              cronHint: r.schedule,
+              timezone: r.timezone,
+              enabled: r.enabled,
+              nextRunAt: r.nextRunAt.toISOString(),
+              channelId: r.channelId,
+              channelName: r.channelName,
+              channelDeleted: r.channelDeleted,
+              lastRun: r.lastRun
+                ? {
+                    status: r.lastRun.status,
+                    finishedAt: r.lastRun.finishedAt?.toISOString() ?? null,
+                  }
+                : null,
+            })),
+          });
+        },
+      },
+      {
+        name: "studio_routine_pause",
+        ref: "studio/routine_pause",
+        description: "Pause (disable) a studio routine so it stops firing until resumed.",
+        parameters: routineIdParams,
+        execute: async (args) => {
+          if (!studioRoutineBus) {
+            return `${REFUSAL_MARKER} Studio routines are not wired in this deployment.`;
+          }
+          const parsed = routineIdParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} routineId is required.`;
+          }
+          const ownerUserId = messagingActorId ?? "dev-local-user";
+          const result = await studioRoutineBus.pause(ownerUserId, parsed.data.routineId);
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({ ok: true, routineId: parsed.data.routineId, enabled: false });
+        },
+      },
+      {
+        name: "studio_routine_resume",
+        ref: "studio/routine_resume",
+        description: "Resume (enable) a paused studio routine.",
+        parameters: routineIdParams,
+        execute: async (args) => {
+          if (!studioRoutineBus) {
+            return `${REFUSAL_MARKER} Studio routines are not wired in this deployment.`;
+          }
+          const parsed = routineIdParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} routineId is required.`;
+          }
+          const ownerUserId = messagingActorId ?? "dev-local-user";
+          const result = await studioRoutineBus.resume(ownerUserId, parsed.data.routineId);
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({ ok: true, routineId: parsed.data.routineId, enabled: true });
+        },
+      },
+      {
+        name: "studio_routine_delete",
+        ref: "studio/routine_delete",
+        description: "Delete a studio routine permanently.",
+        parameters: routineIdParams,
+        execute: async (args) => {
+          if (!studioRoutineBus) {
+            return `${REFUSAL_MARKER} Studio routines are not wired in this deployment.`;
+          }
+          const parsed = routineIdParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} routineId is required.`;
+          }
+          const ownerUserId = messagingActorId ?? "dev-local-user";
+          const result = await studioRoutineBus.remove(ownerUserId, parsed.data.routineId);
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({ ok: true, deleted: parsed.data.routineId });
+        },
+      },
       {
         name: "studio_memory_write",
         ref: "studio/memory_write",

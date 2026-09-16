@@ -20,6 +20,7 @@ import type { BotMessaging } from "./studio/bot-messaging";
 import type { StudioChannelBus } from "./studio/studio-channels";
 import type { StudioMemoryStore } from "./studio/studio-memory";
 import type { StudioSkillPackStore } from "./studio/studio-skill-packs";
+import type { StudioRoutineBus } from "./studio/studio-routines";
 import type { TaskStore } from "./studio/task-store";
 import {
   AuditQueryError,
@@ -364,6 +365,7 @@ export function createApp(
   studioChannelBus?: StudioChannelBus,
   studioMemory?: StudioMemoryStore,
   skillPackStore?: StudioSkillPackStore,
+  studioRoutineBus?: StudioRoutineBus,
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -1486,6 +1488,7 @@ export function createApp(
         studioChannelBus,
         studioMemory,
         skillPackStore,
+        studioRoutineBus,
       }),
     );
   }

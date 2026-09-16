@@ -68,6 +68,7 @@ import type { BotMessaging } from "./bot-messaging";
 import type { StudioChannelBus } from "./studio-channels";
 import type { StudioMemoryStore } from "./studio-memory";
 import type { StudioSkillPackStore } from "./studio-skill-packs";
+import type { StudioRoutineBus } from "./studio-routines";
 import {
   ensureStudioVerifierBot,
   STUDIO_VERIFIER_BOT_ID,
@@ -114,8 +115,10 @@ export function createStudioRoutes(deps: {
   studioMemory?: StudioMemoryStore;
   /** P1.4 skill packs. */
   skillPackStore?: StudioSkillPackStore;
+  /** P2.1 routines. */
+  studioRoutineBus?: StudioRoutineBus;
 }): Hono<{ Variables: AppVariables }> {
-  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus, studioMemory, skillPackStore } = deps;
+  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus, studioMemory, skillPackStore, studioRoutineBus } = deps;
   const dispatcher =
     deps.dispatcher ??
     createStudioDispatcher({ database, admission, taskStore });
@@ -588,6 +591,117 @@ export function createStudioRoutes(deps: {
       },
       201,
     );
+  });
+
+
+  // --- P2.1 routines ---
+  routes.get("/routines", async (c: Context) => {
+    if (!studioRoutineBus) return c.json({ error: "Studio routines are not configured." }, 503);
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const routines = await studioRoutineBus.list(actorId);
+    return c.json({
+      routines: routines.map((r) => ({
+        id: r.id,
+        agentId: r.agentId,
+        instruction: r.instruction,
+        schedule: r.schedule,
+        timezone: r.timezone,
+        enabled: r.enabled,
+        nextRunAt: r.nextRunAt.toISOString(),
+        channelId: r.channelId,
+        channelName: r.channelName,
+        channelDeleted: r.channelDeleted,
+        lastRun: r.lastRun
+          ? {
+              status: r.lastRun.status,
+              finishedAt: r.lastRun.finishedAt?.toISOString() ?? null,
+            }
+          : null,
+      })),
+      count: routines.length,
+    });
+  });
+
+  routes.post("/routines", async (c: Context) => {
+    if (!studioRoutineBus) return c.json({ error: "Studio routines are not configured." }, 503);
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const body = (await c.req.json().catch(() => null)) as {
+      instruction?: string;
+      cron?: string;
+      timezone?: string;
+      agentId?: string;
+      channelId?: string;
+    } | null;
+    if (!body?.instruction?.trim() || !body?.cron?.trim()) {
+      return c.json({ error: "instruction and cron are required." }, 400);
+    }
+    const result = await studioRoutineBus.create({
+      ownerUserId: actorId,
+      agentId: body.agentId?.trim() || "studio-lead",
+      instruction: body.instruction.trim(),
+      cron: body.cron.trim(),
+      timezone: body.timezone?.trim() || "America/New_York",
+      channelId: body.channelId?.trim(),
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(
+      {
+        ok: true,
+        routine: {
+          id: result.routine.id,
+          agentId: result.routine.agentId,
+          channelId: result.routine.channelId,
+          instruction: result.routine.instruction,
+          cron: result.routine.cron,
+          timezone: result.routine.timezone,
+          enabled: result.routine.enabled,
+          nextRunAt: result.routine.nextRunAt.toISOString(),
+        },
+      },
+      201,
+    );
+  });
+
+  routes.put("/routines/:id/enabled", async (c: Context) => {
+    if (!studioRoutineBus) return c.json({ error: "Studio routines are not configured." }, 503);
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const id = c.req.param("id") as string;
+    const body = (await c.req.json().catch(() => null)) as { enabled?: unknown } | null;
+    if (typeof body?.enabled !== "boolean") {
+      return c.json({ error: "enabled must be true or false." }, 400);
+    }
+    const result = body.enabled
+      ? await studioRoutineBus.resume(actorId, id)
+      : await studioRoutineBus.pause(actorId, id);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, id, enabled: body.enabled });
+  });
+
+  routes.post("/routines/:id/pause", async (c: Context) => {
+    if (!studioRoutineBus) return c.json({ error: "Studio routines are not configured." }, 503);
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const id = c.req.param("id") as string;
+    const result = await studioRoutineBus.pause(actorId, id);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, id, enabled: false });
+  });
+
+  routes.post("/routines/:id/resume", async (c: Context) => {
+    if (!studioRoutineBus) return c.json({ error: "Studio routines are not configured." }, 503);
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const id = c.req.param("id") as string;
+    const result = await studioRoutineBus.resume(actorId, id);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, id, enabled: true });
+  });
+
+  routes.delete("/routines/:id", async (c: Context) => {
+    if (!studioRoutineBus) return c.json({ error: "Studio routines are not configured." }, 503);
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const id = c.req.param("id") as string;
+    const result = await studioRoutineBus.remove(actorId, id);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.body(null, 204);
   });
 
   // --- P1.4 skill packs ---

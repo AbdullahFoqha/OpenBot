@@ -41,6 +41,7 @@ import { createBotMessaging } from "./studio/bot-messaging";
 import { createStudioChannelBus } from "./studio/studio-channels";
 import { createStudioMemoryStore } from "./studio/studio-memory";
 import { createStudioSkillPackStore } from "./studio/studio-skill-packs";
+import { createStudioRoutineBus } from "./studio/studio-routines";
 import { ensureStudioVerifierBot } from "./studio/studio-verifier";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
@@ -624,6 +625,7 @@ const loadToolsForActor =
       studioChannelBus,
       studioMemory,
       skillPackStore,
+      studioRoutineBus,
       messagingActorId: "dev-local-user",
       allowedBotIds: [
         "studio-lead",
@@ -1370,6 +1372,17 @@ const studioChannelBus = createStudioChannelBus({
 
 const studioMemory = createStudioMemoryStore(database);
 const skillPackStore = createStudioSkillPackStore(database);
+const studioRoutineBus = createStudioRoutineBus({
+  routineStore,
+  channelStore,
+  actorFor: async (userId) => {
+    try {
+      return await actorFor(userId);
+    } catch {
+      return null;
+    }
+  },
+});
 void ensureStudioVerifierBot(database).then((r) => {
   if (!r.ok) console.warn("[studio-verifier]", r.error);
   else if (r.created) console.info("[studio-verifier] seeded", r.botId);
@@ -1528,6 +1541,7 @@ const app = createApp(
   studioChannelBus,
   studioMemory,
   skillPackStore,
+  studioRoutineBus,
 );
 
 /** What each server-owned tool actually does, once its operation has been claimed. */
@@ -1630,6 +1644,7 @@ async function runDeploymentTool(input: {
     studioChannelBus,
     studioMemory,
     skillPackStore,
+    studioRoutineBus,
     messagingActorId: "dev-local-user",
     allowedBotIds: [
       "studio-lead",

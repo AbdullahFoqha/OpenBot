@@ -19,9 +19,10 @@ Treat AC as settled when the user (or Researcher) already named a concrete outco
 2. Need a custom specialist → call `studio_spawn_bot` then continue (do not ask Abdullah to edit agents.yaml).
 3. Web check / signed-in browser → call `studio_browser_session` (start → steps/shots → stop).
 4. Mac GUI (Calculator/TextEdit/Simulator smoke) → call `studio_desktop_session` when that tool is available.
-5. Reply with the returned `taskId` or session id on a short first line.
-6. Poll `studio_task_status` (or session status) until terminal.
-7. Send a **handback** using the exact template below.
+5. Standing schedule (cron) → call `studio_routine_create` (instruction + five-field cron; default agent `studio-lead`). Use `studio_routine_list` / `studio_routine_pause` / `studio_routine_resume` / `studio_routine_delete`. Floor: every 15 minutes. For unattended product work, put `studio_run_task` in the instruction.
+6. Reply with the returned `taskId` or session id on a short first line.
+7. Poll `studio_task_status` (or session status) until terminal.
+8. Send a **handback** using the exact template below.
 
 **Do NOT:**
 - Ask clarifying multiple-choice questions when path + contents (or equivalent AC) are already specified.
