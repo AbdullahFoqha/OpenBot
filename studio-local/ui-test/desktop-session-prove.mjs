@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * P0.3 prove: TextEdit activate + type + screenshot + stop on Abdullahs-MBP.
+ * P0.3 prove: start desktop session → Calculator keystroke → screenshot → stop.
  */
 import { access, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -10,6 +10,7 @@ const OUT = "/Users/abdullah/Developer/openbot-studio/studio-local/ui-test/out";
 const result = {
   pass: false,
   start: null,
+  action: null,
   stop: null,
   screenshotExists: false,
   screenshotPath: null,
@@ -32,12 +33,11 @@ try {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      app: "TextEdit",
+      app: "Calculator",
       steps: [
-        { action: "wait", ms: 400 },
-        { action: "type", text: "P03 desktop session prove" },
+        { action: "keystroke", text: "2" },
         { action: "wait", ms: 300 },
-        { action: "screenshot", name: "02-typed" },
+        { action: "screenshot", name: "02-after-key" },
       ],
     }),
   });
@@ -46,7 +46,7 @@ try {
   if (!startRes.ok) throw new Error(startBody.error || `start ${startRes.status}`);
 
   const shots = startBody.session?.screenshots || [];
-  const shot = shots.find((p) => p.includes("02-typed")) || shots[0];
+  const shot = shots.find((p) => p.includes("02-after-key")) || shots.find((p) => p.includes("01-after-start"));
   result.screenshotPath = shot || null;
   result.screenshotExists = shot ? await exists(shot) : false;
 
@@ -54,27 +54,16 @@ try {
   const stopBody = await stopRes.json();
   result.stop = { status: stopRes.status, body: stopBody };
 
-  const statusBody = await fetch(`${BASE}/api/studio/desktop/session`).then((r) => r.json());
-  result.statusAfterStop = statusBody;
-
-  // Best-effort close TextEdit doc without saving (not part of pass criteria)
-  try {
-    const { spawnSync } = await import("node:child_process");
-    spawnSync(
-      "/usr/bin/osascript",
-      ["-e", 'tell application "TextEdit" to close front document saving no'],
-      { encoding: "utf8" },
-    );
-  } catch {
-    /* ignore */
-  }
+  // polite: quit Calculator via a fresh short start? skip — leave app as user may want it
+  const statusRes = await fetch(`${BASE}/api/studio/desktop/session`);
+  result.statusAfterStop = await statusRes.json();
 
   result.pass =
     startRes.status === 201 &&
     result.screenshotExists &&
+    (startBody.session?.outDir || "").includes("studio-local/ui-test/out/desktop") &&
     stopRes.ok &&
-    statusBody.session?.status === "stopped" &&
-    (startBody.session?.outDir || "").includes("ui-test/out/desktop");
+    result.statusAfterStop?.session?.status === "stopped";
 } catch (err) {
   result.error = err instanceof Error ? err.message : String(err);
   try {
