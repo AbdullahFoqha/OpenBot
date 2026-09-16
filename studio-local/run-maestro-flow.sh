@@ -3,7 +3,7 @@ set -euo pipefail
 # Usage: ./studio-local/run-maestro-flow.sh [flow.yaml] [udid]
 # One-command: boot sim (if needed) + maestro test + evidence under
 #   studio-local/ui-test/out/maestro/<stamp>/
-# Exit 2 = app not installed on the chosen sim (tooling ok; install first).
+# Exit 2 = app still missing after install-app-on-sim.sh attempt.
 
 ROOT=${0:a:h}/..
 cd "$ROOT"
@@ -57,7 +57,9 @@ pick_udid() {
   echo "$want"
 }
 
-UDID=$(pick_udid "$PREFERRED_UDID")
+# Prefer the reserved studio sim. Auto-install below fills a missing app
+# instead of hopping to another device (hopping hid the install path).
+UDID=$PREFERRED_UDID
 
 {
   echo "maestro=$(maestro --version 2>/dev/null | head -1)"
@@ -77,10 +79,20 @@ for i in {1..45}; do
   sleep 1
 done
 
-if ! has_app "$UDID"; then
-  echo "APP_NOT_INSTALLED:$APP_ID on $UDID — install Debug build, then re-run." | tee "$OUT/blocker.txt"
-  echo "Hint: preferred free sim is iPhone 17 Pro ($PREFERRED_UDID)." | tee -a "$OUT/blocker.txt"
-  exit 2
+PROJECT=${STUDIO_MAESTRO_PROJECT:-/Users/abdullah/Documents/projects/pocket-love}
+# Auto-install when missing, or when STUDIO_MAESTRO_INSTALL=1 forces refresh.
+if [[ "${STUDIO_MAESTRO_INSTALL:-0}" == "1" ]] || ! has_app "$UDID"; then
+  echo "install: starting (force=${STUDIO_MAESTRO_INSTALL:-0})" | tee -a "$OUT/meta.txt"
+  set +e
+  "$ROOT/studio-local/install-app-on-sim.sh" "$PROJECT" "$UDID" "$APP_ID" 2>&1 | tee "$OUT/install.log"
+  install_code=${pipestatus[1]}
+  set -e
+  echo "install_exit=$install_code" | tee -a "$OUT/meta.txt"
+  if ! has_app "$UDID"; then
+    echo "APP_NOT_INSTALLED:$APP_ID on $UDID after install_exit=$install_code" | tee "$OUT/blocker.txt"
+    echo "See install.log. Canonical: npx expo run:ios --device $UDID --configuration Debug --no-bundler" | tee -a "$OUT/blocker.txt"
+    exit 2
+  fi
 fi
 
 set +e
