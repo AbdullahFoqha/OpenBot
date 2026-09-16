@@ -150,7 +150,7 @@ export function resolveStudioInstallMode(
  * Attempt to install the app onto the simulator.
  *
  * Prefers spawning `studio-local/install-app-on-sim.sh` relative to the openbot-studio repo root.
- * Falls back to direct simctl clone logic if the script is not available.
+ * Falls back to in-process Release DerivedData / clone / expo Release if the script is unavailable.
  *
  * Install strategies (default mode=release; STUDIO_INSTALL_MODE overrides):
  * 1. studio-local/install-app-on-sim.sh when present (Release DerivedData → …)
