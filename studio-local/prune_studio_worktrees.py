@@ -104,6 +104,34 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # Always persist a stamp log under studio-local/ui-test/out/ for Verifier evidence.
+    repo_root = Path(__file__).resolve().parent.parent
+    out_dir = repo_root / "studio-local" / "ui-test" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    log_name = (
+        f"prune-worktrees-apply-{stamp}.txt"
+        if args.apply
+        else f"prune-worktrees-dry-run-{stamp}.txt"
+    )
+    log_path = out_dir / log_name
+
+    class _Tee:
+        def __init__(self, *streams):
+            self.streams = streams
+        def write(self, data):
+            for s in self.streams:
+                s.write(data)
+                s.flush()
+        def flush(self):
+            for s in self.streams:
+                s.flush()
+
+    _log_fh = open(log_path, "w", encoding="utf-8")
+    sys.stdout = _Tee(sys.__stdout__, _log_fh)
+    sys.stderr = _Tee(sys.__stderr__, _log_fh)
+    print(f"log={log_path}")
+
     projects = Path(args.projects_dir)
     by_suffix, active = fetch_tasks(args.server)
     now = time.time()
@@ -163,10 +191,12 @@ def main() -> int:
 
     if not args.apply:
         print("Re-run with --apply to remove PRUNE rows via git worktree remove --force.")
+        print(f"log_written={log_path}")
         return 0
 
     if not prune:
         print("Nothing to prune.")
+        print(f"log_written={log_path}")
         return 0
 
     removed = 0
@@ -180,6 +210,7 @@ def main() -> int:
             print(f"FAIL {path}: {e}")
             failed += 1
     print(f"done removed={removed} failed={failed}")
+    print(f"log_written={log_path}")
     return 1 if failed else 0
 
 
