@@ -19,6 +19,7 @@ import type { Database } from "../db/client";
 import {
   studioEvidence,
   studioProducts,
+  studioPullRequests,
   studioReservations,
   studioTasks,
 } from "../db/schema";
@@ -218,21 +219,36 @@ export function createStudioRoutes(deps: {
     const evidenceRows = await database.select().from(studioEvidence);
     const evidenceByTask = new Map(evidenceRows.map((e) => [e.taskId, e]));
     const activeByTask = new Map(active.map((a) => [a.taskId, a]));
+    const pullRows = await database.select().from(studioPullRequests);
+    const pullByTask = new Map(pullRows.map((p) => [p.taskId, p]));
 
     return c.json({
-      tasks: rows.map((row) => ({
-        id: row.id,
-        title: row.title,
-        state: row.state,
-        goal: row.goal,
-        acceptanceCriteria: row.acceptanceCriteria,
-        blockedReason: row.blockedReason,
-        ownerBotId: row.ownerBotId,
-        updatedAt: row.updatedAt,
-        reservation: activeByTask.get(row.id) ?? null,
-        evidence: evidenceByTask.get(row.id) ?? null,
-        running: inFlight.has(row.id),
-      })),
+      tasks: rows.map((row) => {
+        const pull = pullByTask.get(row.id);
+        return {
+          id: row.id,
+          title: row.title,
+          state: row.state,
+          goal: row.goal,
+          acceptanceCriteria: row.acceptanceCriteria,
+          blockedReason: row.blockedReason,
+          ownerBotId: row.ownerBotId,
+          updatedAt: row.updatedAt,
+          reservation: activeByTask.get(row.id) ?? null,
+          evidence: evidenceByTask.get(row.id) ?? null,
+          pullRequest:
+            pull?.number && pull.url
+              ? {
+                  number: pull.number,
+                  url: pull.url,
+                  draft: pull.draft,
+                  headBranch: pull.headBranch,
+                  baseBranch: pull.baseBranch,
+                }
+              : null,
+          running: inFlight.has(row.id),
+        };
+      }),
     });
   });
 

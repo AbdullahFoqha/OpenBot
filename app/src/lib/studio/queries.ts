@@ -51,6 +51,14 @@ export type TaskReservation = {
   turns: number;
 };
 
+export type StudioPullRequest = {
+  number: number;
+  url: string;
+  draft: boolean;
+  headBranch: string;
+  baseBranch: string;
+};
+
 export type StudioTask = {
   id: string;
   title: string;
@@ -62,6 +70,7 @@ export type StudioTask = {
   updatedAt: string;
   reservation: TaskReservation | null;
   evidence: TaskEvidence | null;
+  pullRequest: StudioPullRequest | null;
   running: boolean;
 };
 

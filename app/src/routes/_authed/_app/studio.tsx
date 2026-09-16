@@ -378,9 +378,27 @@ function TaskRow({
               ? ` · verified: ${task.evidence.changedFiles.length} file(s) changed`
               : ` · not verified: ${task.evidence.blocker ?? "unknown"}`
             : ""}
+          {task.pullRequest
+            ? ` · draft PR #${task.pullRequest.number}`
+            : ""}
         </ItemDescription>
       </ItemContent>
       <ItemActions>
+        {task.pullRequest ? (
+          <Button
+            size="sm"
+            variant="outline"
+            render={
+              <a
+                href={task.pullRequest.url}
+                target="_blank"
+                rel="noreferrer"
+              />
+            }
+          >
+            Draft PR
+          </Button>
+        ) : null}
         {task.running ? (
           <Button onClick={onStop} size="sm" variant="outline">
             <IconPlayerStop />

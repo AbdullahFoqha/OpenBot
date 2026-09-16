@@ -74,9 +74,9 @@ location, so your shell's current directory never matters):
   is safe for one Mac with no second worker racing it, but is not the fencing guarantee
   `admission.ts` documents for a genuinely concurrent worker. It has not been exercised end to end
   (only its 409 "already running" guard was).
-- **Run Task does not open a pull request.** `server/src/studio/delivery.ts` (P5) owns that state
-  machine and is not wired to the dashboard's Run Task route yet. A task's branch and worktree are
-  left in place next to your checkout for you to review and push by hand.
+- **Run Task opens a draft pull request** after a successful worker run (push +
+  `createGitHubDelivery().openDraft`, find-before-create). If push/`gh` fails, the worktree stays
+  and the failure is recorded as the task blocker. Coding Test still never opens a PR.
 - **No native folder picker.** A browser cannot hand a page a real filesystem path from a picker;
   that needs the desktop (Tauri) shell in `desktop/`, which this pass did not touch. The dialog
   takes a pasted absolute path instead, verified against the real filesystem and git root before
@@ -101,10 +101,8 @@ location, so your shell's current directory never matters):
 
 ## Known limitations worth deciding on next
 
-1. Wire `server/src/studio/delivery.ts` into Run Task so a completed task opens a draft PR instead
-   of leaving a bare branch/worktree.
-2. Give `admission.ts` a real `resume` operation (distinct from `reclaim`, which is for a lease
+1. Give `admission.ts` a real `resume` operation (distinct from `reclaim`, which is for a lease
    that already expired) so Continue Task is exact rather than "release and re-claim."
-3. If you want the Studio Lead to be the one deciding to hand work to the Engineer from a chat
+2. If you want the Studio Lead to be the one deciding to hand work to the Engineer from a chat
    message, that's a second integration on top of P1/P4b, not something this dashboard needed to
    reach the priority flow (Start → Select Project → Run Coding Test → Submit Task).

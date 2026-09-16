@@ -22,6 +22,8 @@ import type { AgentEvent } from "../cursor-adapter/backend";
 import type { Database } from "../db/client";
 import { studioEvidence } from "../db/schema";
 import type { TaskStore } from "./task-store";
+import { deliverProjectDraftPr } from "./project-delivery";
+import type { GhRunner } from "./github";
 
 export const CURSOR_ENGINEER_BOT_ID = "react-native-engineer";
 export const DEFAULT_MODEL = "cursor-grok-4.6-xhigh";
@@ -39,6 +41,8 @@ export type RunOutcome = {
   checkAfter: unknown;
   blocker: string | null;
   events: AgentEvent[];
+  /** Set when a successful project task opened or reconciled a draft PR. */
+  pullRequest?: { number: number; url: string; created: boolean } | null;
 };
 
 /** Runs a shell check inside a worktree and returns a plain, comparable result. */
@@ -300,12 +304,10 @@ function slugify(text: string): string {
 
 /**
  * Run one real assignment against the selected project: its own branch and worktree, the same
- * Cursor CLI backend the coding test uses, and the diff left for review.
+ * Cursor CLI backend the coding test uses, and — when the worker produced changes — a single draft
+ * pull request through `createGitHubDelivery().openDraft` (find-before-create).
  *
- * DOES NOT OPEN A PULL REQUEST. `studio/delivery.ts` owns that state machine and is not wired to
- * this route yet — the branch and worktree this leaves behind are exactly what a person needs to
- * review and push by hand, and that gap is reported rather than papered over with a call that
- * would not be honest about being untested.
+ * Coding Test never calls this path. A delivery failure becomes a blocker and keeps the worktree.
  */
 export async function runProjectTask(deps: {
   admission: Admission;
@@ -319,6 +321,12 @@ export async function runProjectTask(deps: {
   goal: string;
   acceptanceCriteria: string;
   model?: string;
+  /** Injected in tests so openDraft never touches a real account. */
+  gh?: GhRunner;
+  pushBranch?: (
+    cwd: string,
+    branch: string,
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }): Promise<RunOutcome> {
   const claim = await deps.admission.claim({
     taskId: deps.taskId,
@@ -388,6 +396,35 @@ export async function runProjectTask(deps: {
   const { diff, changedFiles } = await diffOf(worktreePath);
   const ok = run.ok && changedFiles.length > 0;
 
+  let blocker: string | null = ok ? null : run.blocker ?? "The worker made no changes.";
+  let pullRequest: RunOutcome["pullRequest"] = null;
+
+  if (ok) {
+    const delivered = await deliverProjectDraftPr({
+      database: deps.database,
+      taskId: deps.taskId,
+      title: deps.title,
+      goal: deps.goal,
+      acceptanceCriteria: deps.acceptanceCriteria,
+      worktreePath,
+      branch,
+      projectPath: deps.projectPath,
+      ...(deps.gh ? { gh: deps.gh } : {}),
+      ...(deps.pushBranch ? { push: deps.pushBranch } : {}),
+    });
+    if (delivered.ok) {
+      pullRequest = {
+        number: delivered.pull.number,
+        url: delivered.pull.url,
+        created: delivered.created,
+      };
+    } else {
+      // Work and worktree stay; the person can still push. Surface why the draft PR did not open.
+      blocker = `Code changed, but the draft pull request was not opened: ${delivered.reason}`;
+      await deps.taskStore.setBlocked(deps.taskId, blocker).catch(() => {});
+    }
+  }
+
   await deps.database
     .insert(studioEvidence)
     .values({
@@ -402,7 +439,7 @@ export async function runProjectTask(deps: {
       checkBefore: null,
       checkAfter: null,
       ok,
-      blocker: ok ? null : run.blocker ?? "The worker made no changes.",
+      blocker,
     })
     .onConflictDoUpdate({
       target: studioEvidence.taskId,
@@ -412,7 +449,7 @@ export async function runProjectTask(deps: {
         changedFiles,
         diff,
         ok,
-        blocker: ok ? null : run.blocker ?? "The worker made no changes.",
+        blocker,
       },
     });
 
@@ -430,7 +467,8 @@ export async function runProjectTask(deps: {
     diff,
     checkBefore: null,
     checkAfter: null,
-    blocker: ok ? null : run.blocker ?? "The worker made no changes.",
+    blocker,
     events: run.events,
+    pullRequest,
   };
 }
