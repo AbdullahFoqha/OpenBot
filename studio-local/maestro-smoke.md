@@ -45,4 +45,6 @@ STUDIO_MAESTRO_INSTALL=1 STUDIO_INSTALL_MODE=release \
 
 QE AC: prefer `STUDIO_INSTALL_MODE=release` — see `studio-local/QE_AC_MAESTRO_TEMPLATE.md`.
 
+Shell parity: `install-app-on-sim.sh` defaults `STUDIO_INSTALL_MODE` to **release** (same as TS `resolveStudioInstallMode`); use `auto` explicitly for clone/expo fallbacks.
+
 Env knobs: `STUDIO_MAESTRO_RESET=0` · `STUDIO_MAESTRO_INSTALL=1` · `STUDIO_INSTALL_MODE=release|clone|expo|auto`

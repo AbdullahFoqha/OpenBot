@@ -4,14 +4,15 @@ set -euo pipefail
 # Usage: ./studio-local/install-app-on-sim.sh [projectRoot] [udid] [appId]
 # Env:
 #   STUDIO_MAESTRO_INSTALL=1  force reinstall even if app already present
-#   STUDIO_INSTALL_MODE=release|clone|expo|auto
-#     auto (default): Release DerivedData .app → clone from donor sim → expo Debug
+#   STUDIO_INSTALL_MODE=release|clone|expo|auto  (default: release)
+#     release (default): Release DerivedData .app only (parity with TS resolveStudioInstallMode)
+#     auto: Release DerivedData → clone → expo Release
 # Prefer Release for Maestro: embeds JS bundle (no Metro). Debug needs Metro.
 
 PROJECT=${1:-/Users/abdullah/Documents/projects/pocket-love}
 UDID=${2:-812A595B-0FDA-4C3F-9346-088E6C07A489}
 APP_ID=${3:-app.pocketlove.private}
-MODE=${STUDIO_INSTALL_MODE:-auto}
+MODE=${STUDIO_INSTALL_MODE:-release}
 FORCE=${STUDIO_MAESTRO_INSTALL:-0}
 
 export PATH="/Users/abdullah/.local/share/fnm/node-versions/v24.16.0/installation/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
