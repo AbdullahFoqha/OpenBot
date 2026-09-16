@@ -9,7 +9,7 @@
  * two tasks, and the project-path verification the setup kit called out as unverified.
  */
 import { spawn } from "node:child_process";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { Context, MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
@@ -70,11 +70,21 @@ import type { StudioMemoryStore } from "./studio-memory";
 import type { StudioSkillPackStore } from "./studio-skill-packs";
 import type { StudioRoutineBus } from "./studio-routines";
 import type { StudioMcpBus } from "./studio-mcp-connectors";
-import type { StudioBotSecretStore } from "./studio-bot-secrets";
 import {
   ensureStudioVerifierBot,
   STUDIO_VERIFIER_BOT_ID,
 } from "./studio-verifier";
+import {
+  createChatModelPrefsStore,
+  encodeChatModel,
+  listClaudeModels,
+  listCursorModels,
+  type ChatModelProvider,
+} from "./chat-model-prefs";
+import {
+  intelligenceChannelMappings,
+  studioChannels,
+} from "../db/schema";
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -121,10 +131,13 @@ export function createStudioRoutes(deps: {
   studioRoutineBus?: StudioRoutineBus;
   /** P2.3 MCP connectors. */
   studioMcpBus?: StudioMcpBus;
-  /** P2.4 bot-scoped secrets. */
-  studioSecretStore?: StudioBotSecretStore;
+  /** Mint a deployment-scoped Intelligence thread id (session restart). */
+  mintThreadId?: () => string;
 }): Hono<{ Variables: AppVariables }> {
-  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus, studioMemory, skillPackStore, studioRoutineBus, studioMcpBus, studioSecretStore } = deps;
+  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus, studioMemory, skillPackStore, studioRoutineBus, studioMcpBus } = deps;
+  const chatModelPrefs = createChatModelPrefsStore(database);
+  const mintThreadId =
+    deps.mintThreadId ?? (() => `thread_${randomUUID()}`);
   const dispatcher =
     deps.dispatcher ??
     createStudioDispatcher({ database, admission, taskStore });
@@ -609,41 +622,6 @@ export function createStudioRoutes(deps: {
 
 
 
-
-  // --- P2.4 bot-scoped secrets ---
-  routes.get("/bots/:id/secrets", async (c: Context) => {
-    if (!studioSecretStore) return c.json({ error: "Studio secrets are not configured." }, 503);
-    const botId = c.req.param("id") as string;
-    const secrets = await studioSecretStore.list(botId);
-    return c.json({ botId, secrets, count: secrets.length });
-  });
-
-  routes.put("/bots/:id/secrets/:name", async (c: Context) => {
-    if (!studioSecretStore) return c.json({ error: "Studio secrets are not configured." }, 503);
-    const botId = c.req.param("id") as string;
-    const name = c.req.param("name") as string;
-    const actorId = c.var.actor?.id ?? "dev-local-user";
-    const body = (await c.req.json().catch(() => null)) as { value?: string } | null;
-    if (!body?.value) return c.json({ error: "value is required." }, 400);
-    const result = await studioSecretStore.set({
-      botId,
-      name,
-      value: body.value,
-      by: actorId,
-    });
-    if (!result.ok) return c.json({ error: result.error }, result.status);
-    return c.json({ ok: true, created: result.created, secret: result.secret }, result.created ? 201 : 200);
-  });
-
-  routes.delete("/bots/:id/secrets/:name", async (c: Context) => {
-    if (!studioSecretStore) return c.json({ error: "Studio secrets are not configured." }, 503);
-    const botId = c.req.param("id") as string;
-    const name = c.req.param("name") as string;
-    const result = await studioSecretStore.remove(botId, name);
-    if (!result.ok) return c.json({ error: result.error }, result.status);
-    return c.body(null, 204);
-  });
-
   // --- P2.3 MCP connectors ---
   routes.get("/mcp/catalogue", async (c: Context) => {
     if (!studioMcpBus) return c.json({ error: "Studio MCP is not configured." }, 503);
@@ -984,6 +962,149 @@ export function createStudioRoutes(deps: {
     });
     if (!result.ok) return c.json({ error: result.error }, result.status);
     return c.json({ message: result.message, channel: result.channel }, 201);
+  });
+
+  // --- Chat model picker (Cursor subscription vs Claude OAuth) ---
+  routes.get("/chat-models", async (c: Context) => {
+    const [cursor, claude] = await Promise.all([
+      listCursorModels(),
+      Promise.resolve(listClaudeModels()),
+    ]);
+    return c.json({
+      providers: [
+        { id: "cursor", label: "Cursor (subscription)", models: cursor },
+        { id: "claude", label: "Claude (Claude Code OAuth)", models: claude },
+      ],
+    });
+  });
+
+  routes.put("/chat-models", async (c: Context) => {
+    // Alias: body may include channelId for a one-shot set from a generic form.
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.channelId !== "string") {
+      return c.json({ error: "channelId, provider, and modelId are required." }, 400);
+    }
+    const provider = body.provider;
+    const modelId = body.modelId;
+    if (provider !== "cursor" && provider !== "claude") {
+      return c.json({ error: "provider must be cursor or claude." }, 400);
+    }
+    if (typeof modelId !== "string" || !modelId.trim()) {
+      return c.json({ error: "modelId is required." }, 400);
+    }
+    const userId = c.var.actor?.id ?? "dev-local-user";
+    const pref = await chatModelPrefs.set(
+      userId,
+      body.channelId,
+      provider as ChatModelProvider,
+      modelId,
+    );
+    return c.json({ preference: pref });
+  });
+
+  routes.get("/channels/:channelId/chat-model", async (c: Context) => {
+    const channelId = c.req.param("channelId");
+    if (!channelId) return c.json({ error: "channelId required" }, 400);
+    const userId = c.var.actor?.id ?? "dev-local-user";
+    const preference = await chatModelPrefs.get(userId, channelId);
+    return c.json({
+      channelId,
+      preference,
+      defaultHint:
+        "When preference is null, the bot uses chatModelForBot (Lead→cursor-grok-4.6-high, Designer→claude package default).",
+    });
+  });
+
+  routes.put("/channels/:channelId/chat-model", async (c: Context) => {
+    const channelId = c.req.param("channelId");
+    if (!channelId) return c.json({ error: "channelId required" }, 400);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) return c.json({ error: "JSON body required." }, 400);
+    const provider = body.provider;
+    const modelId = body.modelId ?? body.model;
+    if (provider !== "cursor" && provider !== "claude") {
+      return c.json({ error: "provider must be cursor or claude." }, 400);
+    }
+    if (typeof modelId !== "string" || !modelId.trim()) {
+      return c.json({ error: "modelId is required." }, 400);
+    }
+    const userId = c.var.actor?.id ?? "dev-local-user";
+    const pref = await chatModelPrefs.set(
+      userId,
+      channelId,
+      provider as ChatModelProvider,
+      modelId.trim(),
+    );
+    return c.json({
+      preference: pref,
+      encoded: encodeChatModel(provider, modelId.trim()),
+    });
+  });
+
+  /**
+   * Mint a fresh Intelligence thread for this channel and remaps the user's mapping
+   * so the next turn starts clean under the (optionally updated) model.
+   */
+  routes.post("/channels/:channelId/chat-model/restart", async (c: Context) => {
+    const channelId = c.req.param("channelId");
+    if (!channelId) return c.json({ error: "channelId required" }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const userId = c.var.actor?.id ?? "dev-local-user";
+
+    // Optional: apply preference in the same call.
+    const provider = body.provider;
+    const modelId = body.modelId ?? body.model;
+    let preference = await chatModelPrefs.get(userId, channelId);
+    if (
+      (provider === "cursor" || provider === "claude") &&
+      typeof modelId === "string" &&
+      modelId.trim()
+    ) {
+      preference = await chatModelPrefs.set(
+        userId,
+        channelId,
+        provider,
+        modelId.trim(),
+      );
+    }
+
+    const threadId = mintThreadId();
+    const now = new Date();
+    const updated = await database
+      .update(intelligenceChannelMappings)
+      .set({ threadId, updatedAt: now })
+      .where(
+        and(
+          eq(intelligenceChannelMappings.userId, userId),
+          eq(intelligenceChannelMappings.channelId, channelId),
+        ),
+      )
+      .returning({
+        channelId: intelligenceChannelMappings.channelId,
+        threadId: intelligenceChannelMappings.threadId,
+      });
+
+    if (updated.length === 0) {
+      // Channel may exist without a mapping row yet — insert.
+      await database.insert(intelligenceChannelMappings).values({
+        userId,
+        channelId,
+        threadId,
+      });
+    }
+
+    // Keep studio multi-bot room mapping in sync when this channel backs one.
+    await database
+      .update(studioChannels)
+      .set({ threadId })
+      .where(eq(studioChannels.channelId, channelId));
+
+    return c.json({
+      channelId,
+      threadId,
+      preference,
+      restarted: true,
+    });
   });
 
   // --- P1.1 bot-to-bot messaging ---

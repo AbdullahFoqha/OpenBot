@@ -291,11 +291,12 @@ function ChannelBody({
     );
   }
 
-  // Remount on channel changes so CopilotKit agent/thread state cannot leak between channels.
+  // Remount on channel or thread changes so CopilotKit state cannot leak, and so
+  // chat-model "Restart session" (new threadId) starts a clean conversation.
   return (
     <ChannelChat
       channel={channel}
-      key={channel.id}
+      key={`${channel.id}:${channel.threadId}`}
       runtimeAgentId={runtimeAgentId}
     />
   );

@@ -222,14 +222,50 @@ export function authorizationHeader(token: string): string {
  * The `finally` closes the transport whatever happened, because a thrown error is the case where a
  * leaked connection is most likely and least noticed.
  */
+/**
+ * Penpot's hosted MCP expects the MCP key as a `userToken` query parameter on the
+ * stream URL (see help.penpot.app/mcp and the AO adapter that already worked here).
+ * OpenBot stores the key in the vault and would otherwise send it as Bearer, which
+ * lists tools but fails execute_code with "plugin not authenticated". Rewrite at
+ * dial-time so the DB URL stays credential-free (catalogue forbids secrets in URLs).
+ */
+function requestInitFor(connection: Connection): {
+  url: string;
+  requestInit: { headers?: Record<string, string> } | undefined;
+} {
+  const token = connection.token?.trim();
+  if (!token) {
+    return { url: connection.url, requestInit: undefined };
+  }
+  try {
+    const parsed = new URL(connection.url);
+    const host = parsed.hostname.toLowerCase();
+    const isPenpot =
+      host === "design.penpot.app" ||
+      host.endsWith(".penpot.app") ||
+      (host.includes("penpot") && parsed.pathname.includes("/mcp/stream"));
+    if (isPenpot) {
+      if (!parsed.searchParams.get("userToken")) {
+        parsed.searchParams.set("userToken", token);
+      }
+      return { url: parsed.toString(), requestInit: undefined };
+    }
+  } catch {
+    // Fall through to Bearer for non-URL or parse failures.
+  }
+  return {
+    url: connection.url,
+    requestInit: { headers: { Authorization: authorizationHeader(token) } },
+  };
+}
+
 async function withClient<T>(
   connection: Connection,
   use: (client: Client) => Promise<T>,
 ): Promise<T> {
-  const transport = new StreamableHTTPClientTransport(new URL(connection.url), {
-    requestInit: connection.token
-      ? { headers: { Authorization: authorizationHeader(connection.token) } }
-      : undefined,
+  const { url, requestInit } = requestInitFor(connection);
+  const transport = new StreamableHTTPClientTransport(new URL(url), {
+    requestInit,
   });
   const client = new Client({ name: "openbot", version: "1.0.0" });
 

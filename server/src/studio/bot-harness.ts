@@ -5,7 +5,7 @@
  * Coding workers (studio_run_task) are pinned separately in runner.ts via
  * resolveCursorHarnessModel — this file is for Bot *chat* only.
  */
-export const CURSOR_CHAT_MODEL = "cursor-grok-4.6-high" as const;
+export const CURSOR_CHAT_MODEL = "cursor:cursor-grok-4.6-high" as const;
 
 /**
  * Fallback Claude control-model id when BOT_MODEL / package default is unavailable.
@@ -60,7 +60,12 @@ export function chatModelForBot(
   const harness = harnessForBot(botId);
   if (harness.kind === "claude") {
     const trimmed = claudeDefault?.trim();
-    return trimmed && trimmed.length > 0 ? trimmed : CLAUDE_CHAT_MODEL;
+    const id = trimmed && trimmed.length > 0 ? trimmed : CLAUDE_CHAT_MODEL;
+    return id.startsWith("claude:") || id.startsWith("cursor:")
+      ? id
+      : `claude:${id}`;
   }
-  return harness.model;
+  return harness.model.startsWith("cursor:") || harness.model.startsWith("claude:")
+    ? harness.model
+    : `cursor:${harness.model}`;
 }

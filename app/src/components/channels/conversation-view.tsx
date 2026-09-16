@@ -20,6 +20,7 @@ import {
 } from "@/components/channels/composer";
 import { attachmentUrl } from "@/lib/channels/attachments";
 import { newId } from "../../lib/new-id";
+import { ChatModelPicker } from "@/components/channels/chat-model-picker";
 
 export function ConversationView({
   messages,
@@ -434,6 +435,7 @@ export function ConversationView({
       </div>
       <div className="max-w-2xl mx-auto w-full px-0 pb-4 shrink-0">
         {notice}
+        {channelId ? <ChatModelPicker channelId={channelId} /> : null}
         <Composer
           agents={agents}
           autoFocus={autoFocus}

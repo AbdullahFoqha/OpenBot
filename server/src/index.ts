@@ -43,8 +43,11 @@ import { createStudioMemoryStore } from "./studio/studio-memory";
 import { createStudioSkillPackStore } from "./studio/studio-skill-packs";
 import { createStudioRoutineBus } from "./studio/studio-routines";
 import { createStudioMcpBus } from "./studio/studio-mcp-connectors";
-import { createStudioBotSecretStore } from "./studio/studio-bot-secrets";
 import { ensureStudioVerifierBot } from "./studio/studio-verifier";
+import {
+  loadChatModelOverridesForThread,
+  setChatModelOverrideLoader,
+} from "./studio/chat-model-prefs";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
 import { createRuntimeAgentLoader } from "./agents/runtime-agents";
@@ -200,6 +203,15 @@ const config = loadConfig();
 // `serverPort` in config.ts for what `process.env.PORT ?? …` did with `PORT=` instead.
 const port = config.port;
 const database = createDatabase(config.databaseUrl);
+
+/**
+ * Channel chat-model picker: when a Copilot turn arrives with a threadId, apply that
+ * channel's preference (cursor:<id> / claude:<id>) to every seated built-in bot.
+ */
+setChatModelOverrideLoader((actorId, threadId) =>
+  loadChatModelOverridesForThread(database, actorId, threadId),
+);
+
 await initializeDevActorUser(database, config.singleUser);
 // The vault, built before the agent store because a customer's agent may sit behind a key and that
 // key belongs here rather than on the agent row. See agents/auth-header.ts.
@@ -629,7 +641,6 @@ const loadToolsForActor =
       skillPackStore,
       studioRoutineBus,
       studioMcpBus,
-      studioSecretStore,
       messagingActorId: "dev-local-user",
       allowedBotIds: [
         "studio-lead",
@@ -1376,10 +1387,6 @@ const studioChannelBus = createStudioChannelBus({
 
 const studioMemory = createStudioMemoryStore(database);
 const skillPackStore = createStudioSkillPackStore(database);
-const studioSecretStore = createStudioBotSecretStore({
-  database,
-  encryptionKey: config.keyEncryptionKey,
-});
 const studioMcpBus = createStudioMcpBus({
   pluginStore,
   connect: {
@@ -1558,7 +1565,6 @@ const app = createApp(
   skillPackStore,
   studioRoutineBus,
   studioMcpBus,
-  studioSecretStore,
 );
 
 /** What each server-owned tool actually does, once its operation has been claimed. */
@@ -1663,7 +1669,6 @@ async function runDeploymentTool(input: {
     skillPackStore,
     studioRoutineBus,
     studioMcpBus,
-    studioSecretStore,
     messagingActorId: "dev-local-user",
     allowedBotIds: [
       "studio-lead",

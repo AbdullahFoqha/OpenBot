@@ -36,7 +36,12 @@ import {
 } from "./plugins/selection";
 import type { GrantedTool } from "./plugins/tools";
 import { grantedToolGuidance } from "./plugins/tools";
-import { chatModelForBot } from "./studio/bot-harness";
+import {
+  getChatModelOverrideLoader,
+  resolveBuiltInChatModel,
+  threadIdFromRequestBody,
+  withChatModelOverrides,
+} from "./studio/chat-model-prefs";
 
 /**
  * The CopilotKit runtime, always in Intelligence mode.
@@ -337,11 +342,13 @@ export function builtInAgentConfiguration(
      * createOpenAI({...})(model), which is the OpenAI *Responses* API — this deployment's
      * OPENAI_BASE_URL is a local Chat-Completions dual router (studio-local/claude-control-model):
      * cursor-grok-* → Cursor subscription; other models → Claude Agent SDK. Responses 404s against
-     * it, so we build the model with .chat(). Per-bot model comes from chatModelForBot (most bots
-     * cursor-grok-4.6-high; product-designer keeps the Claude package default).
+     * it, so we build the model with .chat(). Per-bot model comes from resolveBuiltInChatModel
+     * (channel preference when present; else chatModelForBot — most bots cursor-grok-4.6-high;
+     * product-designer keeps the Claude package default). Encoded as cursor:<id> / claude:<id>.
      */
     model: createOpenAI({ apiKey, baseURL: process.env.OPENAI_BASE_URL }).chat(
-      chatModelForBot(agent.id, model.defaultModel),
+      // Channel preference (ALS) wins when set; else chatModelForBot defaults.
+      resolveBuiltInChatModel(agent.id, model.defaultModel),
     ),
     /*
      * The package's role, then the person's own standing instructions, then what this Bot actually
@@ -1900,27 +1907,43 @@ export function createRequestAgents(
 ) {
   return async ({ request }: { request: Request }) => {
     const actor = await identifyActor(request);
-    return resolveRuntimeAgents(
-      () => loadAgents(actor),
-      model,
-      resolveModelApiKey,
-      stallGuard,
-      loadToolsForActor?.(actor.id),
-      signRunForActor?.(actor.id),
-      computerGuidance,
-      loadVendors,
-      selectionForActor?.(actor.id),
-      agentFetch,
-      handoffForActor?.(actor.id),
-      // Every Bot this person can see, so no `onlyBotId` here; the instructions follow it.
-      undefined,
-      loadInstructionsForActor?.(actor.id),
-      // No initiator: a request is a person asking, which is the default this path has always
-      // carried. Named only so the attachments after it land in the right position.
-      undefined,
-      loadAttachmentForActor?.(actor.id),
-      markAttachmentsSentForActor?.(actor.id),
-      remoteDelegation,
+
+    // Channel chat-model preference: resolve thread → channel → encoded model for seated bots.
+    let overrides = new Map<string, string>();
+    try {
+      const body = await request.clone().json().catch(() => null);
+      const threadId = threadIdFromRequestBody(body);
+      const loader = getChatModelOverrideLoader();
+      if (threadId && loader) {
+        overrides = await loader(actor.id, threadId);
+      }
+    } catch {
+      // Preference lookup is best-effort; defaults remain chatModelForBot.
+    }
+
+    return withChatModelOverrides(overrides, () =>
+      resolveRuntimeAgents(
+        () => loadAgents(actor),
+        model,
+        resolveModelApiKey,
+        stallGuard,
+        loadToolsForActor?.(actor.id),
+        signRunForActor?.(actor.id),
+        computerGuidance,
+        loadVendors,
+        selectionForActor?.(actor.id),
+        agentFetch,
+        handoffForActor?.(actor.id),
+        // Every Bot this person can see, so no `onlyBotId` here; the instructions follow it.
+        undefined,
+        loadInstructionsForActor?.(actor.id),
+        // No initiator: a request is a person asking, which is the default this path has always
+        // carried. Named only so the attachments after it land in the right position.
+        undefined,
+        loadAttachmentForActor?.(actor.id),
+        markAttachmentsSentForActor?.(actor.id),
+        remoteDelegation,
+      ),
     );
   };
 }

@@ -14,7 +14,6 @@ import {
   primaryKey,
   text,
   timestamp,
-  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { agents, channels, users } from "./core";
 import { jsonb } from "./json";
@@ -627,27 +626,23 @@ export const studioSkillPackAttachments = pgTable(
 );
 
 /**
- * P2.4 bot-scoped secret vault (Grok secret-request parity).
- * Values encrypted at rest; list/status never return plaintext.
+ * Per-user, per-channel Studio chat model preference (Cursor vs Claude).
+ * Encoded as cursor:<id> / claude:<id> for the dual router.
  */
-export const studioBotSecrets = pgTable(
-  "studio_bot_secrets",
+export const studioChannelChatModels = pgTable(
+  "studio_channel_chat_models",
   {
-    id: text("id").primaryKey(),
-    botId: text("bot_id")
+    userId: text("user_id")
       .notNull()
-      .references(() => agents.id, { onDelete: "cascade" }),
-    /** Env-style name, e.g. CURSOR_API_KEY */
-    name: text("name").notNull(),
-    encryptedValue: text("encrypted_value").notNull(),
-    createdBy: text("created_by"),
-    createdAt: createdAt(),
+      .references(() => users.id, { onDelete: "cascade" }),
+    channelId: text("channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(), // cursor | claude
+    modelId: text("model_id").notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
-  (table) => [
-    uniqueIndex("studio_bot_secrets_bot_name_idx").on(table.botId, table.name),
-    index("studio_bot_secrets_bot_idx").on(table.botId),
-  ],
+  (table) => [primaryKey({ columns: [table.userId, table.channelId] })],
 );

@@ -30,9 +30,9 @@ describe("bot chat harness map", () => {
 
   test("product-designer stays on Claude (package default preferred)", () => {
     expect(harnessForBot("product-designer").kind).toBe("claude");
-    expect(chatModelForBot("product-designer")).toBe(CLAUDE_CHAT_MODEL);
+    expect(chatModelForBot("product-designer")).toBe(`claude:${CLAUDE_CHAT_MODEL}`);
     expect(chatModelForBot("product-designer", "claude-sonnet-4-5")).toBe(
-      "claude-sonnet-4-5",
+      "claude:claude-sonnet-4-5",
     );
   });
 
