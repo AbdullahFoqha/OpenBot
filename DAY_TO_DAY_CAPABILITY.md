@@ -32,10 +32,13 @@ Ask Lead in chat → bots drive **Mac + browser** without babysitting → Engine
 ## Next build order
 
 1. ~~Install + pin Maestro CLI~~ — done (2.10.0, PATH).
-2. ~~One-command boot + maestro + evidence~~ — `studio-local/run-maestro-flow.sh` → `ui-test/out/maestro/`.
-3. QE AC template for `maestro:` — `STUDIO-QE-MAESTRO.md` / `studio-local/QE_AC_MAESTRO_TEMPLATE.md` (runner auto-call still open).
-4. Silent server death — root cause + fix `0f6e682`; **apply on idle restart** (hold while cursor-agent).
-5. Solo demo script Abdullah can run cold in ≤15 min.
+2. ~~One-command boot + maestro + evidence~~ — `run-maestro-flow.sh` (+ auto-install + dirty-sim reset).
+3. ~~QE `maestro:` AC template~~ — `QE_AC_MAESTRO_TEMPLATE.md`; prefer Release / clearState.
+4. ~~Silent server death~~ — PGID isolation `0f6e682` live after idle restart.
+5. ~~Dirty-sim onboard~~ — `0807827` exit=0 evidence `20260916T055901Z`.
+6. Default `STUDIO_INSTALL_MODE=release` in QE TS runner env (belt-and-suspenders).
+7. Cold solo demo ≤15 min using `ULTRA_DEMO.md` + Maestro Release recipe.
+8. Optional: push OpenBot draft PRs #1/#2 when ready for review.
 
 ## Constraints (unchanged)
 
@@ -44,3 +47,5 @@ Ask Lead in chat → bots drive **Mac + browser** without babysitting → Engine
 - Grok helpers: finalizer + Studio Engineer (+ Ultra Verifier for evidence checks).
 
 Shell path: `run-maestro-flow.sh` also invokes `install-app-on-sim.sh` when the app is missing (or `STUDIO_MAESTRO_INSTALL=1`).
+
+Dirty-sim (2026-09-16): `reset-app-on-sim.sh` + `STUDIO_MAESTRO_RESET=1` (default) + onboard `clearState: true`; prefer Release install for Maestro (embeds JS). Prove exit=0 `20260916T055901Z`. Studio restarted on `0807827`.
