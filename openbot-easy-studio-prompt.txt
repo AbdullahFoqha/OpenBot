@@ -1,0 +1,76 @@
+Improve my existing OpenBot Studio so I can use it daily without remembering ports, process IDs, model shims, or terminal locations. Implement the changes and verify them. Continue in the OpenBot checkout with our current progress.
+
+GOAL
+One launcher, one project selector, one place to give the team work, a real coding test, and clear controls for fresh conversations, pausing, stopping, and restarting.
+
+1. INSPECT AND PRESERVE
+Read the repo instructions and setup checkpoints. Inspect the actual launch scripts, UI, worker adapters, project configuration, process ownership, and persistence. Preserve working changes, roles, repository privacy, and storage configuration. Reuse existing components and supervision rather than building another application. Do not disturb unrelated AO sessions or reset databases.
+
+Keep the working manager provider. Coding workers should use my installed, authenticated Cursor CLI and its available account/model allowance. Verify the installed executable, login, model identifier, Agent mode, edit permissions, and terminal tools. Never extract subscription tokens, enable paid overages, or silently switch providers. If real worker execution is missing, implement it before claiming the studio can code.
+
+2. ONE LAUNCHER
+Provide one reliable macOS entry point: reuse the existing desktop launcher if present, otherwise create a double-clickable Start-Studio.command inside the studio checkout. It must work while the web server is stopped.
+
+Launch only missing, owned services, wait for actual health checks, then open the real app URL. Running it twice must not create duplicate processes. Resolve paths independently of the terminal's current directory. Diagnose occupied ports and stale process records; never kill an unrelated process to free a port.
+
+Reuse the existing service commands behind a small project-owned wrapper, such as ./studio start|open|status|check|stop|restart. These are proposed commands to implement, not assumed existing commands. They must work from an absolute path too. No recurring schedules or automatic startup at login.
+
+Stop/restart must preserve data and handle active jobs explicitly. Do not terminate an active job silently. Show active work and require choosing to wait for it or cancel it before a disruptive restart. Restart should restore the selected project and saved records without blindly replaying jobs.
+
+3. A SIMPLE STUDIO SCREEN
+Make the existing UI provide:
+- Project: display name, verified absolute repository path, and current task's branch/worktree.
+- Team: role, actual execution backend/model when reported, and availability.
+- Task input: a goal and acceptance criteria, with a clear Run Task action.
+- Active work: owner, progress, current action, blocker, and evidence.
+- Setup status: specific failing component and one useful next action.
+
+Use a native folder picker when supported; otherwise accept a pasted absolute path. Validate it on the host, resolve the Git root, and persist the selection. The expected product is ~/Documents/projects/pocket-love, but older records say poket-love: inspect and resolve the real path. Never silently select a similarly named repo.
+
+Each coding assignment creates or reuses its own authorized branch/worktree and starts the worker there. Loading the studio from one folder must not make bots edit that folder. Apply scoped permissions; a working directory is not a filesystem sandbox. Changing projects must not redirect running jobs.
+
+Keep technical logs, ports, and provider details under expandable diagnostics. Distinguish Online, Needs Login, Limit Reached, Not Tested, and Coding Verified. A healthy server does not mean coding is verified. Tie verification to the tested project/backend/configuration and timestamp.
+
+4. CLEAR CONTROL BEHAVIOR
+Implement these actions with these exact meanings:
+- Run Task: submit one bounded assignment through the manager and real worker dispatcher. Prevent duplicate jobs from double-clicks or retries.
+- Pause Queue: stop assigning new work; already running work continues. Say that plainly in the UI.
+- Resume Queue: resume previously authorized queued work, respecting limits.
+- Stop Task: interrupt the identified job and its owned child processes, preserve its files and evidence, and show Cancelled or Interrupted. Do not claim it stopped before verifying termination.
+- Continue Task: validate the saved checkpoint and current repo state, then resume the authorized unfinished work without duplicating completed actions.
+- New Chat: start a fresh manager conversation and backend session. Retain the selected project, roles, permissions, workflow, and durable decisions. Load a concise current-state summary instead of replaying the full old transcript. Keep previous chats accessible. Running jobs remain tracked and their results remain accessible; this action does not automatically cancel or resume work.
+- Clear Activity: clear only the visible activity feed/filter. Preserve durable logs, chats, tasks, and evidence.
+- Stop/Restart Studio: use the real service lifecycle mechanism; expose these in the existing desktop shell or launcher if the web UI cannot safely perform them.
+
+Do not add an ambiguous destructive Reset Everything button. Project/task state must live in durable storage, not depend on one chat's context window.
+
+5. MAKE TESTING OBVIOUS
+Add two distinct actions:
+A. Check Setup: inspect services, project path, client availability, supported login status, permissions/configuration, and storage connectivity without intentionally starting model inference.
+B. Run Coding Test: visibly label that it uses the selected model allowance. Run once when clicked; never automatically on every startup or refresh.
+
+The coding test must exercise the normal OpenBot manager-to-worker route:
+- Prepare a disposable fixture with a known bug and a failing check in an isolated test worktree.
+- Have the manager assign its repair to the Cursor Engineer.
+- Cursor must edit the fixture and run the check.
+- Independently inspect the diff and rerun the check against the same bytes.
+- Return the actual result to the manager and display the evidence.
+
+Show job/session IDs, backend/model when available, worktree, changed files, before/after check results, exit codes, and a readable diff. Keep test changes out of the shipping branch. Do not attribute a repair made by the setup Claude session to Cursor. A standalone CLI test or a bot saying "done" is insufficient.
+
+Show precise blockers for login, quota, permission, timeout, or unavailable tools. Display unknown usage as unknown. Preserve the team limit of three active execution tasks, one primary task per bot, and independent review. Idle profiles must not continuously exchange messages or consume model calls.
+
+6. VERIFY AND HAND OFF
+Complete a small working slice first: launcher, project selection, one task, real coding proof. Then finish the remaining controls. Run focused checks for lifecycle, duplicate submission, cancellation, persistence, project isolation, and fresh-chat reloading of rules.
+
+Exercise the real UI, capture useful screenshots, and verify services remain healthy after a job and a restart. Test empty, loading, blocked, failed, and completed states. If UI interaction is unavailable, report what was tested through the API and give me one exact UI check; do not claim visual verification.
+
+Show the actual storage location/provider and preserve our privacy requirement. Do not label hosted storage or cloud inference as fully local. Do not add new external accounts or dependencies just for this dashboard.
+
+Finish with:
+- Actual changes and evidence of the Cursor-produced code repair.
+- Any remaining blocker, honestly labeled.
+- A short table: what I want to do | button/command | what it preserves.
+- A START-HERE.md with at most ten everyday steps, exact launcher location, actual app URL, and how to select a project, test, run, pause, continue, start fresh, and stop.
+
+Implement all available authorized work now. Ask me only for genuine native login/permission interaction or a material unresolved decision after completing the other work.

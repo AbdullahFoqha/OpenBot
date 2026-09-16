@@ -77,6 +77,8 @@ export type TaskStore = {
     ownerBotId: string | null;
     parentTaskId: string | null;
     dependsOn: string[];
+    goal: string | null;
+    acceptanceCriteria: string | null;
   } | null>;
   /** What is ready to be picked up, oldest first, so a queue does not starve its own tail. */
   ready: (productId: string) => Promise<{ id: string; kind: TaskKind }[]>;
@@ -212,6 +214,8 @@ export function createTaskStore(database: Database): TaskStore {
           ownerBotId: studioTasks.ownerBotId,
           parentTaskId: studioTasks.parentTaskId,
           dependsOn: studioTasks.dependsOn,
+          goal: studioTasks.goal,
+          acceptanceCriteria: studioTasks.acceptanceCriteria,
         })
         .from(studioTasks)
         .where(eq(studioTasks.id, taskId))

@@ -32,6 +32,7 @@ import {
 } from "./computer/server-tools";
 import { createAdmission } from "./studio/admission";
 import { createDelegationStore } from "./studio/delegation-store";
+import { createTaskStore } from "./studio/task-store";
 import { loadStudioPolicy } from "./studio/policy";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
@@ -430,6 +431,7 @@ if (!studioPolicyOutcome.ok) {
 }
 const studioPolicy = studioPolicyOutcome.policy;
 const admission = createAdmission(database, studioPolicy);
+const studioTaskStore = createTaskStore(database);
 
 void recordAuditEvent(bootAuditStore, {
   eventType: "computer.policy_loaded",
@@ -1429,6 +1431,11 @@ const app = createApp(
     revoke: (agentId: string) => delegationStore.revoke(agentId),
     list: () => delegationStore.list(),
   },
+  // The studio dashboard's routes, built inside createApp from these three so they share its own
+  // requireUser middleware rather than one built here.
+  admission,
+  studioTaskStore,
+  studioPolicy,
 );
 
 /** What each server-owned tool actually does, once its operation has been claimed. */

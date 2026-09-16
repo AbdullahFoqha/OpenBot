@@ -128,6 +128,21 @@ export const studioProducts = pgTable(
      * statuses advance independently is the failure mode a product board is supposed to prevent.
      */
     boardRef: text("board_ref"),
+    /**
+     * The verified absolute path on this Mac, resolved to its git root at selection time.
+     *
+     * Resolved and persisted rather than re-derived from `repositoryUrl` on every read: a
+     * similarly-named checkout is exactly the mistake persisting the checked path, once, exists to
+     * prevent.
+     */
+    localPath: text("local_path"),
+    /**
+     * Stops the queue from admitting new work without touching what is already running.
+     *
+     * A flag on the product rather than in memory, so a server restart does not silently resume
+     * admission a person deliberately paused.
+     */
+    queuePaused: boolean("queue_paused").notNull().default(false),
     activatedAt: createdAt(),
     /** Set when the product stops admitting work. The rule is one active, not one ever. */
     retiredAt: timestamp("retired_at", { withTimezone: true }),
@@ -198,6 +213,10 @@ export const studioTasks = pgTable(
      * integrated" is a join, and a JSON blob would make it a scan and a parse on every claim.
      */
     dependsOn: text("depends_on").array().notNull().default([]),
+    /** What the person asked for, in their own words. Shown back to them on the Active work row. */
+    goal: text("goal"),
+    /** What "done" means for this task, written down before the worker starts. */
+    acceptanceCriteria: text("acceptance_criteria"),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
@@ -209,6 +228,31 @@ export const studioTasks = pgTable(
     index("studio_tasks_parent_idx").on(table.parentTaskId),
   ],
 );
+
+/**
+ * What a run actually did, independent of what it claimed.
+ *
+ * ONE ROW PER TASK, WRITTEN BY THE SIDE THAT VERIFIED IT. A worker's own "done" is not this row;
+ * this is filled in after the diff and the check were inspected independently of the process that
+ * produced them, which is the whole reason a coding test counts as proof rather than a transcript.
+ */
+export const studioEvidence = pgTable("studio_evidence", {
+  taskId: text("task_id")
+    .primaryKey()
+    .references(() => studioTasks.id, { onDelete: "cascade" }),
+  backend: text("backend"),
+  requestedModel: text("requested_model"),
+  reportedModel: text("reported_model"),
+  sessionId: text("session_id"),
+  worktreePath: text("worktree_path"),
+  changedFiles: text("changed_files").array().notNull().default([]),
+  diff: text("diff"),
+  checkBefore: jsonb("check_before"),
+  checkAfter: jsonb("check_after"),
+  ok: boolean("ok"),
+  blocker: text("blocker"),
+  createdAt: createdAt(),
+});
 
 export const studioReservationState = pgEnum("studio_reservation_state", [
   /** Somebody is on it right now, and is renewing. */

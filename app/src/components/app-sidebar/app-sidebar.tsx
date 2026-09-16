@@ -6,6 +6,7 @@ import {
   IconSearch,
   IconSettings,
   IconShieldLock,
+  IconTool,
 } from "@tabler/icons-react";
 import {
   useInfiniteQuery,
@@ -362,6 +363,25 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 <IconBolt />
               </div>
               <span className="text-sm trackint-tight">Agents</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              className="hover:bg-foreground/5 h-10"
+              render={(props) => (
+                <Link
+                  {...props}
+                  to="/studio"
+                  activeProps={{
+                    className: "bg-foreground/5",
+                  }}
+                />
+              )}
+            >
+              <div className="size-[28px] flex items-center justify-center">
+                <IconTool />
+              </div>
+              <span className="text-sm trackint-tight">Studio</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           {/* Routines live on each coworker's own dialog now, not as a nav destination: the

@@ -1,5 +1,6 @@
 import type { BaseEvent, Message, RunAgentInput } from "@ag-ui/client";
 import { AbstractAgent, HttpAgent } from "@ag-ui/client";
+import { createOpenAI } from "@ai-sdk/openai";
 import type { BuiltInAgentConfiguration } from "@copilotkit/runtime/v2";
 import {
   BuiltInAgent,
@@ -328,7 +329,18 @@ export function builtInAgentConfiguration(
   const standing = standingInstructionsGuidance(standingInstructions);
 
   return {
-    model: `${model.provider}/${model.defaultModel}`,
+    /*
+     * A LanguageModel instance, not the "openai/model" string form.
+     *
+     * resolveModel() (@copilotkit/runtime's agent/index.mjs) turns that string into
+     * createOpenAI({...})(model), which is the OpenAI *Responses* API — this deployment's
+     * OPENAI_BASE_URL is a local Chat-Completions-only shim (studio-local/claude-control-model,
+     * backed by the Claude subscription), and Responses 404s against it. Building the model
+     * ourselves with .chat() targets Chat Completions instead, which the shim does implement.
+     */
+    model: createOpenAI({ apiKey, baseURL: process.env.OPENAI_BASE_URL }).chat(
+      model.defaultModel,
+    ),
     /*
      * The package's role, then the person's own standing instructions, then what this Bot actually
      * holds, then the computer.

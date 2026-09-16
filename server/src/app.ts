@@ -12,6 +12,10 @@ import {
 import type { BotAccessCheck } from "./agents/profile-policy";
 import type { AgentProfileStore } from "./agents/profile-store";
 import { createAgentRoutes } from "./agents/routes";
+import type { Admission } from "./studio/admission";
+import type { StudioPolicy } from "./studio/policy";
+import { createStudioRoutes } from "./studio/routes";
+import type { TaskStore } from "./studio/task-store";
 import {
   AuditQueryError,
   type AuditEventType,
@@ -336,6 +340,20 @@ export function createApp(
    * registration routes unmounted and the flat remote refusal in place.
    */
   delegationRegistry?: DelegationRegistry,
+  /**
+   * The studio's own admission gate, task store and policy — the dashboard's task submission,
+   * stop/continue and coding-test routes are built from these inside this function, using the same
+   * `requireUser` every other route here uses. Appended last, like every optional store above it:
+   * positional, so inserting one anywhere else silently shifts every existing call site's arguments
+   * by one.
+   *
+   * Absent leaves `/api/studio` unmounted rather than mounted and refusing every call, the same
+   * degraded shape every other optional store here takes: a deployment that never built the studio
+   * dependencies has no door for this at all, not a locked one.
+   */
+  studioAdmission?: Admission,
+  studioTaskStore?: TaskStore,
+  studioPolicy?: StudioPolicy,
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -1441,6 +1459,19 @@ export function createApp(
           createIntelligenceClient(config.runtime.intelligence),
         ),
       ),
+    );
+  }
+
+  if (studioAdmission && studioTaskStore && studioPolicy && attachmentDatabase) {
+    app.route(
+      "/api/studio",
+      createStudioRoutes({
+        database: attachmentDatabase,
+        admission: studioAdmission,
+        taskStore: studioTaskStore,
+        policy: studioPolicy,
+        requireUser,
+      }),
     );
   }
 

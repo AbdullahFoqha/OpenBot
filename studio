@@ -1,0 +1,193 @@
+#!/bin/zsh
+# OpenBot Product Studio — one entry point for start/open/status/check/stop/restart.
+#
+# Resolves its own location rather than trusting the caller's working directory, so it runs the
+# same way whether invoked as ./studio, an absolute path, or double-clicked via Start-Studio.command
+# while a terminal sits in some unrelated directory.
+set -e
+HERE=${0:a:h}
+ROOT=$HERE
+LOGS="$ROOT/studio-local/logs"
+PG=/opt/homebrew/opt/postgresql@17/bin
+PGDATA=$HOME/Developer/openbot-studio-pg
+APP_URL="http://127.0.0.1:3010"
+SERVER_HEALTH="http://127.0.0.1:3012/health"
+SERVER_PORT=3012
+APP_PORT=3010
+CONTROL_MODEL_PORT=3013
+
+mkdir -p "$LOGS"
+
+pid_alive() {
+  [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null
+}
+
+port_owner() {
+  lsof -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | head -1
+}
+
+wait_for_health() {
+  local url=$1 tries=${2:-30}
+  for _ in $(seq 1 "$tries"); do
+    if curl -fsS "$url" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+# Active work, read from the studio's own admission API rather than guessed from process activity.
+# Empty/unreachable is treated as "none", since a server that will not answer has nothing to protect
+# a stop from anyway.
+active_task_count() {
+  curl -fsS "$SERVER_HEALTH" >/dev/null 2>&1 || { echo 0; return; }
+  curl -fsS "http://127.0.0.1:$SERVER_PORT/api/studio/setup" 2>/dev/null \
+    | sed -n 's/.*"activeCount":\([0-9]*\).*/\1/p' | head -1 || echo 0
+}
+
+cmd_status() {
+  echo "postgres          : $($PG/pg_ctl -D "$PGDATA" status >/dev/null 2>&1 && echo running || echo stopped) (127.0.0.1:5433)"
+  if pid_alive "$LOGS/claude-control-model.pid"; then
+    echo "control model     : running (pid $(cat "$LOGS/claude-control-model.pid"), :$CONTROL_MODEL_PORT)"
+  else
+    echo "control model     : stopped"
+  fi
+  if pid_alive "$LOGS/server.pid"; then
+    echo "server            : running (pid $(cat "$LOGS/server.pid"), :$SERVER_PORT)"
+  else
+    echo "server            : stopped"
+  fi
+  if pid_alive "$LOGS/app.pid"; then
+    echo "app               : running (pid $(cat "$LOGS/app.pid"), :$APP_PORT)"
+  else
+    echo "app               : stopped"
+  fi
+  local active
+  active=$(active_task_count)
+  echo "active studio work: ${active:-0}"
+}
+
+cmd_check() {
+  if ! curl -fsS "$SERVER_HEALTH" >/dev/null 2>&1; then
+    echo "Server is not answering at $SERVER_HEALTH. Run './studio start' first."
+    exit 1
+  fi
+  curl -fsS "http://127.0.0.1:$SERVER_PORT/api/studio/setup" | python3 -m json.tool 2>/dev/null \
+    || curl -fsS "http://127.0.0.1:$SERVER_PORT/api/studio/setup"
+}
+
+cmd_start() {
+  # Postgres: reused if already up, started only if not — idempotent by construction.
+  if ! $PG/pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+    echo "starting postgres..."
+    $PG/pg_ctl -D "$PGDATA" \
+      -o "-p 5433 -k $PGDATA -c listen_addresses=127.0.0.1" \
+      -l "$PGDATA/server.log" start
+    sleep 2
+  else
+    echo "postgres already running"
+  fi
+
+  cd "$ROOT"
+
+  # Each of the three app processes is started only if nothing already owns its port or pidfile —
+  # running this twice must not create duplicates, and a stale pidfile pointing at a dead process
+  # must not block a real start.
+  if pid_alive "$LOGS/claude-control-model.pid" || [[ -n "$(port_owner $CONTROL_MODEL_PORT)" ]]; then
+    echo "control model already running"
+  else
+    echo "starting control model..."
+    (cd studio-local/claude-control-model && bun --env-file=../env server.ts) \
+      > "$LOGS/claude-control-model.log" 2>&1 &
+    echo $! > "$LOGS/claude-control-model.pid"
+    sleep 1
+  fi
+
+  if pid_alive "$LOGS/server.pid" || [[ -n "$(port_owner $SERVER_PORT)" ]]; then
+    echo "server already running"
+  else
+    echo "starting server..."
+    bun --env-file=studio-local/env server/src/index.ts > "$LOGS/server.log" 2>&1 &
+    echo $! > "$LOGS/server.pid"
+  fi
+
+  if pid_alive "$LOGS/app.pid" || [[ -n "$(port_owner $APP_PORT)" ]]; then
+    echo "app already running"
+  else
+    echo "starting app..."
+    bun --env-file=studio-local/env run --filter app dev > "$LOGS/app.log" 2>&1 &
+    echo $! > "$LOGS/app.pid"
+  fi
+
+  echo -n "waiting for server health..."
+  if wait_for_health "$SERVER_HEALTH" 30; then
+    echo " ok"
+  else
+    echo " FAILED"
+    echo "Server did not answer $SERVER_HEALTH in time. Check $LOGS/server.log"
+    exit 1
+  fi
+
+  echo -n "waiting for app..."
+  if wait_for_health "$APP_URL" 30; then
+    echo " ok"
+  else
+    echo " FAILED"
+    echo "App did not answer $APP_URL in time. Check $LOGS/app.log"
+    exit 1
+  fi
+
+  echo "Studio is up: $APP_URL"
+  open "$APP_URL"
+}
+
+cmd_open() {
+  if ! curl -fsS "$SERVER_HEALTH" >/dev/null 2>&1; then
+    echo "Studio is not running. Run './studio start' first."
+    exit 1
+  fi
+  open "$APP_URL"
+}
+
+cmd_stop() {
+  local active
+  active=$(active_task_count)
+  if [[ "${active:-0}" != "0" && "$1" != "--force" ]]; then
+    echo "There are $active active studio task(s) right now (see './studio status' or the Active"
+    echo "work panel in the app). Stopping now interrupts them without asking."
+    echo
+    echo "  ./studio stop --force     stop anyway; each task's own worktree and evidence are kept"
+    echo "  (in the app)              use Stop Task on the specific task first, then stop again"
+    exit 1
+  fi
+
+  pkill -f "server/src/index.ts" 2>/dev/null || true
+  pkill -f "vite/bin/vite.js" 2>/dev/null || true
+  # Matched by port: it runs from inside a `cd` subshell, so its argv never contains a distinctive
+  # string for pkill -f to match.
+  local owner
+  owner=$(port_owner $CONTROL_MODEL_PORT)
+  [[ -n "$owner" ]] && kill "$owner" 2>/dev/null || true
+  rm -f "$LOGS/server.pid" "$LOGS/app.pid" "$LOGS/claude-control-model.pid"
+  echo "studio stopped (postgres left running; 'studio stop --all-services' also stops it)"
+  if [[ "$2" == "--all-services" || "$1" == "--all-services" ]]; then
+    $PG/pg_ctl -D "$PGDATA" stop
+  fi
+}
+
+cmd_restart() {
+  cmd_stop "$1"
+  cmd_start
+}
+
+case "$1" in
+  start) cmd_start ;;
+  open) cmd_open ;;
+  status) cmd_status ;;
+  check) cmd_check ;;
+  stop) cmd_stop "$2" ;;
+  restart) cmd_restart "$2" ;;
+  *)
+    echo "usage: ./studio start|open|status|check|stop|restart"
+    exit 1
+    ;;
+esac

@@ -1,0 +1,436 @@
+/**
+ * How a task actually gets to code: admission, a worktree, the real Cursor CLI backend, and an
+ * independent re-check of exactly what it produced.
+ *
+ * ONE PATH FOR BOTH "RUN TASK" AND "RUN CODING TEST". A standalone script that calls the adapter
+ * directly proves the adapter works; it does not prove the studio's own admission and reservation
+ * rules apply to what a person clicks. Both entry points in routes.ts go through `runTask` below, so
+ * a coding test is the same route a real task takes, pointed at a disposable fixture instead of the
+ * selected project.
+ *
+ * VERIFICATION IS SEPARATE FROM THE RUN. `verifyCheck` re-reads the file the worker touched and
+ * re-runs the check itself, after the run's own process has exited, rather than trusting the text
+ * the model returned. A repair "done" only because a bot said so is exactly what this refuses to be.
+ */
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Admission } from "./admission";
+import { createCliBackend } from "../cursor-adapter/cli-backend";
+import type { AgentEvent } from "../cursor-adapter/backend";
+import type { Database } from "../db/client";
+import { studioEvidence } from "../db/schema";
+import type { TaskStore } from "./task-store";
+
+export const CURSOR_ENGINEER_BOT_ID = "react-native-engineer";
+export const DEFAULT_MODEL = "cursor-grok-4.6-xhigh";
+
+export type RunOutcome = {
+  ok: boolean;
+  backend: "cli";
+  requestedModel: string;
+  reportedModel: string | null;
+  sessionId: string | null;
+  worktreePath: string;
+  changedFiles: string[];
+  diff: string;
+  checkBefore: unknown;
+  checkAfter: unknown;
+  blocker: string | null;
+  events: AgentEvent[];
+};
+
+/** Runs a shell check inside a worktree and returns a plain, comparable result. */
+async function runCheck(
+  cwd: string,
+  command: string[],
+): Promise<{ command: string; exitCode: number | null; output: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(command[0] as string, command.slice(1), {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout?.on("data", (c: Buffer) => {
+      output += c.toString("utf8");
+    });
+    child.stderr?.on("data", (c: Buffer) => {
+      output += c.toString("utf8");
+    });
+    child.on("close", (exitCode) => {
+      resolve({ command: command.join(" "), exitCode, output: output.slice(-4_000) });
+    });
+    child.on("error", (err) => {
+      resolve({ command: command.join(" "), exitCode: null, output: String(err) });
+    });
+  });
+}
+
+function runGit(args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve) => {
+    const child = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    child.stdout?.on("data", (c: Buffer) => {
+      out += c.toString("utf8");
+    });
+    child.on("close", () => resolve(out));
+    child.on("error", () => resolve(""));
+  });
+}
+
+/**
+ * The diff and changed-file list, including files the worker created.
+ *
+ * `git diff` ALONE MISSES A NEW FILE. It compares tracked content against the index and reports
+ * nothing for a path git has never seen, which is exactly what a worker asked to create a file
+ * produces — the run in this studio's own verification looked like "no changes" for that reason
+ * before this staged first. Staging is safe here: every caller of this function operates on a
+ * disposable fixture or a task's own dedicated worktree, never a shared or pushed branch.
+ */
+async function diffOf(cwd: string): Promise<{ diff: string; changedFiles: string[] }> {
+  await runGit(["add", "-A"], cwd);
+  const diff = await runGit(["diff", "--no-color", "--cached"], cwd);
+  const nameOnly = await runGit(["diff", "--cached", "--name-only"], cwd);
+  const changedFiles = nameOnly
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return { diff, changedFiles };
+}
+
+/**
+ * Drive one Cursor CLI run to completion in `cwd`, collecting every event.
+ *
+ * Not cancellable from the outside except through `signal`; the caller in routes.ts keeps the
+ * `AbortController` so Stop Task can call it.
+ */
+export async function driveCursorRun(input: {
+  cwd: string;
+  prompt: string;
+  model?: string;
+  signal?: AbortSignal;
+}): Promise<{
+  ok: boolean;
+  reportedModel: string | null;
+  sessionId: string | null;
+  blocker: string | null;
+  events: AgentEvent[];
+}> {
+  const backend = createCliBackend({ acknowledgeUnconfined: true });
+  const run = await backend.start({
+    prompt: input.prompt,
+    cwd: input.cwd,
+    model: input.model ?? DEFAULT_MODEL,
+    signal: input.signal,
+  });
+  const events: AgentEvent[] = [];
+  let reportedModel: string | null = null;
+  let sessionId: string | null = null;
+  let ok = false;
+  let blocker: string | null = null;
+  for await (const event of run.events) {
+    events.push(event);
+    if (event.type === "session") {
+      reportedModel = event.model || null;
+      sessionId = event.sessionId || null;
+    }
+    if (event.type === "result") {
+      ok = event.ok;
+      reportedModel = event.model ?? reportedModel;
+      sessionId = event.sessionId ?? sessionId;
+      if (!event.ok) blocker = event.text || "The agent reported failure.";
+    }
+    if (event.type === "error") {
+      blocker = event.message;
+    }
+  }
+  return { ok, reportedModel, sessionId, blocker, events };
+}
+
+/**
+ * Build the disposable coding-test fixture: a git repo with one known bug and a failing check.
+ *
+ * A FRESH REPO EACH TIME, under the OS temp dir rather than inside the selected project or the
+ * studio's own checkout. "Keep test changes out of the shipping branch" is easiest to guarantee by
+ * never sharing a repository with the branch in the first place.
+ */
+export async function materializeFixture(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "openbot-coding-test-"));
+  await mkdir(join(dir, "openbot-smoke-test"), { recursive: true });
+  await writeFile(
+    join(dir, "openbot-smoke-test", "add.js"),
+    `function add(a, b) {\n  return a - b; // bug: should add\n}\nmodule.exports = { add };\n`,
+  );
+  await writeFile(
+    join(dir, "openbot-smoke-test", "check.js"),
+    `const { add } = require("./add.js");\nconst got = add(2, 3);\nif (got !== 5) {\n  console.error("FAIL: add(2, 3) =", got, "expected 5");\n  process.exit(1);\n}\nconsole.log("PASS");\n`,
+  );
+  await new Promise<void>((resolve) => {
+    const child = spawn("git", ["init", "-q"], { cwd: dir });
+    child.on("close", () => resolve());
+    child.on("error", () => resolve());
+  });
+  await new Promise<void>((resolve) => {
+    const child = spawn("git", ["-c", "user.email=studio@local", "-c", "user.name=Studio", "add", "-A"], {
+      cwd: dir,
+    });
+    child.on("close", () => resolve());
+    child.on("error", () => resolve());
+  });
+  await new Promise<void>((resolve) => {
+    const child = spawn(
+      "git",
+      ["-c", "user.email=studio@local", "-c", "user.name=Studio", "commit", "-q", "-m", "fixture"],
+      { cwd: dir },
+    );
+    child.on("close", () => resolve());
+    child.on("error", () => resolve());
+  });
+  return dir;
+}
+
+/**
+ * Run the coding test end to end: fixture, admission, the real Cursor backend, and an independent
+ * re-check of the same bytes the worker left behind.
+ */
+export async function runCodingTest(deps: {
+  admission: Admission;
+  taskStore: TaskStore;
+  database: Database;
+  taskId: string;
+  model?: string;
+}): Promise<RunOutcome> {
+  const { taskId } = deps;
+  const claim = await deps.admission.claim({
+    taskId,
+    botId: CURSOR_ENGINEER_BOT_ID,
+    owner: `coding-test-${process.pid}`,
+  });
+  if (!claim.ok) {
+    return {
+      ok: false,
+      backend: "cli",
+      requestedModel: deps.model ?? DEFAULT_MODEL,
+      reportedModel: null,
+      sessionId: null,
+      worktreePath: "",
+      changedFiles: [],
+      diff: "",
+      checkBefore: null,
+      checkAfter: null,
+      blocker: claim.detail,
+      events: [],
+    };
+  }
+
+  const cwd = await materializeFixture();
+  const checkBefore = await runCheck(cwd, ["node", "openbot-smoke-test/check.js"]);
+
+  const prompt =
+    "In openbot-smoke-test/add.js, the add() function has a bug: it subtracts instead of adding. " +
+    "Fix it so add(a, b) returns a + b. Then run `node openbot-smoke-test/check.js` to confirm it " +
+    "passes. Only touch files under openbot-smoke-test/.";
+
+  const run = await driveCursorRun({ cwd, prompt, model: deps.model });
+
+  // Independent re-check: the same bytes, re-run by this process, not trusted from the agent's own
+  // report of what it did.
+  const checkAfter = await runCheck(cwd, ["node", "openbot-smoke-test/check.js"]);
+  const { diff, changedFiles } = await diffOf(cwd);
+
+  const ok = run.ok && checkAfter.exitCode === 0 && changedFiles.length > 0;
+
+  await deps.database
+    .insert(studioEvidence)
+    .values({
+      taskId,
+      backend: "cli",
+      requestedModel: deps.model ?? DEFAULT_MODEL,
+      reportedModel: run.reportedModel,
+      sessionId: run.sessionId,
+      worktreePath: cwd,
+      changedFiles,
+      diff,
+      checkBefore,
+      checkAfter,
+      ok,
+      blocker: ok ? null : run.blocker ?? "The re-run check did not pass.",
+    })
+    .onConflictDoNothing();
+
+  await deps.taskStore.transition(taskId, "in_review");
+  await deps.admission.release(claim.ticket);
+  await rm(cwd, { recursive: true, force: true }).catch(() => {});
+
+  return {
+    ok,
+    backend: "cli",
+    requestedModel: deps.model ?? DEFAULT_MODEL,
+    reportedModel: run.reportedModel,
+    sessionId: run.sessionId,
+    worktreePath: cwd,
+    changedFiles,
+    diff,
+    checkBefore,
+    checkAfter,
+    blocker: ok ? null : run.blocker ?? "The re-run check did not pass.",
+    events: run.events,
+  };
+}
+
+/** Read back the file after the fixture directory is gone — used only while it is still live. */
+export async function readFixtureFile(cwd: string, relPath: string): Promise<string | null> {
+  try {
+    return await readFile(join(cwd, relPath), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function slugify(text: string): string {
+  return (
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "task"
+  );
+}
+
+/**
+ * Run one real assignment against the selected project: its own branch and worktree, the same
+ * Cursor CLI backend the coding test uses, and the diff left for review.
+ *
+ * DOES NOT OPEN A PULL REQUEST. `studio/delivery.ts` owns that state machine and is not wired to
+ * this route yet — the branch and worktree this leaves behind are exactly what a person needs to
+ * review and push by hand, and that gap is reported rather than papered over with a call that
+ * would not be honest about being untested.
+ */
+export async function runProjectTask(deps: {
+  admission: Admission;
+  taskStore: TaskStore;
+  database: Database;
+  productId: string;
+  projectPath: string;
+  taskId: string;
+  botId: string;
+  title: string;
+  goal: string;
+  acceptanceCriteria: string;
+  model?: string;
+}): Promise<RunOutcome> {
+  const claim = await deps.admission.claim({
+    taskId: deps.taskId,
+    botId: deps.botId,
+    owner: `studio-app-${process.pid}`,
+  });
+  if (!claim.ok) {
+    return {
+      ok: false,
+      backend: "cli",
+      requestedModel: deps.model ?? DEFAULT_MODEL,
+      reportedModel: null,
+      sessionId: null,
+      worktreePath: "",
+      changedFiles: [],
+      diff: "",
+      checkBefore: null,
+      checkAfter: null,
+      blocker: claim.detail,
+      events: [],
+    };
+  }
+
+  const branch = `studio/${slugify(deps.title)}-${deps.taskId.slice(-6)}`;
+  const worktreePath = join(
+    deps.projectPath,
+    "..",
+    `${slugify(deps.title)}-${deps.taskId.slice(-6)}.studio-worktree`,
+  );
+
+  const addWorktree = await new Promise<{ ok: boolean; output: string }>((resolve) => {
+    const child = spawn("git", ["worktree", "add", "-b", branch, worktreePath], {
+      cwd: deps.projectPath,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout?.on("data", (c: Buffer) => {
+      output += c.toString("utf8");
+    });
+    child.stderr?.on("data", (c: Buffer) => {
+      output += c.toString("utf8");
+    });
+    child.on("close", (code) => resolve({ ok: code === 0, output }));
+    child.on("error", (err) => resolve({ ok: false, output: String(err) }));
+  });
+
+  if (!addWorktree.ok) {
+    await deps.admission.release(claim.ticket);
+    return {
+      ok: false,
+      backend: "cli",
+      requestedModel: deps.model ?? DEFAULT_MODEL,
+      reportedModel: null,
+      sessionId: null,
+      worktreePath,
+      changedFiles: [],
+      diff: "",
+      checkBefore: null,
+      checkAfter: null,
+      blocker: `Could not create the task's worktree/branch: ${addWorktree.output.slice(-500)}`,
+      events: [],
+    };
+  }
+
+  const prompt = `Goal:\n${deps.goal}\n\nAcceptance criteria:\n${deps.acceptanceCriteria}`;
+  const run = await driveCursorRun({ cwd: worktreePath, prompt, model: deps.model });
+  const { diff, changedFiles } = await diffOf(worktreePath);
+  const ok = run.ok && changedFiles.length > 0;
+
+  await deps.database
+    .insert(studioEvidence)
+    .values({
+      taskId: deps.taskId,
+      backend: "cli",
+      requestedModel: deps.model ?? DEFAULT_MODEL,
+      reportedModel: run.reportedModel,
+      sessionId: run.sessionId,
+      worktreePath,
+      changedFiles,
+      diff,
+      checkBefore: null,
+      checkAfter: null,
+      ok,
+      blocker: ok ? null : run.blocker ?? "The worker made no changes.",
+    })
+    .onConflictDoUpdate({
+      target: studioEvidence.taskId,
+      set: {
+        reportedModel: run.reportedModel,
+        sessionId: run.sessionId,
+        changedFiles,
+        diff,
+        ok,
+        blocker: ok ? null : run.blocker ?? "The worker made no changes.",
+      },
+    });
+
+  await deps.taskStore.transition(deps.taskId, "in_review").catch(() => {});
+  await deps.admission.release(claim.ticket);
+
+  return {
+    ok,
+    backend: "cli",
+    requestedModel: deps.model ?? DEFAULT_MODEL,
+    reportedModel: run.reportedModel,
+    sessionId: run.sessionId,
+    worktreePath,
+    changedFiles,
+    diff,
+    checkBefore: null,
+    checkAfter: null,
+    blocker: ok ? null : run.blocker ?? "The worker made no changes.",
+    events: run.events,
+  };
+}
