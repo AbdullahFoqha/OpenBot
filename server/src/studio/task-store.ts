@@ -67,6 +67,13 @@ export type TaskStore = {
   ) => Promise<{ ok: true } | { ok: false; reason: string }>;
   /** Blocked is a flag on the task it is blocked in, not a state it moves to. */
   setBlocked: (taskId: string, reason: string | null) => Promise<void>;
+  /**
+   * User stop / hard interrupt: set the blocked reason and leave `in_progress` so Active Work
+   * does not keep a forever-running card. Settles to `in_review`, matching runner completion
+   * (verify fail / success both land there with an optional blocker). Other states only get the
+   * flag — there is no `cancelled` enum value today.
+   */
+  markInterrupted: (taskId: string, reason: string) => Promise<void>;
   read: (taskId: string) => Promise<{
     id: string;
     productId: string;
@@ -200,6 +207,25 @@ export function createTaskStore(database: Database): TaskStore {
         .update(studioTasks)
         .set({ blockedReason: reason, updatedAt: sql`now()` })
         .where(eq(studioTasks.id, taskId));
+    },
+
+    async markInterrupted(taskId, reason) {
+      await database
+        .update(studioTasks)
+        .set({ blockedReason: reason, updatedAt: sql`now()` })
+        .where(eq(studioTasks.id, taskId));
+      const [task] = await database
+        .select({ state: studioTasks.state })
+        .from(studioTasks)
+        .where(eq(studioTasks.id, taskId))
+        .limit(1);
+      if (task?.state === "in_progress") {
+        // One legal step forward; same landing as runProjectTask after Cursor exits.
+        await database
+          .update(studioTasks)
+          .set({ state: "in_review", updatedAt: sql`now()` })
+          .where(eq(studioTasks.id, taskId));
+      }
     },
 
     async read(taskId) {

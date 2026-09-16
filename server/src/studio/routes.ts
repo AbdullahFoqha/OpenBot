@@ -281,7 +281,7 @@ export function createStudioRoutes(deps: {
         expiresAt: reservation.expiresAt,
       });
     }
-    await taskStore.setBlocked(taskId, "Stopped by the user.");
+    await taskStore.markInterrupted(taskId, "Stopped by the user.");
     return c.json({
       status: running ? "interrupted" : "cancelled",
       note: running

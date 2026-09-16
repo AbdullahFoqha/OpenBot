@@ -184,7 +184,7 @@ export function createStudioDispatcher(deps: {
         ...(input.skipVerify ? { verifyCommands: [] } : {}),
       })
         .catch(async (err) => {
-          await taskStore.setBlocked(taskId, String(err));
+          await taskStore.markInterrupted(taskId, String(err));
         })
         .finally(() => {
           inFlight.delete(taskId);
