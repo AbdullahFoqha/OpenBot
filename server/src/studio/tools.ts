@@ -15,6 +15,10 @@ import {
   formatProductInspectForChat,
   inspectSelectedProduct,
 } from "./product-inspect";
+import { getSelectedProduct } from "./products";
+import { resolveProjectPath } from "./project-path";
+import { ghRunner } from "./github";
+import { resolveRepository } from "./project-delivery";
 import type { TaskStore } from "./task-store";
 import { createDynamicBot } from "./bot-catalog";
 import type { BotMessaging } from "./bot-messaging";
@@ -990,7 +994,7 @@ export function studioTools(options: {
         name: "studio_run_task",
         ref: "studio/run_task",
         description:
-          "REQUIRED for local product work when AC is clear (P0.5 unattended): call in the SAME turn — create/edit files in the selected project, run changes, open a feature branch/draft PR, or (ownerBotId=quality-engineer) independently verify/QA. Uses cursor-agent on the Cursor subscription in a project worktree; after implementation the studio re-runs package.json typecheck+test and only then opens a draft PR. Do NOT clarify with menus, ask for dashboard Run Task, use host_list_folders/host_write_file, or ask about Engineer/git origin. Returns taskId; poll studio_task_status (includes checkAfter); then hand back Shipped/Evidence/Untested/Next.",
+          "REQUIRED for local product work when AC is clear (P0.5 unattended): call in the SAME turn — create/edit files in the selected project, run changes, open a feature branch/draft PR, or (ownerBotId=quality-engineer) independently verify/QA. Uses cursor-agent on the Cursor subscription in a project worktree; after implementation the studio re-runs package.json typecheck+test and only then opens a draft PR. Do NOT clarify with menus, ask for dashboard Run Task, use host_list_folders/host_write_file, or ask about Engineer/git origin. Returns taskId; poll studio_task_status (includes checkAfter); then hand back Shipped/Evidence/Untested/Next. Do NOT call this for a question, a status lookup, or another bot asking you to summarize/retrieve something — use studio_inspect_product / studio_github_read / studio_task_status and answer in chat instead.",
         parameters: runTaskParams,
         execute: async (args) => {
           const parsed = runTaskParams.safeParse(args ?? {});
@@ -1094,6 +1098,128 @@ export function studioTools(options: {
             return `${REFUSAL_MARKER} ${inspected.error}`;
           }
           return formatProductInspectForChat(inspected.result);
+        },
+      },
+      {
+        name: "studio_github_read",
+        ref: "studio/github_read",
+        description:
+          "READ-ONLY GitHub lookup for the selected product's repo: PR/issue status, repo info, or a file's content on any branch (e.g. a PR's head branch) — use file_view instead of a browser for this. Use to answer 'what's the status of PR #12' / 'list open issues' / 'is there a PR for this branch' / 'what does docs/X.md say on that PR's branch'. Paste the returned text into chat as the answer. Do NOT call studio_run_task for a lookup, and do NOT reach for studio_browser_session to read a repo file — this never creates, edits, or comments on anything.",
+        parameters: z.object({
+          query: z
+            .enum(["pr_view", "pr_list", "issue_view", "issue_list", "repo_view", "file_view"])
+            .describe(
+              "pr_view/issue_view require number. pr_list/issue_list accept an optional limit. repo_view takes neither. file_view requires path and accepts an optional ref (branch/commit; defaults to the repo's default branch).",
+            ),
+          number: z.number().int().positive().optional().describe("PR or issue number, for pr_view/issue_view."),
+          limit: z.number().int().positive().max(50).optional().describe("Max rows for pr_list/issue_list (default 10)."),
+          path: z.string().min(1).optional().describe("Repo-relative file path, for file_view (e.g. docs/studio/MVP-READINESS.md)."),
+          ref: z.string().min(1).optional().describe("Branch, tag, or commit SHA, for file_view (e.g. a PR's head branch). Defaults to the repo's default branch."),
+        }),
+        execute: async (args) => {
+          const parsed = z
+            .object({
+              query: z.enum(["pr_view", "pr_list", "issue_view", "issue_list", "repo_view", "file_view"]),
+              number: z.number().int().positive().optional(),
+              limit: z.number().int().positive().max(50).optional(),
+              path: z.string().min(1).optional(),
+              ref: z.string().min(1).optional(),
+            })
+            .safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} query is required.`;
+          }
+          const { query, number, limit, path, ref } = parsed.data;
+          if ((query === "pr_view" || query === "issue_view") && !number) {
+            return `${REFUSAL_MARKER} number is required for ${query}.`;
+          }
+          if (query === "file_view" && !path) {
+            return `${REFUSAL_MARKER} path is required for file_view.`;
+          }
+
+          const product = await getSelectedProduct(database);
+          if (!product?.localPath) {
+            return `${REFUSAL_MARKER} No product is selected. Register/select a project first.`;
+          }
+          const resolved = await resolveProjectPath(product.localPath);
+          if (!resolved.ok) {
+            return `${REFUSAL_MARKER} ${resolved.reason}`;
+          }
+          const cwd = resolved.absolutePath;
+          const gh = ghRunner();
+          const repo = await resolveRepository(cwd, gh);
+          if (!repo.ok) {
+            return `${REFUSAL_MARKER} ${repo.reason}`;
+          }
+
+          const rowLimit = String(limit ?? 10);
+          const prFields = "number,title,url,state,isDraft,headRefName,baseRefName,updatedAt";
+          const issueFields = "number,title,url,state,updatedAt";
+          let result: { exitCode: number; stdout: string; stderr: string };
+          switch (query) {
+            case "pr_view":
+              result = await gh(
+                ["pr", "view", String(number), "--repo", repo.repository, "--json", `${prFields},body`],
+                { cwd },
+              );
+              break;
+            case "pr_list":
+              result = await gh(
+                ["pr", "list", "--repo", repo.repository, "--state", "all", "--limit", rowLimit, "--json", prFields],
+                { cwd },
+              );
+              break;
+            case "issue_view":
+              result = await gh(
+                ["issue", "view", String(number), "--repo", repo.repository, "--json", `${issueFields},body`],
+                { cwd },
+              );
+              break;
+            case "issue_list":
+              result = await gh(
+                ["issue", "list", "--repo", repo.repository, "--state", "all", "--limit", rowLimit, "--json", issueFields],
+                { cwd },
+              );
+              break;
+            case "repo_view":
+              result = await gh(
+                ["repo", "view", repo.repository, "--json", "nameWithOwner,description,url,defaultBranchRef,isPrivate"],
+                { cwd },
+              );
+              break;
+            case "file_view": {
+              const apiPath = `repos/${repo.repository}/contents/${path}${ref ? `?ref=${encodeURIComponent(ref)}` : ""}`;
+              result = await gh(["api", apiPath], { cwd });
+              break;
+            }
+          }
+          if (result.exitCode !== 0) {
+            return `${REFUSAL_MARKER} ${result.stderr.trim() || `gh ${query} failed.`}`;
+          }
+          if (query === "file_view") {
+            try {
+              const parsedFile = JSON.parse(result.stdout) as {
+                content?: string;
+                encoding?: string;
+                type?: string;
+                message?: string;
+              };
+              if (parsedFile.type && parsedFile.type !== "file") {
+                return `${REFUSAL_MARKER} "${path}" is a ${parsedFile.type}, not a file.`;
+              }
+              if (!parsedFile.content || parsedFile.encoding !== "base64") {
+                return `${REFUSAL_MARKER} ${parsedFile.message || `"${path}" has no readable content.`}`;
+              }
+              const decoded = Buffer.from(parsedFile.content, "base64").toString("utf8");
+              const CAP = 20_000;
+              return decoded.length > CAP
+                ? `${decoded.slice(0, CAP)}\n\n[truncated — file is ${decoded.length} chars, showing first ${CAP}]`
+                : decoded;
+            } catch {
+              return `${REFUSAL_MARKER} Could not parse the file response for "${path}".`;
+            }
+          }
+          return result.stdout.trim() || "{}";
         },
       },
       {

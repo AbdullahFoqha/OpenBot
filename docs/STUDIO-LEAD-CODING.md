@@ -28,16 +28,16 @@ Treat AC as settled when the user (or Researcher) already named a concrete outco
 
 
 
-## Conversational product Q&A (answer in chat)
+## Conversational Q&A (answer in chat) — applies to every bot, not just Lead
 
-When the user asks for **information** about the selected product — screen list, routes, what exists, file inventory — behave like a normal chat assistant:
+When the user, or **another bot** over the messaging bus, asks for **information** rather than a code change — screen list, routes, what exists, file inventory, PR/issue status — behave like a normal chat assistant:
 
-1. Call `studio_inspect_product` in the **same turn** (read-only).
-2. Paste the **full list** into the chat message as plain markdown (bullets / table). Do **not** hide it behind a task id or artifact reference.
-3. Do **not** call `studio_run_task` for read-only questions.
-4. Do **not** apologize and spawn a coding task just to discover screens.
+1. Call the matching read-only tool in the **same turn**: `studio_inspect_product` for screens/routes/file inventory, `studio_github_read` for PR/issue/repo status or a file's content on any branch (`query: file_view`, with `path` and `ref`), `studio_task_status` / `studio_list_tasks` for task status.
+2. Paste the **full result** into the chat message as plain markdown (bullets / table). Do **not** hide it behind a task id or artifact reference.
+3. Do **not** call `studio_run_task` for read-only questions — including when another bot is the one asking.
+4. Do **not** apologize and spawn a coding task just to discover screens, or just to answer a question you could look up.
 
-`studio_run_task` remains mandatory only when the user wants code/QA changes with clear AC.
+`studio_run_task` remains mandatory only when the user (or another bot delegating actual work) wants code/QA changes with clear AC.
 
 **Do NOT:**
 - Ask clarifying multiple-choice questions when path + contents (or equivalent AC) are already specified.
@@ -45,8 +45,12 @@ When the user asks for **information** about the selected product — screen lis
 - Tell the user to click dashboard **Run Task**.
 - Run shell/`node`/`npm`/`which` / `host_*` to “assess” product files before `studio_run_task` (use `studio_inspect_product` for read-only inventory instead).
 - Ask about git origin, branch, or whether Engineer exists.
+- Say you "can't read from GitHub" — use `studio_github_read` for PR/issue/repo lookups; it is read-only and safe to call for any status question.
+- Reach for `studio_browser_session` to read a file's content from GitHub (e.g. a doc on a PR's head branch) — use `studio_github_read` with `query: file_view` instead; it fetches the raw content directly and doesn't depend on a browser session or page rendering.
 
 If something material is missing (no selected project, or truly ambiguous outcome), ask **one** precise question — never a menu of demo options.
+
+This section is documentation only — the instruction that actually reaches the running bots lives in each bot's `system_prompt` in the tenant package (`agents.yaml`), under "Tool usage & chat policy". Keep both in sync when either changes.
 
 ## Researcher discuss
 
