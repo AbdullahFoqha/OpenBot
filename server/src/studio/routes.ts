@@ -65,6 +65,7 @@ import {
   parseDesktopSteps,
 } from "./desktop-session";
 import type { BotMessaging } from "./bot-messaging";
+import type { StudioChannelBus } from "./studio-channels";
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -101,8 +102,10 @@ export function createStudioRoutes(deps: {
   dispatcher?: StudioDispatcher;
   /** P1.1 bot-to-bot messaging bus. */
   botMessaging?: BotMessaging;
+  /** P1.2 multi-bot rooms. */
+  studioChannelBus?: StudioChannelBus;
 }): Hono<{ Variables: AppVariables }> {
-  const { database, admission, taskStore, policy, requireUser, botMessaging } = deps;
+  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus } = deps;
   const dispatcher =
     deps.dispatcher ??
     createStudioDispatcher({ database, admission, taskStore });
@@ -538,6 +541,65 @@ export function createStudioRoutes(deps: {
     return c.json({ ok: true, session: result.session });
   });
 
+
+
+  // --- P1.2 multi-bot rooms ---
+  routes.get("/channels", async (c: Context) => {
+    if (!studioChannelBus) return c.json({ error: "Studio channels are not configured." }, 503);
+    const channels = await studioChannelBus.list();
+    return c.json({ channels });
+  });
+
+  routes.post("/channels", async (c: Context) => {
+    if (!studioChannelBus) return c.json({ error: "Studio channels are not configured." }, 503);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.name !== "string") {
+      return c.json({ error: "name is required." }, 400);
+    }
+    const members = Array.isArray(body.memberBotIds)
+      ? body.memberBotIds.filter((x): x is string => typeof x === "string")
+      : Array.isArray(body.members)
+        ? body.members.filter((x): x is string => typeof x === "string")
+        : [];
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const result = await studioChannelBus.create({
+      name: body.name,
+      memberBotIds: members,
+      actorId,
+      createdByBotId: typeof body.createdByBotId === "string" ? body.createdByBotId : "studio-lead",
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ channel: result.channel }, 201);
+  });
+
+  routes.get("/channels/:id", async (c: Context) => {
+    if (!studioChannelBus) return c.json({ error: "Studio channels are not configured." }, 503);
+    const id = c.req.param("id");
+    if (!id) return c.json({ error: "id required" }, 400);
+    const channel = await studioChannelBus.get(id);
+    if (!channel) return c.json({ error: "No such studio channel." }, 404);
+    const messages = await studioChannelBus.listMessages(id, 50);
+    return c.json({ channel, messages });
+  });
+
+  routes.post("/channels/:id/messages", async (c: Context) => {
+    if (!studioChannelBus) return c.json({ error: "Studio channels are not configured." }, 503);
+    const id = c.req.param("id");
+    if (!id) return c.json({ error: "id required" }, 400);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.message !== "string") {
+      return c.json({ error: "message is required." }, 400);
+    }
+    const actorId = c.var.actor?.id ?? "dev-local-user";
+    const result = await studioChannelBus.post({
+      studioChannelId: id,
+      fromBotId: typeof body.fromBotId === "string" ? body.fromBotId : "studio-lead",
+      message: body.message,
+      actorId,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ message: result.message, channel: result.channel }, 201);
+  });
 
   // --- P1.1 bot-to-bot messaging ---
   routes.post("/bots/:id/messages", async (c: Context) => {

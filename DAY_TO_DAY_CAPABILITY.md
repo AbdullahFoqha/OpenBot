@@ -69,3 +69,5 @@ P0.3 Mac desktop agent (2026-09-16): `studio_desktop_session` + `/api/studio/des
 P0.5 unattended contract (2026-09-16): when AC is clear, Studio Lead must call `studio_run_task` / `studio_spawn_bot` / `studio_browser_session` (and desktop when available) same turn — no clarify menus, no dashboard Run Task. Handback Shipped/Evidence/Untested/Next required. Prove: `studio-local/ui-test/p05-unattended-prove.mjs`. Lead rules: `docs/STUDIO-LEAD-CODING.md`.
 
 P1.1 bot messaging (2026-09-16): `studio_message_bot` + `POST/GET /api/studio/bots/:id/messages` (priority wakes via handoff queue; FYI inbox/roster only). `message_bot` gains optional priority. Dynamic spawn auto-grants studio-lead reachability. Prove: `studio-local/ui-test/p11-message-bot-prove.mjs`.
+
+P1.2 multi-bot rooms (2026-09-16): `studio_create_channel` / `studio_channel_message`; `POST/GET /api/studio/channels`. Prove: `studio-local/ui-test/p12-channels-prove.mjs`.

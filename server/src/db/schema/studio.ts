@@ -14,7 +14,7 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
-import { agents, users } from "./core";
+import { agents, channels, users } from "./core";
 import { jsonb } from "./json";
 
 const createdAt = () =>
@@ -532,5 +532,40 @@ export const studioBotMessages = pgTable(
   (table) => [
     index("studio_bot_messages_to_idx").on(table.toBotId, table.createdAt),
     index("studio_bot_messages_from_idx").on(table.fromBotId, table.createdAt),
+  ],
+);
+
+/**
+ * P1.2 multi-bot rooms (Grok CreateChannel parity).
+ * Backed by a real `channels` row so the UI roster can open it; messages listed here.
+ */
+export const studioChannels = pgTable("studio_channels", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  channelId: text("channel_id")
+    .notNull()
+    .references(() => channels.id, { onDelete: "cascade" }),
+  threadId: text("thread_id").notNull(),
+  /** Bot ids seated in the room (built-in and/or dynamic). */
+  memberBotIds: jsonb("member_bot_ids").notNull().default([]),
+  createdByBotId: text("created_by_bot_id"),
+  createdAt: createdAt(),
+});
+
+export const studioChannelMessages = pgTable(
+  "studio_channel_messages",
+  {
+    id: text("id").primaryKey(),
+    studioChannelId: text("studio_channel_id")
+      .notNull()
+      .references(() => studioChannels.id, { onDelete: "cascade" }),
+    fromBotId: text("from_bot_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    body: text("body").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("studio_channel_messages_room_idx").on(table.studioChannelId, table.createdAt),
   ],
 );

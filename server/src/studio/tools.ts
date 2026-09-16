@@ -14,6 +14,7 @@ import { STUDIO_PRODUCT_ID } from "./dispatch";
 import type { TaskStore } from "./task-store";
 import { createDynamicBot } from "./bot-catalog";
 import type { BotMessaging } from "./bot-messaging";
+import type { StudioChannelBus } from "./studio-channels";
 import {
   getBrowserSession,
   startBrowserSession,
@@ -165,21 +166,100 @@ const desktopSessionParams = z.object({
     .describe("Scripted steps: wait/screenshot/activate/open/type/keystroke/click/quit."),
 });
 
+
+const createChannelParams = z.object({
+  name: z.string().min(1).describe("Room display name."),
+  memberBotIds: z
+    .array(z.string())
+    .min(1)
+    .describe("Bot ids to seat (built-in and/or dynamic), e.g. studio-lead, custom-researcher-demo."),
+});
+
+const channelMessageParams = z.object({
+  channelId: z.string().min(1).describe("Studio channel id from studio_create_channel (studio-ch-…)."),
+  message: z.string().min(1).describe("Text to post for all members to see."),
+  fromBotId: z.string().optional().describe("Defaults to the calling bot."),
+});
+
 export function studioTools(options: {
   dispatcher: StudioDispatcher;
   database: Database;
   taskStore: TaskStore;
   allowedBotIds?: readonly string[];
   botMessaging?: BotMessaging;
+  studioChannelBus?: StudioChannelBus;
   /** Default actor for headless messaging (studio local user). */
   messagingActorId?: string;
 }): (botId: string) => GrantedTool[] {
-  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, messagingActorId } = options;
+  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, messagingActorId } = options;
 
   return (botId: string) => {
     if (allowedBotIds && !allowedBotIds.includes(botId)) return [];
 
     const tools: GrantedTool[] = [
+      {
+        name: "studio_create_channel",
+        ref: "studio/create_channel",
+        description:
+          "Create a multi-bot room (Grok CreateChannel parity). Seats memberBotIds in one channel; returns studio channel id. Then use studio_channel_message to post so all members can list it.",
+        parameters: createChannelParams,
+        execute: async (args) => {
+          if (!studioChannelBus) {
+            return `${REFUSAL_MARKER} Studio channels are not wired in this deployment.`;
+          }
+          const parsed = createChannelParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} name and memberBotIds are required.`;
+          }
+          const actorId = messagingActorId ?? "dev-local-user";
+          const result = await studioChannelBus.create({
+            name: parsed.data.name,
+            memberBotIds: parsed.data.memberBotIds,
+            actorId,
+            createdByBotId: botId,
+          });
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({
+            ok: true,
+            channelId: result.channel.id,
+            name: result.channel.name,
+            memberBotIds: result.channel.memberBotIds,
+            uiChannelId: result.channel.channelId,
+            note: "Post with studio_channel_message using channelId.",
+          });
+        },
+      },
+      {
+        name: "studio_channel_message",
+        ref: "studio/channel_message",
+        description:
+          "Post a message into a multi-bot studio channel. All members can list it via the channel inbox / GET API.",
+        parameters: channelMessageParams,
+        execute: async (args) => {
+          if (!studioChannelBus) {
+            return `${REFUSAL_MARKER} Studio channels are not wired in this deployment.`;
+          }
+          const parsed = channelMessageParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} channelId and message are required.`;
+          }
+          const actorId = messagingActorId ?? "dev-local-user";
+          const result = await studioChannelBus.post({
+            studioChannelId: parsed.data.channelId,
+            fromBotId: parsed.data.fromBotId?.trim() || botId,
+            message: parsed.data.message,
+            actorId,
+          });
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({
+            ok: true,
+            messageId: result.message.id,
+            channelId: result.channel.id,
+            memberBotIds: result.channel.memberBotIds,
+          });
+        },
+      },
+
       {
         name: "studio_message_bot",
         ref: "studio/message_bot",
