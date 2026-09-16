@@ -205,4 +205,5 @@ Implement in backlog order after P0 demos. Each gets its own AC doc when started
 - **P0.5** unattended run contract — shipped (local).
 - **P1.1** bot-to-bot messaging (priority vs FYI) — shipped (local).
 - **P1.2** channels / multi-bot rooms — shipped (local).
+- **P1.3** durable memory per bot + shared user — shipped (local).
 - **P0.3** Mac desktop agent session — shipped (local).

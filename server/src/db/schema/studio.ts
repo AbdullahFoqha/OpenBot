@@ -569,3 +569,25 @@ export const studioChannelMessages = pgTable(
     index("studio_channel_messages_room_idx").on(table.studioChannelId, table.createdAt),
   ],
 );
+
+/**
+ * P1.3 durable memory (Grok update_state memory parity).
+ * scope=agent → per-bot; scope=user → shared across bots for this deployment user.
+ * tier: profile (foundational) | log (dated history) | note (fades / low weight).
+ */
+export const studioMemories = pgTable(
+  "studio_memories",
+  {
+    id: text("id").primaryKey(),
+    /** Null when scope is user (shared). Required when scope is agent. */
+    botId: text("bot_id").references(() => agents.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull().default("agent"), // agent | user
+    tier: text("tier").notNull().default("log"), // profile | log | note
+    fact: text("fact").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("studio_memories_bot_idx").on(table.botId, table.createdAt),
+    index("studio_memories_scope_idx").on(table.scope, table.createdAt),
+  ],
+);

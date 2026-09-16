@@ -66,6 +66,7 @@ import {
 } from "./desktop-session";
 import type { BotMessaging } from "./bot-messaging";
 import type { StudioChannelBus } from "./studio-channels";
+import type { StudioMemoryStore } from "./studio-memory";
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -104,8 +105,10 @@ export function createStudioRoutes(deps: {
   botMessaging?: BotMessaging;
   /** P1.2 multi-bot rooms. */
   studioChannelBus?: StudioChannelBus;
+  /** P1.3 durable memory. */
+  studioMemory?: StudioMemoryStore;
 }): Hono<{ Variables: AppVariables }> {
-  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus } = deps;
+  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus, studioMemory } = deps;
   const dispatcher =
     deps.dispatcher ??
     createStudioDispatcher({ database, admission, taskStore });
@@ -542,6 +545,59 @@ export function createStudioRoutes(deps: {
   });
 
 
+
+
+  // --- P1.3 durable memory ---
+  routes.get("/bots/:id/memory", async (c: Context) => {
+    if (!studioMemory) return c.json({ error: "Studio memory is not configured." }, 503);
+    const botId = c.req.param("id");
+    if (!botId) return c.json({ error: "id required" }, 400);
+    const q = c.req.query("q") ?? undefined;
+    const scope = (c.req.query("scope") as "agent" | "user" | "all" | undefined) ?? "all";
+    const memories = await studioMemory.recall({ botId, query: q, scope, limit: 50 });
+    return c.json({ memories });
+  });
+
+  routes.post("/bots/:id/memory", async (c: Context) => {
+    if (!studioMemory) return c.json({ error: "Studio memory is not configured." }, 503);
+    const botId = c.req.param("id");
+    if (!botId) return c.json({ error: "id required" }, 400);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.fact !== "string") {
+      return c.json({ error: "fact is required." }, 400);
+    }
+    const scope = body.scope === "user" ? "user" : "agent";
+    const result = await studioMemory.write({
+      fact: body.fact,
+      scope,
+      tier: typeof body.tier === "string" ? (body.tier as "profile" | "log" | "note") : "log",
+      botId: scope === "agent" ? botId : undefined,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ memory: result.memory }, 201);
+  });
+
+  routes.get("/memory/user", async (c: Context) => {
+    if (!studioMemory) return c.json({ error: "Studio memory is not configured." }, 503);
+    const q = c.req.query("q") ?? undefined;
+    const memories = await studioMemory.recall({ query: q, scope: "user", limit: 50 });
+    return c.json({ memories });
+  });
+
+  routes.post("/memory/user", async (c: Context) => {
+    if (!studioMemory) return c.json({ error: "Studio memory is not configured." }, 503);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.fact !== "string") {
+      return c.json({ error: "fact is required." }, 400);
+    }
+    const result = await studioMemory.write({
+      fact: body.fact,
+      scope: "user",
+      tier: typeof body.tier === "string" ? (body.tier as "profile" | "log" | "note") : "log",
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ memory: result.memory }, 201);
+  });
 
   // --- P1.2 multi-bot rooms ---
   routes.get("/channels", async (c: Context) => {

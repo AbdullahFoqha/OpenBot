@@ -15,6 +15,7 @@ import type { TaskStore } from "./task-store";
 import { createDynamicBot } from "./bot-catalog";
 import type { BotMessaging } from "./bot-messaging";
 import type { StudioChannelBus } from "./studio-channels";
+import type { StudioMemoryStore } from "./studio-memory";
 import {
   getBrowserSession,
   startBrowserSession,
@@ -181,6 +182,33 @@ const channelMessageParams = z.object({
   fromBotId: z.string().optional().describe("Defaults to the calling bot."),
 });
 
+
+const memoryWriteParams = z.object({
+  fact: z.string().min(1).describe("One self-contained sentence to remember."),
+  scope: z
+    .enum(["agent", "user"])
+    .optional()
+    .describe("agent = this bot only (default); user = shared across Studio bots."),
+  tier: z
+    .enum(["profile", "log", "note"])
+    .optional()
+    .describe("profile = foundational; log = dated history (default); note = low weight."),
+  botId: z
+    .string()
+    .optional()
+    .describe("Target bot for agent scope. Defaults to the calling bot."),
+});
+
+const memoryRecallParams = z.object({
+  query: z.string().optional().describe("Optional substring filter."),
+  scope: z
+    .enum(["agent", "user", "all"])
+    .optional()
+    .describe("all = this bot's agent facts + shared user facts (default)."),
+  botId: z.string().optional().describe("Defaults to the calling bot for agent/all scopes."),
+  limit: z.number().optional(),
+});
+
 export function studioTools(options: {
   dispatcher: StudioDispatcher;
   database: Database;
@@ -188,15 +216,65 @@ export function studioTools(options: {
   allowedBotIds?: readonly string[];
   botMessaging?: BotMessaging;
   studioChannelBus?: StudioChannelBus;
+  studioMemory?: StudioMemoryStore;
   /** Default actor for headless messaging (studio local user). */
   messagingActorId?: string;
 }): (botId: string) => GrantedTool[] {
-  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, messagingActorId } = options;
+  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, studioMemory, messagingActorId } = options;
 
   return (botId: string) => {
     if (allowedBotIds && !allowedBotIds.includes(botId)) return [];
 
     const tools: GrantedTool[] = [
+      {
+        name: "studio_memory_write",
+        ref: "studio/memory_write",
+        description:
+          "Persist a durable memory fact (Grok update_state memory parity). scope=agent stores per-bot; scope=user is shared across Studio bots. Use tier profile sparingly.",
+        parameters: memoryWriteParams,
+        execute: async (args) => {
+          if (!studioMemory) {
+            return `${REFUSAL_MARKER} Studio memory is not wired in this deployment.`;
+          }
+          const parsed = memoryWriteParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} fact is required.`;
+          }
+          const scope = parsed.data.scope ?? "agent";
+          const result = await studioMemory.write({
+            fact: parsed.data.fact,
+            scope,
+            tier: parsed.data.tier,
+            botId: scope === "agent" ? parsed.data.botId?.trim() || botId : undefined,
+          });
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({ ok: true, memory: result.memory });
+        },
+      },
+      {
+        name: "studio_memory_recall",
+        ref: "studio/memory_recall",
+        description:
+          "Recall durable memories. Default scope=all returns this bot's agent facts plus shared user facts. Optional query substring filter.",
+        parameters: memoryRecallParams,
+        execute: async (args) => {
+          if (!studioMemory) {
+            return `${REFUSAL_MARKER} Studio memory is not wired in this deployment.`;
+          }
+          const parsed = memoryRecallParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} invalid recall args.`;
+          }
+          const memories = await studioMemory.recall({
+            query: parsed.data.query,
+            scope: parsed.data.scope ?? "all",
+            botId: parsed.data.botId?.trim() || botId,
+            limit: parsed.data.limit,
+          });
+          return JSON.stringify({ ok: true, memories, count: memories.length });
+        },
+      },
+
       {
         name: "studio_create_channel",
         ref: "studio/create_channel",

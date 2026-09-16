@@ -18,6 +18,7 @@ import type { StudioPolicy } from "./studio/policy";
 import { createStudioRoutes } from "./studio/routes";
 import type { BotMessaging } from "./studio/bot-messaging";
 import type { StudioChannelBus } from "./studio/studio-channels";
+import type { StudioMemoryStore } from "./studio/studio-memory";
 import type { TaskStore } from "./studio/task-store";
 import {
   AuditQueryError,
@@ -360,6 +361,7 @@ export function createApp(
   studioDispatcher?: StudioDispatcher,
   studioBotMessaging?: BotMessaging,
   studioChannelBus?: StudioChannelBus,
+  studioMemory?: StudioMemoryStore,
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -1480,6 +1482,7 @@ export function createApp(
         dispatcher: studioDispatcher,
         botMessaging: studioBotMessaging,
         studioChannelBus,
+        studioMemory,
       }),
     );
   }

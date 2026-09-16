@@ -71,3 +71,5 @@ P0.5 unattended contract (2026-09-16): when AC is clear, Studio Lead must call `
 P1.1 bot messaging (2026-09-16): `studio_message_bot` + `POST/GET /api/studio/bots/:id/messages` (priority wakes via handoff queue; FYI inbox/roster only). `message_bot` gains optional priority. Dynamic spawn auto-grants studio-lead reachability. Prove: `studio-local/ui-test/p11-message-bot-prove.mjs`.
 
 P1.2 multi-bot rooms (2026-09-16): `studio_create_channel` / `studio_channel_message`; `POST/GET /api/studio/channels`. Prove: `studio-local/ui-test/p12-channels-prove.mjs`.
+
+P1.3 durable memory (2026-09-16): `studio_memory_write` / `studio_memory_recall`; `POST/GET /api/studio/bots/:id/memory` + `/api/studio/memory/user`. Tiers profile/log/note; scopes agent/user. Prove: `studio-local/ui-test/p13-memory-prove.mjs`.

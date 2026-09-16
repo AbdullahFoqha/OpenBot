@@ -39,6 +39,7 @@ import { loadStudioPolicy } from "./studio/policy";
 import { studioTools } from "./studio/tools";
 import { createBotMessaging } from "./studio/bot-messaging";
 import { createStudioChannelBus } from "./studio/studio-channels";
+import { createStudioMemoryStore } from "./studio/studio-memory";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
 import { createRuntimeAgentLoader } from "./agents/runtime-agents";
@@ -619,6 +620,7 @@ const loadToolsForActor =
       taskStore: studioTaskStore,
       botMessaging: studioBotMessaging,
       studioChannelBus,
+      studioMemory,
       messagingActorId: "dev-local-user",
       allowedBotIds: [
         "studio-lead",
@@ -1362,6 +1364,8 @@ const studioChannelBus = createStudioChannelBus({
   },
 });
 
+const studioMemory = createStudioMemoryStore(database);
+
 const app = createApp(
   config,
   auth,
@@ -1513,6 +1517,7 @@ const app = createApp(
   studioDispatcher,
   studioBotMessaging,
   studioChannelBus,
+  studioMemory,
 );
 
 /** What each server-owned tool actually does, once its operation has been claimed. */
@@ -1613,6 +1618,7 @@ async function runDeploymentTool(input: {
     taskStore: studioTaskStore,
     botMessaging: studioBotMessaging,
     studioChannelBus,
+    studioMemory,
     messagingActorId: "dev-local-user",
     allowedBotIds: [
       "studio-lead",
