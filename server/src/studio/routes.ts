@@ -245,12 +245,21 @@ export function createStudioRoutes(deps: {
       typeof body?.acceptanceCriteria === "string" ? body.acceptanceCriteria.trim() : "";
     const idempotencyKey =
       typeof body?.idempotencyKey === "string" ? body.idempotencyKey : null;
+    const ownerBotId =
+      typeof body?.ownerBotId === "string" ? body.ownerBotId.trim() : undefined;
+    const maestroFlow =
+      typeof body?.maestroFlow === "string" ? body.maestroFlow.trim() : undefined;
+    const deviceUdid =
+      typeof body?.deviceUdid === "string" ? body.deviceUdid.trim() : undefined;
 
     const result = await dispatcher.submit({
       title,
       goal,
       acceptanceCriteria,
       idempotencyKey,
+      ...(ownerBotId ? { ownerBotId } : {}),
+      ...(maestroFlow ? { maestroFlow } : {}),
+      ...(deviceUdid ? { deviceUdid } : {}),
     });
     if (!result.ok) return c.json({ error: result.error }, result.status);
     return c.json({
