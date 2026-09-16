@@ -26,6 +26,7 @@ import { deliverProjectDraftPr } from "./project-delivery";
 import type { GhRunner } from "./github";
 import type { NativeWorker } from "../native-worker/worker";
 import { runMaestro, shouldRunMaestro, type MaestroEvidence } from "./maestro";
+import { pruneTaskWorktree } from "./prune-worktree";
 
 export const CURSOR_ENGINEER_BOT_ID = "react-native-engineer";
 export const DEFAULT_MODEL = "cursor-grok-4.6-xhigh";
@@ -665,6 +666,10 @@ When you are done: leave the tree buildable, run the verification commands above
 
   await deps.taskStore.transition(deps.taskId, "in_review").catch(() => {});
   await deps.admission.release(claim.ticket);
+
+  // Best-effort: drop this task's worktree now that we are terminal (in_review).
+  // Evidence (incl. worktreePath) is already written above. Gate: STUDIO_PRUNE_ON_COMPLETE.
+  await pruneTaskWorktree({ worktreePath, state: "in_review" }).catch(() => {});
 
   return {
     ok,

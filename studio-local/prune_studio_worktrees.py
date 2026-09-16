@@ -97,6 +97,11 @@ def main() -> int:
         "--server",
         default=os.environ.get("STUDIO_SERVER", "http://127.0.0.1:3012"),
     )
+    ap.add_argument(
+        "--task-id",
+        default=None,
+        help="Only consider the worktree for this taskId (suffix match)",
+    )
     args = ap.parse_args()
 
     projects = Path(args.projects_dir)
@@ -121,6 +126,12 @@ def main() -> int:
         info = by_suffix.get(suffix)
         state = info["state"] if info else "orphan"
         tid = info["id"] if info else ""
+        if args.task_id:
+            want = args.task_id.lower()
+            if want not in (tid.lower(), suffix) and not (tid and tid.lower().endswith(want[-6:])):
+                keep += 1
+                print(f"{'KEEP':<6}  {'task-filter':<16}  age={age_h:5.1f}h  {path.name}")
+                continue
 
         action = "KEEP"
         reason = state

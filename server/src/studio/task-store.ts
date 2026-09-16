@@ -12,7 +12,8 @@
  */
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Database } from "../db/client";
-import { studioProducts, studioReservations, studioTasks } from "../db/schema";
+import { studioEvidence, studioProducts, studioReservations, studioTasks } from "../db/schema";
+import { pruneTaskWorktree } from "./prune-worktree";
 
 export type TaskState =
   | "backlog"
@@ -219,12 +220,26 @@ export function createTaskStore(database: Database): TaskStore {
         .from(studioTasks)
         .where(eq(studioTasks.id, taskId))
         .limit(1);
+      let terminalState = task?.state ?? "";
       if (task?.state === "in_progress") {
         // One legal step forward; same landing as runProjectTask after Cursor exits.
         await database
           .update(studioTasks)
           .set({ state: "in_review", updatedAt: sql`now()` })
           .where(eq(studioTasks.id, taskId));
+        terminalState = "in_review";
+      }
+      // Best-effort prune of this task's worktree once terminal (STUDIO_PRUNE_ON_COMPLETE).
+      if (terminalState && terminalState !== "in_progress") {
+        const [ev] = await database
+          .select({ worktreePath: studioEvidence.worktreePath })
+          .from(studioEvidence)
+          .where(eq(studioEvidence.taskId, taskId))
+          .limit(1);
+        await pruneTaskWorktree({
+          worktreePath: ev?.worktreePath,
+          state: terminalState,
+        }).catch(() => {});
       }
     },
 
