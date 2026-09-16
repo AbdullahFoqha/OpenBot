@@ -6,6 +6,8 @@
 
 ## Dirty-sim + Release (required for reliable onboard)
 
+Preferred fix: pocket-love `.maestro/onboard.yaml` uses `launchApp: clearState: true` (commit in product repo).
+
 Onboarding is `!ledger.hasHousehold()` (SQLite + SecureStore). A warm Debug install fails for two reasons:
 1. **Already onboarded** → `onboarding.startingAmount` missing  
 2. **Debug without Metro** → RedBox `No script URL provided`
