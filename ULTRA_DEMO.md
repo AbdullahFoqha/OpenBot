@@ -4,6 +4,25 @@
 
 Timer starts after prereq.
 
+## P2.5 prove record (cold solo ≤15m)
+
+Timed unattended coding path on selected product `pocket-love` (same dispatcher as Lead `studio_run_task`).
+
+| Field | Value |
+|-------|-------|
+| Script | `studio-local/ui-test/p25-cold-solo-prove.mjs` |
+| Result | `studio-local/ui-test/out/p25-cold-solo-result.json` |
+| Task | `task-826a3ad2-a47b-481b-b632-45f81eaaff6d` |
+| Wall clock | **40s** (limit 900s) |
+| State | `in_review`, `evidence.ok=true` |
+| Changed | `src/ultra-demo-flag.ts` |
+| Model | requested `cursor-grok-4.6-high` → reported `Cursor Grok 4.6 High` |
+| Worktree | `/Users/abdullah/Documents/projects/p25-cold-solo-591087-aaff6d.studio-worktree` |
+| Checks | `npm run typecheck` exit 0; tests exit 0 |
+
+Pass criteria met: clear AC → taskId → Mac Cursor work → verify → terminal evidence within 15 minutes.
+
+
 ## A) Smoke (5–8 min) — coding path
 
 1. New channel → **Studio Lead**.
