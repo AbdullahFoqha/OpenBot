@@ -6,7 +6,9 @@ import {
   parseMaestroFromCriteria,
   parseDeviceFromCriteria,
   shouldRunMaestro,
+  installApp,
   STUDIO_PREFERRED_IOS_UDID,
+  type InstallResult,
 } from "../src/studio/maestro";
 
 describe("parseMaestroFromCriteria", () => {
@@ -133,9 +135,8 @@ describe("runMaestro with mock native worker", () => {
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "maestro-test-"));
-    await mkdir(join(tmpDir, "project"), { recursive: true });
-    await mkdir(join(tmpDir, "worktree"), { recursive: true });
     await mkdir(join(tmpDir, "project", ".maestro"), { recursive: true });
+    await mkdir(join(tmpDir, "worktree"), { recursive: true });
     await writeFile(
       join(tmpDir, "project", ".maestro", "test.yaml"),
       "appId: app.test\n---\n- tapOn: Login",
@@ -196,14 +197,17 @@ describe("runMaestro with mock native worker", () => {
     const taskId = "test-finally-task";
 
     await mockWorker.register({ taskId, devices: ["udid"] });
+    let caughtError: Error | null = null;
     try {
       throw new Error("Simulated failure during Maestro run");
-    } catch {
-      // expected — we only care that finally still releases
+    } catch (err) {
+      caughtError = err as Error;
     } finally {
       mockWorker.release(taskId);
     }
 
+    expect(caughtError).not.toBeNull();
+    expect(caughtError?.message).toBe("Simulated failure during Maestro run");
     expect(released).toContain(taskId);
   });
 });
@@ -239,5 +243,213 @@ describe("evidence output structure", () => {
     };
 
     expect(evidence.error).toBe("Maestro flow assertion failed");
+  });
+
+  test("evidence can include install result", () => {
+    const evidence = {
+      udid: "812A595B-0FDA-4C3F-9346-088E6C07A489",
+      flow: "/path/to/flow.yaml",
+      exitCode: 0,
+      outputDir: "/path/to/output",
+      appInstalled: true,
+      durationMs: 15000,
+      install: {
+        status: "cloned" as const,
+        exitCode: 0,
+        logPath: "/path/to/output/install.log",
+      },
+    };
+
+    expect(evidence.install).toBeDefined();
+    expect(evidence.install?.status).toBe("cloned");
+    expect(evidence.install?.exitCode).toBe(0);
+  });
+});
+
+describe("installApp", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "install-test-"));
+    await mkdir(join(tmpDir, "project"), { recursive: true });
+    await mkdir(join(tmpDir, "output"), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  test("skipped status when clone-only mode fails with no donor", async () => {
+    const mockRunCommand = mock(
+      async (
+        command: string,
+        args: string[],
+      ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> => {
+        if (command === "xcrun" && args[0] === "simctl" && args[1] === "list") {
+          return {
+            exitCode: 0,
+            stdout: "-- iOS 18.0 --\n    iPhone 17 Pro (AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE) (Booted)\n",
+            stderr: "",
+          };
+        }
+        if (command === "xcrun" && args[0] === "simctl" && args[1] === "get_app_container") {
+          return { exitCode: 1, stdout: "", stderr: "No matching container" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    );
+
+    const result = await installApp({
+      projectPath: join(tmpDir, "project"),
+      udid: "812A595B-0FDA-4C3F-9346-088E6C07A489",
+      appId: "app.pocketlove.private",
+      outputDir: join(tmpDir, "output"),
+      mode: "clone",
+      runCommand: mockRunCommand,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.exitCode).toBe(1);
+
+    const logContent = await readFile(result.logPath, "utf8");
+    expect(logContent).toContain("clone-only mode requested");
+  });
+
+  test("clone succeeds when donor sim found", async () => {
+    const targetUdid = "812A595B-0FDA-4C3F-9346-088E6C07A489";
+    const donorUdid = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
+    const appPath = "/some/path/to/app.app";
+
+    const mockRunCommand = mock(
+      async (
+        command: string,
+        args: string[],
+      ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> => {
+        if (command === "xcrun" && args[0] === "simctl" && args[1] === "list") {
+          return {
+            exitCode: 0,
+            stdout: `-- iOS 18.0 --\n    iPhone 17 Pro (${donorUdid}) (Booted)\n    iPhone 17 (${targetUdid}) (Shutdown)\n`,
+            stderr: "",
+          };
+        }
+        if (command === "xcrun" && args[0] === "simctl" && args[1] === "get_app_container") {
+          const udid = args[2];
+          const type = args[4];
+          if (udid === donorUdid) {
+            if (type === "data") return { exitCode: 0, stdout: "/data/path", stderr: "" };
+            if (type === "app") return { exitCode: 0, stdout: appPath, stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: "No container" };
+        }
+        if (command === "xcrun" && args[0] === "simctl" && args[1] === "install") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    );
+
+    const result = await installApp({
+      projectPath: join(tmpDir, "project"),
+      udid: targetUdid,
+      appId: "app.pocketlove.private",
+      outputDir: join(tmpDir, "output"),
+      mode: "auto",
+      runCommand: mockRunCommand,
+    });
+
+    expect(result.status).toBe("cloned");
+    expect(result.exitCode).toBe(0);
+
+    const logContent = await readFile(result.logPath, "utf8");
+    expect(logContent).toContain("CLONE: success");
+  });
+
+  test("expo fallback when clone fails in auto mode", async () => {
+    const mockRunCommand = mock(
+      async (
+        command: string,
+        args: string[],
+      ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> => {
+        if (command === "xcrun" && args[0] === "simctl" && args[1] === "list") {
+          return { exitCode: 0, stdout: "-- iOS 18.0 --\n", stderr: "" };
+        }
+        if (command === "xcrun" && args[0] === "simctl" && args[1] === "get_app_container") {
+          return { exitCode: 1, stdout: "", stderr: "No container" };
+        }
+        if (command === "npx" && args[0] === "expo") {
+          return { exitCode: 0, stdout: "Build succeeded", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    );
+
+    const result = await installApp({
+      projectPath: join(tmpDir, "project"),
+      udid: "812A595B-0FDA-4C3F-9346-088E6C07A489",
+      appId: "app.pocketlove.private",
+      outputDir: join(tmpDir, "output"),
+      mode: "auto",
+      runCommand: mockRunCommand,
+    });
+
+    expect(result.status).toBe("expo");
+    expect(result.exitCode).toBe(0);
+
+    const logContent = await readFile(result.logPath, "utf8");
+    expect(logContent).toContain("EXPO: npx expo run:ios");
+    expect(logContent).toContain("Build succeeded");
+  });
+
+  test("expo mode fails with non-zero exit", async () => {
+    const mockRunCommand = mock(
+      async (
+        command: string,
+        args: string[],
+      ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> => {
+        if (command === "xcrun") {
+          return { exitCode: 1, stdout: "", stderr: "" };
+        }
+        if (command === "npx" && args[0] === "expo") {
+          return { exitCode: 1, stdout: "", stderr: "Build failed: missing pods" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    );
+
+    const result = await installApp({
+      projectPath: join(tmpDir, "project"),
+      udid: "812A595B-0FDA-4C3F-9346-088E6C07A489",
+      appId: "app.pocketlove.private",
+      outputDir: join(tmpDir, "output"),
+      mode: "expo",
+      runCommand: mockRunCommand,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.exitCode).toBe(1);
+
+    const logContent = await readFile(result.logPath, "utf8");
+    expect(logContent).toContain("stderr: Build failed: missing pods");
+  });
+
+  test("install.log is written to outputDir", async () => {
+    const mockRunCommand = mock(
+      async (): Promise<{ exitCode: number | null; stdout: string; stderr: string }> => {
+        return { exitCode: 1, stdout: "", stderr: "" };
+      },
+    );
+
+    const result = await installApp({
+      projectPath: join(tmpDir, "project"),
+      udid: "812A595B-0FDA-4C3F-9346-088E6C07A489",
+      appId: "app.pocketlove.private",
+      outputDir: join(tmpDir, "output"),
+      mode: "clone",
+      runCommand: mockRunCommand,
+    });
+
+    expect(result.logPath).toBe(join(tmpDir, "output", "install.log"));
+    const exists = await readFile(result.logPath, "utf8").then(() => true).catch(() => false);
+    expect(exists).toBe(true);
   });
 });

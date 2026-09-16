@@ -1,0 +1,98 @@
+#!/bin/zsh
+set -euo pipefail
+# Usage: ./studio-local/run-maestro-flow.sh [flow.yaml] [udid]
+# One-command: boot sim (if needed) + maestro test + evidence under
+#   studio-local/ui-test/out/maestro/<stamp>/
+# Exit 2 = app not installed on the chosen sim (tooling ok; install first).
+
+ROOT=${0:a:h}/..
+cd "$ROOT"
+export PATH="$HOME/.maestro/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH"
+
+FLOW=${1:-/Users/abdullah/Documents/projects/pocket-love/.maestro/onboard.yaml}
+# Prefer free studio reserve (17 Pro); callers may override. Script falls back
+# to any booted/shutdown sim that already has the app if preferred lacks it.
+PREFERRED_UDID=${2:-812A595B-0FDA-4C3F-9346-088E6C07A489}
+APP_ID=app.pocketlove.private
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+OUT="$ROOT/studio-local/ui-test/out/maestro/$STAMP"
+mkdir -p "$OUT"
+
+if ! command -v maestro >/dev/null; then
+  echo "maestro not on PATH (expected ~/.maestro/bin/maestro)" | tee "$OUT/error.txt"
+  exit 1
+fi
+
+has_app() {
+  local udid=$1
+  xcrun simctl get_app_container "$udid" "$APP_ID" data >/dev/null 2>&1
+}
+
+pick_udid() {
+  local want=$1
+  if has_app "$want"; then
+    echo "$want"
+    return
+  fi
+  # Prefer a Booted sim that already has the app (AO/dev may leave one warm).
+  local line udid
+  while IFS= read -r line; do
+    udid=${line:s/\(/}
+    udid=${udid%%)*}
+    udid=$(echo "$line" | sed -n 's/.*(\([A-F0-9-]\{36\}\)).*/\1/p')
+    [[ -n "$udid" ]] || continue
+    if has_app "$udid"; then
+      echo "$udid"
+      return
+    fi
+  done < <(xcrun simctl list devices available | grep '(Booted)')
+  while IFS= read -r line; do
+    udid=$(echo "$line" | sed -n 's/.*(\([A-F0-9-]\{36\}\)).*/\1/p')
+    [[ -n "$udid" ]] || continue
+    if has_app "$udid"; then
+      echo "$udid"
+      return
+    fi
+  done < <(xcrun simctl list devices available | grep -E 'iPhone')
+  echo "$want"
+}
+
+UDID=$(pick_udid "$PREFERRED_UDID")
+
+{
+  echo "maestro=$(maestro --version 2>/dev/null | head -1)"
+  echo "preferred_udid=$PREFERRED_UDID"
+  echo "udid=$UDID"
+  echo "flow=$FLOW"
+  echo "out=$OUT"
+} | tee "$OUT/meta.txt"
+
+xcrun simctl boot "$UDID" 2>/dev/null || true
+open -a Simulator
+for i in {1..45}; do
+  if xcrun simctl list devices | grep "$UDID" | grep -q '(Booted)'; then
+    echo "sim_state=(Booted) wait_s=$i" | tee -a "$OUT/meta.txt"
+    break
+  fi
+  sleep 1
+done
+
+if ! has_app "$UDID"; then
+  echo "APP_NOT_INSTALLED:$APP_ID on $UDID — install Debug build, then re-run." | tee "$OUT/blocker.txt"
+  echo "Hint: preferred free sim is iPhone 17 Pro ($PREFERRED_UDID)." | tee -a "$OUT/blocker.txt"
+  exit 2
+fi
+
+set +e
+maestro test --udid "$UDID" \
+  --test-output-dir "$OUT/artifacts" \
+  --debug-output "$OUT/debug" \
+  --flatten-debug-output \
+  "$FLOW" 2>&1 | tee "$OUT/maestro.log"
+code=${pipestatus[1]}
+set -e
+echo "exit=$code" | tee -a "$OUT/meta.txt"
+# Also keep a copy of ~/.maestro/tests latest if artifacts empty
+cp -R "$HOME/.maestro/tests" "$OUT/maestro-tests-home" 2>/dev/null || true
+echo "EVIDENCE=$OUT"
+exit $code

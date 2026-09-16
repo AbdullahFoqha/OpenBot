@@ -54,6 +54,11 @@ export type RunOutcome = {
     appInstalled: boolean;
     error?: string;
     durationMs: number;
+    install?: {
+      status: "skipped" | "cloned" | "expo" | "failed";
+      exitCode: number | null;
+      logPath: string;
+    };
   } | null;
 };
 
@@ -500,7 +505,7 @@ When you are done: leave the tree buildable, run the verification commands above
 
   let blocker: string | null = ok ? null : run.blocker ?? "The worker made no changes.";
   let pullRequest: RunOutcome["pullRequest"] = null;
-  let checkAfter: unknown = null;
+  let checkAfterResults: Array<{ command: string; exitCode: number | null; output: string }> | null = null;
   let maestroEvidence: MaestroEvidence | null = null;
 
   if (ok) {
@@ -518,12 +523,12 @@ When you are done: leave the tree buildable, run the verification commands above
     }
 
     // Independent re-check in the worktree — same idea as the coding test fixture path.
-    const checkResults = [];
+    const checkResults: Array<{ command: string; exitCode: number | null; output: string }> = [];
     for (const command of verifyCommands) {
       checkResults.push(await runCheck(worktreePath, command));
     }
-    checkAfter = checkResults.length > 0 ? checkResults : null;
-    const failed = checkResults.find((c) => c.exitCode !== 0);
+    checkAfterResults = checkResults.length > 0 ? checkResults : null;
+    const failed = checkAfterResults?.find((c) => c.exitCode !== 0);
     if (failed) {
       ok = false;
       blocker = `Local verification failed (${failed.command}, exit ${failed.exitCode}). Output tail: ${failed.output.slice(-800)}`;
@@ -556,6 +561,7 @@ When you are done: leave the tree buildable, run the verification commands above
           worktreePath,
           flow: maestroCheck.flow,
           udid: deps.deviceUdid ?? maestroCheck.udid,
+          autoInstall: deps.botId === "quality-engineer",
         });
 
         maestroEvidence = maestroResult.evidence ?? null;
@@ -595,6 +601,21 @@ When you are done: leave the tree buildable, run the verification commands above
     }
   }
 
+  const maestroForDb: Record<string, unknown> | null = maestroEvidence
+    ? {
+        udid: maestroEvidence.udid,
+        flow: maestroEvidence.flow,
+        exitCode: maestroEvidence.exitCode,
+        outputDir: maestroEvidence.outputDir,
+        appInstalled: maestroEvidence.appInstalled,
+        error: maestroEvidence.error,
+        durationMs: maestroEvidence.durationMs,
+        install: maestroEvidence.install,
+      }
+    : null;
+
+  const checkAfterForDb = checkAfterResults as Record<string, unknown> | null;
+
   await deps.database
     .insert(studioEvidence)
     .values({
@@ -607,10 +628,10 @@ When you are done: leave the tree buildable, run the verification commands above
       changedFiles,
       diff,
       checkBefore: null,
-      checkAfter,
+      checkAfter: checkAfterForDb,
       ok,
       blocker,
-      ...(maestroEvidence ? { maestro: maestroEvidence as Record<string, unknown> } : {}),
+      maestro: maestroForDb,
     })
     .onConflictDoUpdate({
       target: studioEvidence.taskId,
@@ -619,10 +640,10 @@ When you are done: leave the tree buildable, run the verification commands above
         sessionId: run.sessionId,
         changedFiles,
         diff,
-        checkAfter,
+        checkAfter: checkAfterForDb,
         ok,
         blocker,
-        ...(maestroEvidence ? { maestro: maestroEvidence as Record<string, unknown> } : {}),
+        maestro: maestroForDb,
       },
     });
 

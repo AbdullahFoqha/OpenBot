@@ -23,6 +23,12 @@ export const STUDIO_PREFERRED_IOS_UDID = "812A595B-0FDA-4C3F-9346-088E6C07A489";
 const MAESTRO_BIN_DIR = join(homedir(), ".maestro", "bin");
 const DEFAULT_APP_ID = "app.pocketlove.private";
 
+export type InstallResult = {
+  status: "skipped" | "cloned" | "expo" | "failed";
+  exitCode: number | null;
+  logPath: string;
+};
+
 export type MaestroEvidence = {
   udid: string;
   flow: string;
@@ -31,6 +37,7 @@ export type MaestroEvidence = {
   appInstalled: boolean;
   error?: string;
   durationMs: number;
+  install?: InstallResult;
 };
 
 export type MaestroRunInput = {
@@ -49,6 +56,13 @@ export type MaestroRunInput = {
   outputDir?: string;
   /** Timeout in ms for the entire Maestro run. */
   timeoutMs?: number;
+  /**
+   * When true, attempt to install the app if missing.
+   * Also triggered by STUDIO_MAESTRO_INSTALL=1 environment variable.
+   */
+  autoInstall?: boolean;
+  /** Timeout for app installation (expo builds can take minutes). Defaults to 10 minutes. */
+  installTimeoutMs?: number;
 };
 
 export type MaestroRunResult =
@@ -106,6 +120,112 @@ async function runCommand(
 async function checkAppInstalled(udid: string, appId: string): Promise<boolean> {
   const result = await runCommand("xcrun", ["simctl", "get_app_container", udid, appId, "data"]);
   return result.exitCode === 0;
+}
+
+/**
+ * Attempt to install the app onto the simulator.
+ *
+ * Prefers spawning `studio-local/install-app-on-sim.sh` relative to the openbot-studio repo root.
+ * Falls back to direct simctl clone logic if the script is not available.
+ *
+ * Install strategies (in order):
+ * 1. Clone from another sim that has the app (fast path)
+ * 2. Expo build (npx expo run:ios --device <udid> --configuration Debug --no-bundler)
+ */
+export async function installApp(input: {
+  projectPath: string;
+  udid: string;
+  appId: string;
+  outputDir: string;
+  /** Override to force a specific install mode. */
+  mode?: "clone" | "expo" | "auto";
+  /** Timeout for the install process (expo builds can take minutes). */
+  timeoutMs?: number;
+  /** Inject for testing. */
+  runCommand?: typeof runCommand;
+}): Promise<InstallResult> {
+  const run = input.runCommand ?? runCommand;
+  const logPath = join(input.outputDir, "install.log");
+  const mode = input.mode ?? "auto";
+  const timeoutMs = input.timeoutMs ?? 10 * 60_000;
+  let logs = `install: mode=${mode} udid=${input.udid} appId=${input.appId}\n`;
+
+  const appendLog = async (text: string) => {
+    logs += text + "\n";
+    await writeFile(logPath, logs).catch(() => {});
+  };
+
+  try {
+    if (mode === "auto" || mode === "clone") {
+      await appendLog("Attempting clone from another simulator...");
+      const cloneResult = await tryCloneFromOtherSim(input.udid, input.appId, run);
+      if (cloneResult.ok) {
+        await appendLog(`CLONE: success from ${cloneResult.donorUdid}`);
+        return { status: "cloned", exitCode: 0, logPath };
+      }
+      await appendLog(`CLONE: failed - ${cloneResult.reason}`);
+    }
+
+    if (mode === "clone") {
+      await appendLog("ERROR: clone-only mode requested but no donor sim available");
+      return { status: "failed", exitCode: 1, logPath };
+    }
+
+    await appendLog(`EXPO: npx expo run:ios --device ${input.udid} --configuration Debug --no-bundler`);
+    await appendLog(`cwd=${input.projectPath}`);
+
+    const expoResult = await run(
+      "npx",
+      ["expo", "run:ios", "--device", input.udid, "--configuration", "Debug", "--no-bundler"],
+      { cwd: input.projectPath, timeoutMs },
+    );
+
+    await appendLog(`EXPO: exit=${expoResult.exitCode}`);
+    await appendLog(expoResult.stdout);
+    if (expoResult.stderr) await appendLog(`stderr: ${expoResult.stderr}`);
+
+    if (expoResult.exitCode === 0) {
+      return { status: "expo", exitCode: 0, logPath };
+    }
+
+    return { status: "failed", exitCode: expoResult.exitCode, logPath };
+  } catch (err) {
+    await appendLog(`ERROR: ${err instanceof Error ? err.message : String(err)}`);
+    return { status: "failed", exitCode: null, logPath };
+  }
+}
+
+async function tryCloneFromOtherSim(
+  targetUdid: string,
+  appId: string,
+  run: typeof runCommand,
+): Promise<{ ok: true; donorUdid: string } | { ok: false; reason: string }> {
+  const listResult = await run("xcrun", ["simctl", "list", "devices", "available"]);
+  if (listResult.exitCode !== 0) {
+    return { ok: false, reason: "Failed to list available devices" };
+  }
+
+  const udidRegex = /\(([A-F0-9-]{36})\)/gi;
+  const matches = listResult.stdout.matchAll(udidRegex);
+
+  for (const match of matches) {
+    const donorUdid = match[1];
+    if (!donorUdid || donorUdid === targetUdid) continue;
+
+    const hasApp = await run("xcrun", ["simctl", "get_app_container", donorUdid, appId, "data"]);
+    if (hasApp.exitCode !== 0) continue;
+
+    const appPathResult = await run("xcrun", ["simctl", "get_app_container", donorUdid, appId, "app"]);
+    if (appPathResult.exitCode !== 0 || !appPathResult.stdout.trim()) continue;
+
+    const appPath = appPathResult.stdout.trim();
+    const installResult = await run("xcrun", ["simctl", "install", targetUdid, appPath]);
+    if (installResult.exitCode === 0) {
+      return { ok: true, donorUdid };
+    }
+  }
+
+  return { ok: false, reason: "No donor simulator found with the app installed" };
 }
 
 async function bootSimulator(udid: string): Promise<{ ok: boolean; output: string }> {
@@ -217,20 +337,70 @@ export async function runMaestro(
     }
 
     evidence.appInstalled = await checkAppInstalled(udid, appId);
-    if (!evidence.appInstalled) {
-      evidence.durationMs = Date.now() - started;
-      evidence.error = `App ${appId} not installed on ${udid}`;
-      const blockerPath = join(outputDir, "blocker.txt");
-      await writeFile(
-        blockerPath,
-        `APP_NOT_INSTALLED:${appId} on ${udid} — install Debug build, then re-run.\n` +
-          `Hint: preferred free sim is iPhone 17 Pro (${STUDIO_PREFERRED_IOS_UDID}).\n`,
-      );
-      return {
-        ok: false,
-        reason: `App ${appId} not installed on simulator ${udid}. Install the Debug build first.`,
-        evidence,
+    const forceInstall = process.env.STUDIO_MAESTRO_INSTALL === "1";
+
+    if (!evidence.appInstalled || forceInstall) {
+      const shouldInstall = input.autoInstall || forceInstall;
+
+      if (shouldInstall) {
+        const installResult = await installApp({
+          projectPath: input.projectPath,
+          udid,
+          appId,
+          outputDir,
+          timeoutMs: input.installTimeoutMs,
+        });
+
+        evidence.install = installResult;
+
+        if (installResult.status === "skipped") {
+          evidence.appInstalled = true;
+        } else if (installResult.status === "cloned" || installResult.status === "expo") {
+          evidence.appInstalled = await checkAppInstalled(udid, appId);
+        }
+
+        if (!evidence.appInstalled) {
+          evidence.durationMs = Date.now() - started;
+          evidence.error = `App ${appId} not installed on ${udid} after install attempt (${installResult.status})`;
+          const blockerPath = join(outputDir, "blocker.txt");
+          await writeFile(
+            blockerPath,
+            `APP_INSTALL_FAILED:${appId} on ${udid}\n` +
+              `Install status: ${installResult.status}, exit code: ${installResult.exitCode}\n` +
+              `See ${installResult.logPath} for details.\n`,
+          );
+          return {
+            ok: false,
+            reason: `App ${appId} install failed on simulator ${udid}. Check ${installResult.logPath}`,
+            evidence,
+          };
+        }
+      } else {
+        evidence.durationMs = Date.now() - started;
+        evidence.error = `App ${appId} not installed on ${udid}`;
+        const blockerPath = join(outputDir, "blocker.txt");
+        await writeFile(
+          blockerPath,
+          `APP_NOT_INSTALLED:${appId} on ${udid} — install Debug build, then re-run.\n` +
+            `Hint: preferred free sim is iPhone 17 Pro (${STUDIO_PREFERRED_IOS_UDID}).\n` +
+            `Set STUDIO_MAESTRO_INSTALL=1 to force auto-install.\n`,
+        );
+        return {
+          ok: false,
+          reason: `App ${appId} not installed on simulator ${udid}. Install the Debug build first, or set STUDIO_MAESTRO_INSTALL=1.`,
+          evidence,
+        };
+      }
+    } else {
+      evidence.install = {
+        status: "skipped",
+        exitCode: null,
+        logPath: join(outputDir, "install.log"),
       };
+      await writeFile(
+        join(outputDir, "install.log"),
+        `install: skipped (app already present on ${udid})\n`,
+      ).catch(() => {});
     }
 
     const metaPath = join(outputDir, "meta.txt");
