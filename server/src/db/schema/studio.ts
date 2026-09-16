@@ -251,6 +251,11 @@ export const studioEvidence = pgTable("studio_evidence", {
   checkAfter: jsonb("check_after"),
   ok: boolean("ok"),
   blocker: text("blocker"),
+  /**
+   * Maestro UI test evidence, when a quality-engineer run with maestroFlow or `maestro:` AC.
+   * Contains { udid, flow, exitCode, outputDir, appInstalled, error?, durationMs }.
+   */
+  maestro: jsonb("maestro"),
   createdAt: createdAt(),
 });
 

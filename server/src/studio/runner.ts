@@ -24,6 +24,8 @@ import { studioEvidence } from "../db/schema";
 import type { TaskStore } from "./task-store";
 import { deliverProjectDraftPr } from "./project-delivery";
 import type { GhRunner } from "./github";
+import type { NativeWorker } from "../native-worker/worker";
+import { runMaestro, shouldRunMaestro, type MaestroEvidence } from "./maestro";
 
 export const CURSOR_ENGINEER_BOT_ID = "react-native-engineer";
 export const DEFAULT_MODEL = "cursor-grok-4.6-xhigh";
@@ -43,6 +45,21 @@ export type RunOutcome = {
   events: AgentEvent[];
   /** Set when a successful project task opened or reconciled a draft PR. */
   pullRequest?: { number: number; url: string; created: boolean } | null;
+  /** Set when Maestro UI tests were run (quality-engineer with maestroFlow or maestro: AC). */
+  maestro?: {
+    udid: string;
+    flow: string;
+    exitCode: number | null;
+    outputDir: string;
+    appInstalled: boolean;
+    error?: string;
+    durationMs: number;
+    install?: {
+      status: "skipped" | "cloned" | "expo" | "failed";
+      exitCode: number | null;
+      logPath: string;
+    };
+  } | null;
 };
 
 /** Runs a shell check inside a worktree and returns a plain, comparable result. */
@@ -375,6 +392,20 @@ export async function runProjectTask(deps: {
     cwd: string,
     branch: string,
   ) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  /**
+   * Path to a Maestro YAML flow, relative to projectPath or absolute.
+   * When set (typically with quality-engineer), Maestro runs after npm verification.
+   */
+  maestroFlow?: string;
+  /**
+   * iOS Simulator UDID for Maestro. Defaults to studio's preferred device.
+   */
+  deviceUdid?: string;
+  /**
+   * Native worker for device reservation. Required when maestroFlow is set.
+   * If not provided and Maestro is requested, the run fails with a clear error.
+   */
+  nativeWorker?: NativeWorker;
 }): Promise<RunOutcome> {
   const claim = await deps.admission.claim({
     taskId: deps.taskId,
@@ -474,7 +505,8 @@ When you are done: leave the tree buildable, run the verification commands above
 
   let blocker: string | null = ok ? null : run.blocker ?? "The worker made no changes.";
   let pullRequest: RunOutcome["pullRequest"] = null;
-  let checkAfter: unknown = null;
+  let checkAfterResults: Array<{ command: string; exitCode: number | null; output: string }> | null = null;
+  let maestroEvidence: MaestroEvidence | null = null;
 
   if (ok) {
     /*
@@ -491,16 +523,55 @@ When you are done: leave the tree buildable, run the verification commands above
     }
 
     // Independent re-check in the worktree — same idea as the coding test fixture path.
-    const checkResults = [];
+    const checkResults: Array<{ command: string; exitCode: number | null; output: string }> = [];
     for (const command of verifyCommands) {
       checkResults.push(await runCheck(worktreePath, command));
     }
-    checkAfter = checkResults.length > 0 ? checkResults : null;
-    const failed = checkResults.find((c) => c.exitCode !== 0);
+    checkAfterResults = checkResults.length > 0 ? checkResults : null;
+    const failed = checkAfterResults?.find((c) => c.exitCode !== 0);
     if (failed) {
       ok = false;
       blocker = `Local verification failed (${failed.command}, exit ${failed.exitCode}). Output tail: ${failed.output.slice(-800)}`;
       await deps.taskStore.setBlocked(deps.taskId, blocker).catch(() => {});
+    }
+  }
+
+  /*
+   * Maestro UI tests: run after npm verification passes, only for quality-engineer or when
+   * maestroFlow is explicitly set. Device lease through native-worker, not studio_reservations.
+   */
+  if (ok) {
+    const maestroCheck = shouldRunMaestro({
+      maestroFlow: deps.maestroFlow,
+      acceptanceCriteria: deps.acceptanceCriteria,
+      ownerBotId: deps.botId,
+    });
+
+    if (maestroCheck.run && maestroCheck.flow) {
+      if (!deps.nativeWorker) {
+        ok = false;
+        blocker = "Maestro flow requested but no native worker is available for device reservation.";
+        await deps.taskStore.setBlocked(deps.taskId, blocker).catch(() => {});
+      } else {
+        const maestroResult = await runMaestro(deps.nativeWorker, {
+          taskId: deps.taskId,
+          actorId: `studio-task-${deps.taskId}`,
+          fence: 1,
+          projectPath: deps.projectPath,
+          worktreePath,
+          flow: maestroCheck.flow,
+          udid: deps.deviceUdid ?? maestroCheck.udid,
+          autoInstall: deps.botId === "quality-engineer",
+        });
+
+        maestroEvidence = maestroResult.evidence ?? null;
+
+        if (!maestroResult.ok) {
+          ok = false;
+          blocker = maestroResult.reason;
+          await deps.taskStore.setBlocked(deps.taskId, blocker).catch(() => {});
+        }
+      }
     }
   }
 
@@ -530,6 +601,21 @@ When you are done: leave the tree buildable, run the verification commands above
     }
   }
 
+  const maestroForDb: Record<string, unknown> | null = maestroEvidence
+    ? {
+        udid: maestroEvidence.udid,
+        flow: maestroEvidence.flow,
+        exitCode: maestroEvidence.exitCode,
+        outputDir: maestroEvidence.outputDir,
+        appInstalled: maestroEvidence.appInstalled,
+        error: maestroEvidence.error,
+        durationMs: maestroEvidence.durationMs,
+        install: maestroEvidence.install,
+      }
+    : null;
+
+  const checkAfterForDb = checkAfterResults as Record<string, unknown> | null;
+
   await deps.database
     .insert(studioEvidence)
     .values({
@@ -542,9 +628,10 @@ When you are done: leave the tree buildable, run the verification commands above
       changedFiles,
       diff,
       checkBefore: null,
-      checkAfter,
+      checkAfter: checkAfterForDb,
       ok,
       blocker,
+      maestro: maestroForDb,
     })
     .onConflictDoUpdate({
       target: studioEvidence.taskId,
@@ -553,9 +640,10 @@ When you are done: leave the tree buildable, run the verification commands above
         sessionId: run.sessionId,
         changedFiles,
         diff,
-        checkAfter,
+        checkAfter: checkAfterForDb,
         ok,
         blocker,
+        maestro: maestroForDb,
       },
     });
 
@@ -576,5 +664,6 @@ When you are done: leave the tree buildable, run the verification commands above
     blocker,
     events: run.events,
     pullRequest,
+    maestro: maestroEvidence,
   };
 }
