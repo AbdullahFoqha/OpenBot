@@ -18,6 +18,30 @@ CONTROL_MODEL_PORT=3013
 
 mkdir -p "$LOGS"
 
+# Resolve bun to an absolute path. Agent/nohup shells often lack fnm's transient PATH, which
+# previously killed control-model/server/app right after start ("nohup: bun: No such file").
+if [[ -z "${STUDIO_BUN:-}" ]]; then
+  if command -v bun >/dev/null 2>&1; then
+    STUDIO_BUN=$(command -v bun)
+  elif [[ -x "$HOME/.local/share/fnm/node-versions/v24.16.0/installation/lib/node_modules/bun/bin/bun.exe" ]]; then
+    STUDIO_BUN="$HOME/.local/share/fnm/node-versions/v24.16.0/installation/lib/node_modules/bun/bin/bun.exe"
+  else
+    echo "bun not found on PATH and no studio fallback. Install bun or set STUDIO_BUN." >&2
+    exit 1
+  fi
+fi
+# Prefer a non-multishell path when command -v pointed at a disposable fnm shim dir.
+if [[ "$STUDIO_BUN" == *"/fnm_multishells/"* ]] && [[ -x "$HOME/.local/share/fnm/node-versions/v24.16.0/installation/lib/node_modules/bun/bin/bun.exe" ]]; then
+  STUDIO_BUN="$HOME/.local/share/fnm/node-versions/v24.16.0/installation/lib/node_modules/bun/bin/bun.exe"
+fi
+
+# Durable PATH for nohup children (verify spawns `npm run typecheck`/`test` with inherited env).
+# Agent shells and bare LaunchAgents often lack fnm multishells; keep absolute node+npm+bun bins.
+NODE_BIN="$HOME/.local/share/fnm/node-versions/v24.16.0/installation/bin"
+BUN_BIN="$(dirname "$STUDIO_BUN")"
+export PATH="$BUN_BIN:$NODE_BIN:/Users/abdullah/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export STUDIO_BUN
+
 pid_alive() {
   [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null
 }
@@ -33,6 +57,46 @@ wait_for_health() {
     sleep 1
   done
   return 1
+}
+
+http_ok() {
+  curl -fsS --connect-timeout 2 --max-time 3 "$1" >/dev/null 2>&1
+}
+
+# True if anything HTTP answers (including 404). Used for the control-model shim on :3013.
+http_any() {
+  local code
+  code=$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 2 --max-time 3 "$1" 2>/dev/null || echo 000)
+  [[ "$code" != "000" ]]
+}
+
+# Kill whatever holds a port / pidfile so a half-dead listener cannot block start.
+# Used when pid or port looks "up" but the health URL does not answer.
+reap_stale() {
+  local label=$1 pidfile=$2 port=$3
+  local owner pid
+  owner=$(port_owner "$port")
+  if [[ -n "$owner" ]]; then
+    echo "healing $label: killing stale listener pid $owner on :$port"
+    kill "$owner" 2>/dev/null || true
+    sleep 0.5
+    kill -9 "$owner" 2>/dev/null || true
+  fi
+  if [[ -f "$pidfile" ]]; then
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "healing $label: killing stale pidfile process $pid"
+      kill "$pid" 2>/dev/null || true
+      sleep 0.5
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidfile"
+  fi
+  # Brief wait so the port is free for bind.
+  for _ in 1 2 3 4 5; do
+    [[ -z "$(port_owner "$port")" ]] && return 0
+    sleep 0.4
+  done
 }
 
 # Active work, read from the studio's own admission API rather than guessed from process activity.
@@ -104,38 +168,48 @@ cmd_start() {
   # Each of the three app processes is started only if nothing already owns its port or pidfile —
   # running this twice must not create duplicates, and a stale pidfile pointing at a dead process
   # must not block a real start.
-  if pid_alive "$LOGS/claude-control-model.pid" || [[ -n "$(port_owner $CONTROL_MODEL_PORT)" ]]; then
+  if (pid_alive "$LOGS/claude-control-model.pid" || [[ -n "$(port_owner $CONTROL_MODEL_PORT)" ]]) && http_any "http://127.0.0.1:$CONTROL_MODEL_PORT/"; then
     echo "control model already running"
   else
+    if pid_alive "$LOGS/claude-control-model.pid" || [[ -n "$(port_owner $CONTROL_MODEL_PORT)" ]]; then
+      reap_stale "control model" "$LOGS/claude-control-model.pid" "$CONTROL_MODEL_PORT"
+    fi
     started_any=1
     echo "starting control model..."
     # nohup + disown so a closing terminal (or an agent shell) does not take the stack down —
     # a dead :3013 presents as "Failed after 3 attempts... Cannot connect to API" in chat.
     (
       cd "$ROOT/studio-local/claude-control-model" || exit 1
-      nohup bun --env-file=../env server.ts >> "$LOGS/claude-control-model.log" 2>&1 &
+      nohup "$STUDIO_BUN" --env-file=../env server.ts >> "$LOGS/claude-control-model.log" 2>&1 &
       echo $! > "$LOGS/claude-control-model.pid"
       disown $! 2>/dev/null || true
     )
     sleep 1
   fi
 
-  if pid_alive "$LOGS/server.pid" || [[ -n "$(port_owner $SERVER_PORT)" ]]; then
+  # Do not trust pid/port alone: keepalive used to print "already running" while :3012 was dead.
+  if (pid_alive "$LOGS/server.pid" || [[ -n "$(port_owner $SERVER_PORT)" ]]) && http_ok "$SERVER_HEALTH"; then
     echo "server already running"
   else
+    if pid_alive "$LOGS/server.pid" || [[ -n "$(port_owner $SERVER_PORT)" ]]; then
+      reap_stale "server" "$LOGS/server.pid" "$SERVER_PORT"
+    fi
     started_any=1
     echo "starting server..."
-    nohup bun --env-file=studio-local/env server/src/index.ts > "$LOGS/server.log" 2>&1 &
+    nohup "$STUDIO_BUN" --env-file=studio-local/env server/src/index.ts > "$LOGS/server.log" 2>&1 &
     echo $! > "$LOGS/server.pid"
     disown $! 2>/dev/null || true
   fi
 
-  if pid_alive "$LOGS/app.pid" || [[ -n "$(port_owner $APP_PORT)" ]]; then
+  if (pid_alive "$LOGS/app.pid" || [[ -n "$(port_owner $APP_PORT)" ]]) && http_ok "$APP_URL"; then
     echo "app already running"
   else
+    if pid_alive "$LOGS/app.pid" || [[ -n "$(port_owner $APP_PORT)" ]]; then
+      reap_stale "app" "$LOGS/app.pid" "$APP_PORT"
+    fi
     started_any=1
     echo "starting app..."
-    nohup bun --env-file=studio-local/env run --filter app dev > "$LOGS/app.log" 2>&1 &
+    nohup "$STUDIO_BUN" --env-file=studio-local/env run --filter app dev > "$LOGS/app.log" 2>&1 &
     echo $! > "$LOGS/app.pid"
     disown $! 2>/dev/null || true
   fi
