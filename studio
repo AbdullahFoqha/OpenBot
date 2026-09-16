@@ -39,7 +39,8 @@ fi
 # Agent shells and bare LaunchAgents often lack fnm multishells; keep absolute node+npm+bun bins.
 NODE_BIN="$HOME/.local/share/fnm/node-versions/v24.16.0/installation/bin"
 BUN_BIN="$(dirname "$STUDIO_BUN")"
-export PATH="$BUN_BIN:$NODE_BIN:/Users/abdullah/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+MAESTRO_BIN="$HOME/.maestro/bin"
+export PATH="$BUN_BIN:$NODE_BIN:$MAESTRO_BIN:/Users/abdullah/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export STUDIO_BUN
 
 pid_alive() {
@@ -333,6 +334,11 @@ cmd_restart() {
   cmd_start
 }
 
+cmd_prune_worktrees() {
+  # Forward all args; dry-run unless --apply. See studio-local/prune-studio-worktrees.sh.
+  exec "$ROOT/studio-local/prune-studio-worktrees.sh" "$@"
+}
+
 case "$1" in
   start) cmd_start ;;
   open) cmd_open ;;
@@ -340,8 +346,9 @@ case "$1" in
   check) cmd_check ;;
   stop) cmd_stop "$2" ;;
   restart) cmd_restart "$2" ;;
+  prune-worktrees) shift; cmd_prune_worktrees "$@" ;;
   *)
-    echo "usage: ./studio start|open|status|check|stop|restart"
+    echo "usage: ./studio start|open|status|check|stop|restart|prune-worktrees"
     exit 1
     ;;
 esac

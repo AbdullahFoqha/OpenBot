@@ -39,6 +39,7 @@ Ask Lead in chat → bots drive **Mac + browser** without babysitting → Engine
 6. ~~Default `STUDIO_INSTALL_MODE=release`~~ — TS `2395912` + shell `bd195c8` (JSDoc `53fd22d`); studio on `53fd22d`.
 7. ~~Cold solo demo ≤15 min~~ — `ULTRA_DEMO.md` matches live QE E2E (`qe-maestro-e2e.mjs` / maestroFlow + Release defaults); proven task-95d84d7e…
 8. Optional: push OpenBot draft PRs #1/#2 when ready for review.
+9. ~~Studio worktree prune~~ — `./studio prune-worktrees` (dry-run; `--apply` removes terminal/orphan `*.studio-worktree` older than N hours; never `in_progress`).
 
 ## Constraints (unchanged)
 
@@ -49,3 +50,9 @@ Ask Lead in chat → bots drive **Mac + browser** without babysitting → Engine
 Shell path: `run-maestro-flow.sh` also invokes `install-app-on-sim.sh` when the app is missing (or `STUDIO_MAESTRO_INSTALL=1`).
 
 Dirty-sim (2026-09-16): `reset-app-on-sim.sh` + `STUDIO_MAESTRO_RESET=1` (default) + onboard `clearState: true`; prefer Release install for Maestro (embeds JS). Prove exit=0 `20260916T055901Z`. Studio restarted on `0807827`.
+
+Lead-tool Maestro (2026-09-16): Verifier PASS task-32149d89 via studio-lead chat (`4a0fb65`); HTTP E2E PASS task-95d84d7e. Both paths green.
+
+Maestro flow matrix (2026-09-16): Release+reset — onboard/expense/payday-ineligible PASS; payday needs seed; expense-media Release/__DEV__ gap. See studio-local/maestro-smoke.md (`5ecf172`).
+
+Worktree hygiene (2026-09-16): `./studio prune-worktrees` dry-run lists; `--apply --older-than 2` removes terminal-task worktrees under Documents/projects.
