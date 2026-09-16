@@ -198,6 +198,8 @@ describe("runMaestro with mock native worker", () => {
     await mockWorker.register({ taskId, devices: ["udid"] });
     try {
       throw new Error("Simulated failure during Maestro run");
+    } catch {
+      // expected — we only care that finally still releases
     } finally {
       mockWorker.release(taskId);
     }
