@@ -43,4 +43,6 @@ STUDIO_MAESTRO_INSTALL=1 STUDIO_INSTALL_MODE=release \
 **PASS evidence:** `studio-local/ui-test/out/maestro/20260916T055901Z/` — exit 0  
 (assert startingAmount → tap save → home.everydayBalance + home.addSpending)
 
+QE AC: prefer `STUDIO_INSTALL_MODE=release` — see `studio-local/QE_AC_MAESTRO_TEMPLATE.md`.
+
 Env knobs: `STUDIO_MAESTRO_RESET=0` · `STUDIO_MAESTRO_INSTALL=1` · `STUDIO_INSTALL_MODE=release|clone|expo|auto`
