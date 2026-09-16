@@ -36,6 +36,7 @@ import {
 } from "./plugins/selection";
 import type { GrantedTool } from "./plugins/tools";
 import { grantedToolGuidance } from "./plugins/tools";
+import { chatModelForBot } from "./studio/bot-harness";
 
 /**
  * The CopilotKit runtime, always in Intelligence mode.
@@ -334,12 +335,13 @@ export function builtInAgentConfiguration(
      *
      * resolveModel() (@copilotkit/runtime's agent/index.mjs) turns that string into
      * createOpenAI({...})(model), which is the OpenAI *Responses* API — this deployment's
-     * OPENAI_BASE_URL is a local Chat-Completions-only shim (studio-local/claude-control-model,
-     * backed by the Claude subscription), and Responses 404s against it. Building the model
-     * ourselves with .chat() targets Chat Completions instead, which the shim does implement.
+     * OPENAI_BASE_URL is a local Chat-Completions dual router (studio-local/claude-control-model):
+     * cursor-grok-* → Cursor subscription; other models → Claude Agent SDK. Responses 404s against
+     * it, so we build the model with .chat(). Per-bot model comes from chatModelForBot (most bots
+     * cursor-grok-4.6-high; product-designer keeps the Claude package default).
      */
     model: createOpenAI({ apiKey, baseURL: process.env.OPENAI_BASE_URL }).chat(
-      model.defaultModel,
+      chatModelForBot(agent.id, model.defaultModel),
     ),
     /*
      * The package's role, then the person's own standing instructions, then what this Bot actually
