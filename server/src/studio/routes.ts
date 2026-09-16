@@ -67,6 +67,7 @@ import {
 import type { BotMessaging } from "./bot-messaging";
 import type { StudioChannelBus } from "./studio-channels";
 import type { StudioMemoryStore } from "./studio-memory";
+import type { StudioSkillPackStore } from "./studio-skill-packs";
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -107,8 +108,10 @@ export function createStudioRoutes(deps: {
   studioChannelBus?: StudioChannelBus;
   /** P1.3 durable memory. */
   studioMemory?: StudioMemoryStore;
+  /** P1.4 skill packs. */
+  skillPackStore?: StudioSkillPackStore;
 }): Hono<{ Variables: AppVariables }> {
-  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus, studioMemory } = deps;
+  const { database, admission, taskStore, policy, requireUser, botMessaging, studioChannelBus, studioMemory, skillPackStore } = deps;
   const dispatcher =
     deps.dispatcher ??
     createStudioDispatcher({ database, admission, taskStore });
@@ -546,6 +549,78 @@ export function createStudioRoutes(deps: {
 
 
 
+
+
+  // --- P1.4 skill packs ---
+  routes.get("/skill-packs", async (c: Context) => {
+    if (!skillPackStore) return c.json({ error: "Skill packs are not configured." }, 503);
+    const packs = await skillPackStore.list();
+    return c.json({ packs });
+  });
+
+  routes.post("/skill-packs", async (c: Context) => {
+    if (!skillPackStore) return c.json({ error: "Skill packs are not configured." }, 503);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.name !== "string") {
+      return c.json({ error: "name is required." }, 400);
+    }
+    const skillsRaw = Array.isArray(body.skills) ? body.skills : [];
+    const skills = [];
+    for (const s of skillsRaw) {
+      if (!s || typeof s !== "object") continue;
+      const skill = s as Record<string, unknown>;
+      if (
+        typeof skill.slug === "string" &&
+        typeof skill.title === "string" &&
+        typeof skill.summary === "string" &&
+        typeof skill.instructions === "string"
+      ) {
+        skills.push({
+          slug: skill.slug,
+          title: skill.title,
+          summary: skill.summary,
+          instructions: skill.instructions,
+        });
+      }
+    }
+    const result = await skillPackStore.create({
+      name: body.name,
+      description: typeof body.description === "string" ? body.description : undefined,
+      skills,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ pack: result.pack }, 201);
+  });
+
+  routes.post("/skill-packs/:id/attach", async (c: Context) => {
+    if (!skillPackStore) return c.json({ error: "Skill packs are not configured." }, 503);
+    const id = c.req.param("id");
+    if (!id) return c.json({ error: "id required" }, 400);
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.botId !== "string") {
+      return c.json({ error: "botId is required." }, 400);
+    }
+    const result = await skillPackStore.attach({
+      packId: id,
+      botId: body.botId,
+      by: c.var.actor?.id ?? "dev-local-user",
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({
+      packId: result.pack.id,
+      botId: result.botId,
+      grantedSlugs: result.grantedSlugs,
+      pack: result.pack,
+    });
+  });
+
+  routes.get("/bots/:id/skill-packs", async (c: Context) => {
+    if (!skillPackStore) return c.json({ error: "Skill packs are not configured." }, 503);
+    const botId = c.req.param("id");
+    if (!botId) return c.json({ error: "id required" }, 400);
+    const packs = await skillPackStore.listForBot(botId);
+    return c.json({ packs });
+  });
 
   // --- P1.3 durable memory ---
   routes.get("/bots/:id/memory", async (c: Context) => {

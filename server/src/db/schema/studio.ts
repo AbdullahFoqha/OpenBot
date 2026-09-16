@@ -11,6 +11,7 @@ import {
   integer,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
@@ -589,5 +590,37 @@ export const studioMemories = pgTable(
   (table) => [
     index("studio_memories_bot_idx").on(table.botId, table.createdAt),
     index("studio_memories_scope_idx").on(table.scope, table.createdAt),
+  ],
+);
+
+/**
+ * P1.4 skill packs attachable to bot roles (Grok skills parity).
+ * A pack holds skill definitions; attach upserts skills + plugin_grants for the bot.
+ */
+export const studioSkillPacks = pgTable("studio_skill_packs", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  description: text("description").notNull().default(""),
+  /** [{ slug, title, summary, instructions }] */
+  skills: jsonb("skills").notNull().default([]),
+  createdAt: createdAt(),
+});
+
+export const studioSkillPackAttachments = pgTable(
+  "studio_skill_pack_attachments",
+  {
+    packId: text("pack_id")
+      .notNull()
+      .references(() => studioSkillPacks.id, { onDelete: "cascade" }),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    attachedAt: timestamp("attached_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.packId, table.botId] }),
+    index("studio_skill_pack_attachments_bot_idx").on(table.botId),
   ],
 );

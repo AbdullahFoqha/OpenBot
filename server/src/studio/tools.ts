@@ -16,6 +16,7 @@ import { createDynamicBot } from "./bot-catalog";
 import type { BotMessaging } from "./bot-messaging";
 import type { StudioChannelBus } from "./studio-channels";
 import type { StudioMemoryStore } from "./studio-memory";
+import type { StudioSkillPackStore } from "./studio-skill-packs";
 import {
   getBrowserSession,
   startBrowserSession,
@@ -209,6 +210,31 @@ const memoryRecallParams = z.object({
   limit: z.number().optional(),
 });
 
+
+const skillPackCreateParams = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  skills: z
+    .array(
+      z.object({
+        slug: z.string().min(1),
+        title: z.string().min(1),
+        summary: z.string().min(1),
+        instructions: z.string().min(1),
+      }),
+    )
+    .min(1),
+});
+
+const skillPackAttachParams = z.object({
+  packId: z.string().min(1),
+  botId: z.string().min(1).describe("Role/bot to attach the pack to."),
+});
+
+const skillPackListParams = z.object({
+  botId: z.string().optional().describe("If set, list packs attached to this bot; else list all packs."),
+});
+
 export function studioTools(options: {
   dispatcher: StudioDispatcher;
   database: Database;
@@ -217,15 +243,82 @@ export function studioTools(options: {
   botMessaging?: BotMessaging;
   studioChannelBus?: StudioChannelBus;
   studioMemory?: StudioMemoryStore;
+  skillPackStore?: StudioSkillPackStore;
   /** Default actor for headless messaging (studio local user). */
   messagingActorId?: string;
 }): (botId: string) => GrantedTool[] {
-  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, studioMemory, messagingActorId } = options;
+  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, studioMemory, skillPackStore, messagingActorId } = options;
 
   return (botId: string) => {
     if (allowedBotIds && !allowedBotIds.includes(botId)) return [];
 
     const tools: GrantedTool[] = [
+      {
+        name: "studio_skill_pack_create",
+        ref: "studio/skill_pack_create",
+        description:
+          "Create a skill pack (named set of skills) that can later be attached to bot roles via studio_skill_pack_attach.",
+        parameters: skillPackCreateParams,
+        execute: async (args) => {
+          if (!skillPackStore) {
+            return `${REFUSAL_MARKER} Skill packs are not wired in this deployment.`;
+          }
+          const parsed = skillPackCreateParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} name and skills[] are required.`;
+          }
+          const result = await skillPackStore.create(parsed.data);
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({ ok: true, packId: result.pack.id, pack: result.pack });
+        },
+      },
+      {
+        name: "studio_skill_pack_attach",
+        ref: "studio/skill_pack_attach",
+        description:
+          "Attach a skill pack to a bot role: upserts skills and grants them (plugin_grants kind=skill).",
+        parameters: skillPackAttachParams,
+        execute: async (args) => {
+          if (!skillPackStore) {
+            return `${REFUSAL_MARKER} Skill packs are not wired in this deployment.`;
+          }
+          const parsed = skillPackAttachParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} packId and botId are required.`;
+          }
+          const result = await skillPackStore.attach({
+            ...parsed.data,
+            by: messagingActorId ?? "dev-local-user",
+          });
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({
+            ok: true,
+            packId: result.pack.id,
+            botId: result.botId,
+            grantedSlugs: result.grantedSlugs,
+          });
+        },
+      },
+      {
+        name: "studio_skill_pack_list",
+        ref: "studio/skill_pack_list",
+        description: "List all skill packs, or packs attached to a bot when botId is set.",
+        parameters: skillPackListParams,
+        execute: async (args) => {
+          if (!skillPackStore) {
+            return `${REFUSAL_MARKER} Skill packs are not wired in this deployment.`;
+          }
+          const parsed = skillPackListParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} invalid list args.`;
+          }
+          const packs = parsed.data.botId
+            ? await skillPackStore.listForBot(parsed.data.botId)
+            : await skillPackStore.list();
+          return JSON.stringify({ ok: true, packs, count: packs.length });
+        },
+      },
+
       {
         name: "studio_memory_write",
         ref: "studio/memory_write",
