@@ -63,6 +63,19 @@ http_ok() {
   curl -fsS --connect-timeout 2 --max-time 3 "$1" >/dev/null 2>&1
 }
 
+# Require several failures before declaring health dead — Playwright load causes
+# occasional empty-reply / timeout flakes that must NOT trigger reap_stale.
+http_ok_stable() {
+  local url=$1
+  local need=${2:-3}
+  local i
+  for i in $(seq 1 "$need"); do
+    if http_ok "$url"; then return 0; fi
+    sleep 0.6
+  done
+  return 1
+}
+
 # True if anything HTTP answers (including 404). Used for the control-model shim on :3013.
 http_any() {
   local code
@@ -97,6 +110,31 @@ reap_stale() {
     [[ -z "$(port_owner "$port")" ]] && return 0
     sleep 0.4
   done
+}
+
+
+# Start a long-lived child in its OWN session/process group.
+# Without this, bun children inherit the keepalive-loop PGID; LaunchAgent exit
+# (exit timeout 5s) SIGTERMs that whole group and silently kills :3012/:3010/:3013.
+spawn_detached() {
+  local pidfile=$1 logfile=$2
+  shift 2
+  STUDIO_SPAWN_PWD="$PWD" /usr/bin/python3 - "$pidfile" "$logfile" "$@" <<'PY'
+import os, subprocess, sys
+pidfile, logfile, cmd = sys.argv[1], sys.argv[2], sys.argv[3:]
+cwd = os.environ.get("STUDIO_SPAWN_PWD") or os.getcwd()
+log = open(logfile, "a", buffering=1)
+proc = subprocess.Popen(
+    cmd,
+    cwd=cwd,
+    stdout=log,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+    env=os.environ.copy(),
+)
+open(pidfile, "w").write(str(proc.pid))
+print(proc.pid)
+PY
 }
 
 # Active work, read from the studio's own admission API rather than guessed from process activity.
@@ -180,15 +218,14 @@ cmd_start() {
     # a dead :3013 presents as "Failed after 3 attempts... Cannot connect to API" in chat.
     (
       cd "$ROOT/studio-local/claude-control-model" || exit 1
-      nohup "$STUDIO_BUN" --env-file=../env server.ts >> "$LOGS/claude-control-model.log" 2>&1 &
-      echo $! > "$LOGS/claude-control-model.pid"
-      disown $! 2>/dev/null || true
+      spawn_detached "$LOGS/claude-control-model.pid" "$LOGS/claude-control-model.log" \
+        "$STUDIO_BUN" --env-file=../env server.ts >/dev/null
     )
     sleep 1
   fi
 
   # Do not trust pid/port alone: keepalive used to print "already running" while :3012 was dead.
-  if (pid_alive "$LOGS/server.pid" || [[ -n "$(port_owner $SERVER_PORT)" ]]) && http_ok "$SERVER_HEALTH"; then
+  if (pid_alive "$LOGS/server.pid" || [[ -n "$(port_owner $SERVER_PORT)" ]]) && http_ok_stable "$SERVER_HEALTH"; then
     echo "server already running"
   else
     if pid_alive "$LOGS/server.pid" || [[ -n "$(port_owner $SERVER_PORT)" ]]; then
@@ -196,12 +233,11 @@ cmd_start() {
     fi
     started_any=1
     echo "starting server..."
-    nohup "$STUDIO_BUN" --env-file=studio-local/env server/src/index.ts > "$LOGS/server.log" 2>&1 &
-    echo $! > "$LOGS/server.pid"
-    disown $! 2>/dev/null || true
+    spawn_detached "$LOGS/server.pid" "$LOGS/server.log" \
+      "$STUDIO_BUN" --env-file=studio-local/env server/src/index.ts >/dev/null
   fi
 
-  if (pid_alive "$LOGS/app.pid" || [[ -n "$(port_owner $APP_PORT)" ]]) && http_ok "$APP_URL"; then
+  if (pid_alive "$LOGS/app.pid" || [[ -n "$(port_owner $APP_PORT)" ]]) && http_ok_stable "$APP_URL"; then
     echo "app already running"
   else
     if pid_alive "$LOGS/app.pid" || [[ -n "$(port_owner $APP_PORT)" ]]; then
@@ -209,9 +245,8 @@ cmd_start() {
     fi
     started_any=1
     echo "starting app..."
-    nohup "$STUDIO_BUN" --env-file=studio-local/env run --filter app dev > "$LOGS/app.log" 2>&1 &
-    echo $! > "$LOGS/app.pid"
-    disown $! 2>/dev/null || true
+    spawn_detached "$LOGS/app.pid" "$LOGS/app.log" \
+      "$STUDIO_BUN" --env-file=studio-local/env run --filter app dev >/dev/null
   fi
 
   echo -n "waiting for control model..."

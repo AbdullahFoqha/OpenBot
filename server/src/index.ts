@@ -1750,8 +1750,17 @@ if (config.singleUser) {
 
 // Each listener holds a connection of its own for the life of the process. Released on the way out,
 // so a watch-mode restart does not leave two behind on every reload.
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.on(signal, () => {
+    console.error(
+      JSON.stringify({
+        type: "process-signal",
+        signal,
+        pid: process.pid,
+        ppid: process.ppid,
+        note: "OpenBot server shutting down after signal (was silent before — look here for mid-chat deaths).",
+      }),
+    );
     void Promise.allSettled([
       channelActivityListener.stop(),
       policyListener.stop(),
@@ -1763,3 +1772,11 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 }
 
 console.info(`OpenBot server listening on http://127.0.0.1:${port}`);
+
+process.on("exit", (code) => {
+  try {
+    console.error(JSON.stringify({ type: "process-exit", code, pid: process.pid }));
+  } catch {
+    /* ignore */
+  }
+});
