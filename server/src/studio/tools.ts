@@ -13,6 +13,12 @@ import type { StudioDispatcher } from "./dispatch";
 import { STUDIO_PRODUCT_ID } from "./dispatch";
 import type { TaskStore } from "./task-store";
 import { createDynamicBot } from "./bot-catalog";
+import {
+  getBrowserSession,
+  startBrowserSession,
+  stopBrowserSession,
+  type BrowserStep,
+} from "./browser-session";
 
 const runTaskParams = z.object({
   title: z.string().min(1).describe("Short task title for the Studio queue and branch name."),
@@ -81,6 +87,31 @@ const spawnBotParams = z.object({
     ),
 });
 
+const browserSessionParams = z.object({
+  action: z
+    .enum(["start", "stop", "status"])
+    .describe("start opens a persistent Chromium session; stop closes it; status returns the last/current session."),
+  url: z
+    .string()
+    .optional()
+    .describe("Required for start. Absolute http(s) URL to navigate first."),
+  steps: z
+    .array(
+      z.discriminatedUnion("action", [
+        z.object({ action: z.literal("wait"), ms: z.number() }),
+        z.object({ action: z.literal("screenshot"), name: z.string().optional() }),
+        z.object({ action: z.literal("click"), selector: z.string() }),
+        z.object({ action: z.literal("type"), selector: z.string(), text: z.string() }),
+      ]),
+    )
+    .optional()
+    .describe("Optional steps after navigation. A 01-after-nav screenshot is always taken."),
+  headless: z
+    .boolean()
+    .optional()
+    .describe("Default true for unattended runs. Set false only when a visible window is needed."),
+});
+
 export function studioTools(options: {
   dispatcher: StudioDispatcher;
   database: Database;
@@ -114,6 +145,45 @@ export function studioTools(options: {
             created: true,
             source: "dynamic",
             note: "Bot is chatable now. Phase 1: chat/role only unless cursor_execute capability was set (Phase 1b).",
+          });
+        },
+      },
+
+      {
+        name: "studio_browser_session",
+        ref: "studio/browser_session",
+        description:
+          "Drive an unattended Chromium browser with a persistent profile under studio-local/browser-profile. start: navigate to url, optional steps, screenshots under studio-local/ui-test/out/browser/<stamp>/. stop: close the session. status: current/last session. Prefer this for web checks before asking for Mac GUI. One session at a time.",
+        parameters: browserSessionParams,
+        execute: async (args) => {
+          const parsed = browserSessionParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} action is required (start needs url).`;
+          }
+          const { action } = parsed.data;
+          if (action === "status") {
+            return JSON.stringify({ session: getBrowserSession() });
+          }
+          if (action === "stop") {
+            const result = await stopBrowserSession();
+            return JSON.stringify({ ok: true, session: result.session });
+          }
+          if (!parsed.data.url) {
+            return `${REFUSAL_MARKER} url is required to start a browser session.`;
+          }
+          const steps = (parsed.data.steps ?? []) as BrowserStep[];
+          const result = await startBrowserSession({
+            url: parsed.data.url,
+            steps,
+            headless: parsed.data.headless,
+          });
+          if (!result.ok) {
+            return `${REFUSAL_MARKER} ${result.error}`;
+          }
+          return JSON.stringify({
+            ok: true,
+            session: result.session,
+            note: "Session stays open until studio_browser_session stop. Screenshots are under session.outDir.",
           });
         },
       },

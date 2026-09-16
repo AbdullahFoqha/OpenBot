@@ -51,6 +51,12 @@ import {
   registerProduct,
   selectProduct,
 } from "./products";
+import {
+  getBrowserSession,
+  startBrowserSession,
+  stopBrowserSession,
+  type BrowserStep,
+} from "./browser-session";
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -489,6 +495,53 @@ export function createStudioRoutes(deps: {
     });
   });
 
+
+
+  // --- P0.4 browser agent session ---
+  routes.get("/browser/session", (c: Context) => {
+    return c.json({ session: getBrowserSession() });
+  });
+
+  routes.post("/browser/session/start", async (c: Context) => {
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body.url !== "string") {
+      return c.json({ error: "url is required." }, 400);
+    }
+    const stepsRaw = Array.isArray(body.steps) ? body.steps : [];
+    const steps: BrowserStep[] = [];
+    for (const s of stepsRaw) {
+      if (!s || typeof s !== "object") continue;
+      const step = s as Record<string, unknown>;
+      if (step.action === "wait" && typeof step.ms === "number") {
+        steps.push({ action: "wait", ms: step.ms });
+      } else if (step.action === "screenshot") {
+        steps.push({
+          action: "screenshot",
+          name: typeof step.name === "string" ? step.name : undefined,
+        });
+      } else if (step.action === "click" && typeof step.selector === "string") {
+        steps.push({ action: "click", selector: step.selector });
+      } else if (
+        step.action === "type" &&
+        typeof step.selector === "string" &&
+        typeof step.text === "string"
+      ) {
+        steps.push({ action: "type", selector: step.selector, text: step.text });
+      }
+    }
+    const result = await startBrowserSession({
+      url: body.url,
+      steps,
+      headless: body.headless === false ? false : true,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ session: result.session }, 201);
+  });
+
+  routes.post("/browser/session/stop", async (c: Context) => {
+    const result = await stopBrowserSession();
+    return c.json({ ok: true, session: result.session });
+  });
 
   // --- P0.1 dynamic bots (studio_spawn_bot) ---
   routes.get("/bots", async (c: Context) => {
