@@ -19,6 +19,13 @@ import {
   stopBrowserSession,
   type BrowserStep,
 } from "./browser-session";
+import {
+  actionDesktopSession,
+  getDesktopSession,
+  startDesktopSession,
+  stopDesktopSession,
+  type DesktopStep,
+} from "./desktop-session";
 
 const runTaskParams = z.object({
   title: z.string().min(1).describe("Short task title for the Studio queue and branch name."),
@@ -112,6 +119,35 @@ const browserSessionParams = z.object({
     .describe("Default true for unattended runs. Set false only when a visible window is needed."),
 });
 
+const desktopStepSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("wait"), ms: z.number() }),
+  z.object({ action: z.literal("screenshot"), name: z.string().optional() }),
+  z.object({ action: z.literal("activate"), app: z.string() }),
+  z.object({ action: z.literal("open"), app: z.string() }),
+  z.object({ action: z.literal("type"), text: z.string(), app: z.string().optional() }),
+  z.object({ action: z.literal("keystroke"), text: z.string() }),
+  z.object({ action: z.literal("click"), x: z.number(), y: z.number() }),
+  z.object({
+    action: z.literal("quit"),
+    app: z.string(),
+    saving: z.enum(["yes", "no", "ask"]).optional(),
+  }),
+]);
+
+const desktopSessionParams = z.object({
+  action: z
+    .enum(["start", "stop", "status", "action"])
+    .describe("start opens a Mac GUI session; action runs steps; stop closes; status returns last/current."),
+  app: z
+    .string()
+    .optional()
+    .describe("Optional app to open/focus on start (e.g. TextEdit, Calculator, Simulator)."),
+  steps: z
+    .array(desktopStepSchema)
+    .optional()
+    .describe("Scripted steps: wait/screenshot/activate/open/type/keystroke/click/quit."),
+});
+
 export function studioTools(options: {
   dispatcher: StudioDispatcher;
   database: Database;
@@ -146,6 +182,41 @@ export function studioTools(options: {
             source: "dynamic",
             note: "Bot is chatable now. Phase 1: chat/role only unless cursor_execute capability was set (Phase 1b).",
           });
+        },
+      },
+
+      {
+        name: "studio_desktop_session",
+        ref: "studio/desktop_session",
+        description:
+          "Drive the Mac GUI (not Cursor coding): open/focus an app, type/click/wait, capture screenshots under studio-local/ui-test/out/desktop/<stamp>/. Prefer TextEdit type (app scripting) when Accessibility is unavailable. Never escalates privileges; destructive OS actions are out of scope. One session at a time. Use start|action|stop|status.",
+        parameters: desktopSessionParams,
+        execute: async (args) => {
+          const parsed = desktopSessionParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} action is required.`;
+          }
+          const { action } = parsed.data;
+          if (action === "status") {
+            return JSON.stringify({ session: getDesktopSession() });
+          }
+          if (action === "stop") {
+            const result = await stopDesktopSession();
+            return JSON.stringify({ ok: true, session: result.session });
+          }
+          const steps = (parsed.data.steps ?? []) as DesktopStep[];
+          if (action === "start") {
+            const result = await startDesktopSession({ app: parsed.data.app, steps });
+            if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+            return JSON.stringify({
+              ok: true,
+              session: result.session,
+              note: "Session stays open until studio_desktop_session stop. Screenshots under session.outDir.",
+            });
+          }
+          const result = await actionDesktopSession(steps);
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({ ok: true, session: result.session });
         },
       },
 

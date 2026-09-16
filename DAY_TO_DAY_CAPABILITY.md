@@ -63,3 +63,5 @@ P0.1 studio_spawn_bot (2026-09-16): Lead tool + `POST /api/studio/bots` creates 
 P0.2 multi-project (2026-09-16): register/list/select via `/api/studio/products`; `studio_run_task` uses selected product path. UI lists products with Select. Maestro app id via `STUDIO_APP_ID` env (udid still preferred default).
 
 P0.4 browser agent (2026-09-16): persistent Chromium profile at `studio-local/browser-profile/`; `POST /api/studio/browser/session/start|stop`, `GET /api/studio/browser/session`; Lead tool `studio_browser_session`. Screenshots under `studio-local/ui-test/out/browser/<stamp>/`. Prove: `studio-local/ui-test/browser-session-prove.mjs`.
+
+P0.3 Mac desktop agent (2026-09-16): `studio_desktop_session` + `/api/studio/desktop/session` start|action|stop|status. Evidence under `studio-local/ui-test/out/desktop/<stamp>/` via screencapture. Uses osascript (TextEdit dictionary type preferred; System Events click/keystroke needs Accessibility). Never escalates privileges; destructive OS actions out of scope. Prove: `studio-local/ui-test/desktop-session-prove.mjs`.

@@ -201,3 +201,4 @@ Implement in backlog order after P0 demos. Each gets its own AC doc when started
 - **P0.1** `studio_spawn_bot` — shipped (local). Phase 1b cursor_execute follow-up.
 - **P0.2** multi-project register/select — shipped (local).
 - **P0.4** browser agent session — shipped (local).
+- **P0.3** Mac desktop agent session — shipped (local).
