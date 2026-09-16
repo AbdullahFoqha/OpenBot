@@ -14,6 +14,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { agents, channels, users } from "./core";
 import { jsonb } from "./json";
@@ -622,5 +623,31 @@ export const studioSkillPackAttachments = pgTable(
   (table) => [
     primaryKey({ columns: [table.packId, table.botId] }),
     index("studio_skill_pack_attachments_bot_idx").on(table.botId),
+  ],
+);
+
+/**
+ * P2.4 bot-scoped secret vault (Grok secret-request parity).
+ * Values encrypted at rest; list/status never return plaintext.
+ */
+export const studioBotSecrets = pgTable(
+  "studio_bot_secrets",
+  {
+    id: text("id").primaryKey(),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** Env-style name, e.g. CURSOR_API_KEY */
+    name: text("name").notNull(),
+    encryptedValue: text("encrypted_value").notNull(),
+    createdBy: text("created_by"),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("studio_bot_secrets_bot_name_idx").on(table.botId, table.name),
+    index("studio_bot_secrets_bot_idx").on(table.botId),
   ],
 );

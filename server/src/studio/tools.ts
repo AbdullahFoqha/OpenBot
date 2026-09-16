@@ -19,6 +19,7 @@ import type { StudioMemoryStore } from "./studio-memory";
 import type { StudioSkillPackStore } from "./studio-skill-packs";
 import type { StudioRoutineBus } from "./studio-routines";
 import type { StudioMcpBus } from "./studio-mcp-connectors";
+import type { StudioBotSecretStore } from "./studio-bot-secrets";
 import { STUDIO_VERIFIER_BOT_ID } from "./studio-verifier";
 import {
   getBrowserSession,
@@ -301,6 +302,25 @@ const mcpServerIdParams = z.object({
   serverId: z.string().min(1).describe("Installed server id / catalogue key."),
 });
 
+
+const secretSetParams = z.object({
+  botId: z.string().min(1).describe("Bot that owns the secret (e.g. studio-lead, react-native-engineer)."),
+  name: z
+    .string()
+    .min(1)
+    .describe("Env-style name (letters, digits, underscore), e.g. PENPOT_API_TOKEN."),
+  value: z.string().min(1).describe("Secret value. Stored encrypted; never returned by list."),
+});
+
+const secretListParams = z.object({
+  botId: z.string().min(1).describe("Bot whose secrets to list (names only)."),
+});
+
+const secretDeleteParams = z.object({
+  botId: z.string().min(1),
+  name: z.string().min(1),
+});
+
 export function studioTools(options: {
   dispatcher: StudioDispatcher;
   database: Database;
@@ -314,10 +334,12 @@ export function studioTools(options: {
   studioRoutineBus?: StudioRoutineBus;
   /** P2.3 MCP connector install/auth. */
   studioMcpBus?: StudioMcpBus;
+  /** P2.4 bot-scoped secrets. */
+  studioSecretStore?: StudioBotSecretStore;
   /** Default actor for headless messaging (studio local user). */
   messagingActorId?: string;
 }): (botId: string) => GrantedTool[] {
-  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, studioMemory, skillPackStore, studioRoutineBus, studioMcpBus, messagingActorId } = options;
+  const { dispatcher, database, taskStore, allowedBotIds, botMessaging, studioChannelBus, studioMemory, skillPackStore, studioRoutineBus, studioMcpBus, studioSecretStore, messagingActorId } = options;
 
   return (botId: string) => {
     if (allowedBotIds && !allowedBotIds.includes(botId)) return [];
@@ -389,6 +411,70 @@ export function studioTools(options: {
         },
       },
 
+
+
+      {
+        name: "studio_secret_set",
+        ref: "studio/secret_set",
+        description:
+          "Store a bot-scoped secret (Grok secret-request parity). Value is encrypted; list never returns it. Use for API tokens a Bot needs.",
+        parameters: secretSetParams,
+        execute: async (args) => {
+          if (!studioSecretStore) {
+            return `${REFUSAL_MARKER} Studio secrets are not wired in this deployment.`;
+          }
+          const parsed = secretSetParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} botId, name, and value are required.`;
+          }
+          const result = await studioSecretStore.set({
+            ...parsed.data,
+            by: messagingActorId ?? "dev-local-user",
+          });
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({
+            ok: true,
+            created: result.created,
+            secret: result.secret,
+            note: "Plaintext is not returned. Use studio_secret_list for names only.",
+          });
+        },
+      },
+      {
+        name: "studio_secret_list",
+        ref: "studio/secret_list",
+        description: "List secret names for a bot (never values).",
+        parameters: secretListParams,
+        execute: async (args) => {
+          if (!studioSecretStore) {
+            return `${REFUSAL_MARKER} Studio secrets are not wired in this deployment.`;
+          }
+          const parsed = secretListParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} botId is required.`;
+          }
+          const secrets = await studioSecretStore.list(parsed.data.botId);
+          return JSON.stringify({ ok: true, botId: parsed.data.botId, secrets, count: secrets.length });
+        },
+      },
+      {
+        name: "studio_secret_delete",
+        ref: "studio/secret_delete",
+        description: "Delete a bot-scoped secret by name.",
+        parameters: secretDeleteParams,
+        execute: async (args) => {
+          if (!studioSecretStore) {
+            return `${REFUSAL_MARKER} Studio secrets are not wired in this deployment.`;
+          }
+          const parsed = secretDeleteParams.safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} botId and name are required.`;
+          }
+          const result = await studioSecretStore.remove(parsed.data.botId, parsed.data.name);
+          if (!result.ok) return `${REFUSAL_MARKER} ${result.error}`;
+          return JSON.stringify({ ok: true, deleted: { botId: parsed.data.botId, name: parsed.data.name } });
+        },
+      },
 
       {
         name: "studio_mcp_catalogue",
