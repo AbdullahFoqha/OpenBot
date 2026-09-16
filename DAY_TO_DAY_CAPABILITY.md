@@ -79,3 +79,5 @@ Cursor harness pin (2026-09-16): `studio_run_task` / driveCursorRun allowlist is
 P1.4 skill packs (2026-09-16): `studio_skill_pack_create` / `_attach` / `_list`; `POST/GET /api/studio/skill-packs` + attach + per-bot list. Attach upserts skills + plugin_grants. Prove: `studio-local/ui-test/p14-skill-packs-prove.mjs`.
 
 P1.5 Studio Verifier (2026-09-16): bot `studio-verifier` (evidence-only Cursor worker); Lead tool `studio_verify_claim`; `POST /api/studio/verify` + `/verifier/ensure`. No feature implement. Prove: `studio-local/ui-test/p15-verifier-prove.mjs`. Harness still `cursor-grok-4.6-xhigh`.
+
+Channel model picker (2026-09-16): `parseCursorListModelsOutput` skips `Available models` header (19731c6); unit tests 9/9 green. Payday Release seed port to pocket-love kicked task-2cb9462c (in_progress).
