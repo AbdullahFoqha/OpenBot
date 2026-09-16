@@ -263,7 +263,7 @@ export function studioTools(options: {
         name: "studio_run_task",
         ref: "studio/run_task",
         description:
-          "REQUIRED for local product work: create/edit files in the selected project, run changes, open a feature branch/draft PR, or (ownerBotId=quality-engineer) independently verify/QA. Uses cursor-agent on the Cursor subscription in a project worktree; after implementation the studio re-runs package.json typecheck+test and only then opens a draft PR. Call immediately for project coding/QA — do NOT use host_list_folders/host_write_file or ask about Engineer/git origin. Returns taskId; poll studio_task_status (includes checkAfter).",
+          "REQUIRED for local product work when AC is clear (P0.5 unattended): call in the SAME turn — create/edit files in the selected project, run changes, open a feature branch/draft PR, or (ownerBotId=quality-engineer) independently verify/QA. Uses cursor-agent on the Cursor subscription in a project worktree; after implementation the studio re-runs package.json typecheck+test and only then opens a draft PR. Do NOT clarify with menus, ask for dashboard Run Task, use host_list_folders/host_write_file, or ask about Engineer/git origin. Returns taskId; poll studio_task_status (includes checkAfter); then hand back Shipped/Evidence/Untested/Next.",
         parameters: runTaskParams,
         execute: async (args) => {
           const parsed = runTaskParams.safeParse(args ?? {});

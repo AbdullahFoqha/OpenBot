@@ -169,6 +169,7 @@ Minimal:
 **P0.4 Browser agent:** persistent Chromium user-data-dir under studio-local; Playwright or CDP; evidence shots.
 
 **P0.5 Unattended contract:** Lead system prompt + tool policy: when AC clear, always `studio_run_task` / spawn / verify without clarify menus (extend lead-harden).
+Source of truth for Lead coding rules: `~/.openbot-team/STUDIO-LEAD-CODING.md` (tracked copy `docs/STUDIO-LEAD-CODING.md`); spliced into `tenant/agents.yaml` studio-lead `system_prompt`.
 
 ## 8. P1–P2
 
@@ -201,4 +202,5 @@ Implement in backlog order after P0 demos. Each gets its own AC doc when started
 - **P0.1** `studio_spawn_bot` — shipped (local). Phase 1b cursor_execute follow-up.
 - **P0.2** multi-project register/select — shipped (local).
 - **P0.4** browser agent session — shipped (local).
+- **P0.5** unattended run contract — shipped (local).
 - **P0.3** Mac desktop agent session — shipped (local).

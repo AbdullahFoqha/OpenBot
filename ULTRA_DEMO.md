@@ -59,6 +59,7 @@ Defaults: `STUDIO_INSTALL_MODE=release` (TS + shell), `STUDIO_MAESTRO_RESET=1`, 
 ## Fail = not ultra
 
 - Lead asks for dashboard Run Task / clarify menus when AC is clear
+- (P0.5) Lead violates unattended contract in `docs/STUDIO-LEAD-CODING.md`
 - `host_*` instead of `studio_run_task`
 - Studio dies mid-chat (PGID isolation should prevent)
 - Silent no-op with no taskId
