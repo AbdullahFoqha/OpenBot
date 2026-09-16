@@ -14,8 +14,8 @@
  * neither result means anything afterwards.
  */
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { NativeWorker } from "../native-worker/worker";
 
@@ -29,6 +29,12 @@ export type InstallResult = {
   logPath: string;
 };
 
+export type ResetResult = {
+  status: "skipped" | "wiped" | "failed";
+  exitCode: number | null;
+  logPath: string;
+};
+
 export type MaestroEvidence = {
   udid: string;
   flow: string;
@@ -38,6 +44,7 @@ export type MaestroEvidence = {
   error?: string;
   durationMs: number;
   install?: InstallResult;
+  reset?: ResetResult;
 };
 
 export type MaestroRunInput = {
@@ -252,6 +259,85 @@ async function waitForBoot(udid: string, maxWaitMs = 45_000): Promise<boolean> {
  * Parse acceptanceCriteria for a `maestro:` line.
  * Returns the path if found, undefined otherwise.
  */
+
+/**
+ * Wipe app data via uninstall+reinstall of the same .app (no expo rebuild).
+ * Makes needsOnboarding true again. Skip with STUDIO_MAESTRO_RESET=0.
+ */
+export async function resetApp(input: {
+  udid: string;
+  appId?: string;
+  outputDir: string;
+  timeoutMs?: number;
+}): Promise<ResetResult> {
+  const udid = input.udid;
+  const appId = input.appId ?? DEFAULT_APP_ID;
+  const logPath = join(input.outputDir, "reset.log");
+  const lines: string[] = [];
+
+  if (process.env.STUDIO_MAESTRO_RESET === "0") {
+    lines.push("SKIP: STUDIO_MAESTRO_RESET=0");
+    await writeFile(logPath, lines.join("\n") + "\n");
+    return { status: "skipped", exitCode: 0, logPath };
+  }
+
+  if (!(await checkAppInstalled(udid, appId))) {
+    lines.push(`SKIP: ${appId} not installed on ${udid}`);
+    await writeFile(logPath, lines.join("\n") + "\n");
+    return { status: "skipped", exitCode: 0, logPath };
+  }
+
+  const scriptCandidates = [
+    join(process.cwd(), "studio-local", "reset-app-on-sim.sh"),
+    join(process.cwd(), "..", "studio-local", "reset-app-on-sim.sh"),
+  ];
+  let script: string | null = null;
+  for (const candidate of scriptCandidates) {
+    try {
+      await access(candidate);
+      script = candidate;
+      break;
+    } catch {
+      /* continue */
+    }
+  }
+
+  if (script) {
+    const result = await runCommand(script, [udid, appId], {
+      timeoutMs: input.timeoutMs ?? 120_000,
+      env: { ...process.env, STUDIO_MAESTRO_RESET: "1" },
+    });
+    lines.push(result.stdout, result.stderr, `exit=${result.exitCode}`);
+    await writeFile(logPath, lines.join("\n") + "\n");
+    if (result.exitCode !== 0) {
+      return { status: "failed", exitCode: result.exitCode, logPath };
+    }
+    return { status: "wiped", exitCode: 0, logPath };
+  }
+
+  const stashDir = await mkdtemp(join(tmpdir(), "studio-reset-"));
+  const stashApp = join(stashDir, "app.app");
+  const getApp = await runCommand("xcrun", ["simctl", "get_app_container", udid, appId, "app"]);
+  if (getApp.exitCode !== 0) {
+    lines.push(`FAILED: get_app_container: ${getApp.stderr}`);
+    await writeFile(logPath, lines.join("\n") + "\n");
+    return { status: "failed", exitCode: getApp.exitCode, logPath };
+  }
+  const appSrc = getApp.stdout.trim();
+  lines.push(`STASH: ${appSrc} → ${stashApp}`);
+  await runCommand("cp", ["-R", appSrc, stashApp]);
+  await runCommand("xcrun", ["simctl", "terminate", udid, appId]);
+  await runCommand("xcrun", ["simctl", "uninstall", udid, appId]);
+  const inst = await runCommand("xcrun", ["simctl", "install", udid, stashApp], {
+    timeoutMs: input.timeoutMs ?? 120_000,
+  });
+  await runCommand("rm", ["-rf", stashDir]);
+  lines.push(inst.stdout, inst.stderr, `install_exit=${inst.exitCode}`);
+  await writeFile(logPath, lines.join("\n") + "\n");
+  const ok = await checkAppInstalled(udid, appId);
+  return { status: ok ? "wiped" : "failed", exitCode: inst.exitCode, logPath };
+}
+
 export function parseMaestroFromCriteria(criteria: string | undefined): string | undefined {
   if (!criteria) return undefined;
   const match = criteria.match(/^maestro:\s*(.+)$/m);
@@ -401,6 +487,26 @@ export async function runMaestro(
         join(outputDir, "install.log"),
         `install: skipped (app already present on ${udid})\n`,
       ).catch(() => {});
+    }
+
+    if (process.env.STUDIO_MAESTRO_RESET !== "0" && (await checkAppInstalled(udid, appId))) {
+      const resetResult = await resetApp({ udid, appId, outputDir });
+      evidence.reset = resetResult;
+      if (resetResult.status === "failed") {
+        evidence.durationMs = Date.now() - started;
+        evidence.error = `App reset failed on ${udid}`;
+        return {
+          ok: false,
+          reason: `App reset failed on ${udid}. See ${resetResult.logPath}`,
+          evidence,
+        };
+      }
+    } else {
+      evidence.reset = {
+        status: "skipped",
+        exitCode: null,
+        logPath: join(outputDir, "reset.log"),
+      };
     }
 
     const metaPath = join(outputDir, "meta.txt");

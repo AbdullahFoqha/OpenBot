@@ -95,6 +95,23 @@ if [[ "${STUDIO_MAESTRO_INSTALL:-0}" == "1" ]] || ! has_app "$UDID"; then
   fi
 fi
 
+# Dirty-sim fix: wipe app data so onboard (and similar) land on first-run UI.
+# Default ON; set STUDIO_MAESTRO_RESET=0 to skip. clearState in onboard.yaml is belt-and-suspenders.
+if [[ "${STUDIO_MAESTRO_RESET:-1}" != "0" ]] && has_app "$UDID"; then
+  echo "reset: starting" | tee -a "$OUT/meta.txt"
+  set +e
+  "$ROOT/studio-local/reset-app-on-sim.sh" "$UDID" "$APP_ID" 2>&1 | tee "$OUT/reset.log"
+  reset_code=${pipestatus[1]}
+  set -e
+  echo "reset_exit=$reset_code" | tee -a "$OUT/meta.txt"
+  if [[ $reset_code -ne 0 ]]; then
+    echo "APP_RESET_FAILED:$APP_ID on $UDID" | tee "$OUT/blocker.txt"
+    exit 2
+  fi
+else
+  echo "reset: skipped" | tee -a "$OUT/meta.txt"
+fi
+
 set +e
 maestro test --udid "$UDID" \
   --test-output-dir "$OUT/artifacts" \
