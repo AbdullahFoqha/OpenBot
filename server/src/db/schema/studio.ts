@@ -143,6 +143,10 @@ export const studioProducts = pgTable(
      * admission a person deliberately paused.
      */
     queuePaused: boolean("queue_paused").notNull().default(false),
+    /**
+     * Which product studio_run_task uses. Exactly one should be true among non-retired rows.
+     */
+    isSelected: boolean("is_selected").notNull().default(false),
     activatedAt: createdAt(),
     /** Set when the product stops admitting work. The rule is one active, not one ever. */
     retiredAt: timestamp("retired_at", { withTimezone: true }),

@@ -45,6 +45,12 @@ import {
   listMergedBots,
   updateDynamicBot,
 } from "./bot-catalog";
+import {
+  getSelectedProduct,
+  listProducts,
+  registerProduct,
+  selectProduct,
+} from "./products";
 
 /** Runs `cmd` and resolves to its stdout, trimmed, or null if it could not be started or failed. */
 async function tryCommand(cmd: string[], cwd?: string): Promise<string | null> {
@@ -115,19 +121,12 @@ export function createStudioRoutes(deps: {
         .then(() => "online" as const)
         .catch(() => "error" as const),
       cursorLoginStatus(),
-      database
-        .select({
-          localPath: studioProducts.localPath,
-          queuePaused: studioProducts.queuePaused,
-        })
-        .from(studioProducts)
-        .where(eq(studioProducts.id, STUDIO_PRODUCT_ID))
-        .limit(1),
+      getSelectedProduct(database),
     ]);
 
     let projectStatus: "online" | "not_tested" = "not_tested";
     let projectDetail = "No project selected yet.";
-    const localPath = product[0]?.localPath ?? null;
+    const localPath = product?.localPath ?? null;
     if (localPath) {
       const resolved = await resolveProjectPath(localPath);
       projectStatus = resolved.ok ? "online" : "not_tested";
@@ -142,8 +141,8 @@ export function createStudioRoutes(deps: {
       server: "online",
       database: dbCheck,
       cursorLogin,
-      project: { status: projectStatus, detail: projectDetail, path: localPath },
-      queuePaused: product[0]?.queuePaused ?? false,
+      project: { status: projectStatus, detail: projectDetail, path: localPath, productId: product?.id ?? null },
+      queuePaused: product?.queuePaused ?? false,
       policy: {
         maxActiveExecutionTasks: policy.maxActiveExecutionTasks,
         maxPrimaryExecutionTasksPerBot: policy.maxPrimaryExecutionTasksPerBot,
@@ -160,15 +159,8 @@ export function createStudioRoutes(deps: {
 
   routes.get("/project", async (c: Context) => {
     await ensureProduct();
-    const [row] = await database
-      .select({
-        localPath: studioProducts.localPath,
-        queuePaused: studioProducts.queuePaused,
-      })
-      .from(studioProducts)
-      .where(eq(studioProducts.id, STUDIO_PRODUCT_ID))
-      .limit(1);
-    if (!row?.localPath) return c.json({ project: null });
+    const row = await getSelectedProduct(database);
+    if (!row?.localPath) return c.json({ project: null, products: await listProducts(database) });
     const resolved = await resolveProjectPath(row.localPath);
     return c.json({
       project: resolved.ok
@@ -176,9 +168,12 @@ export function createStudioRoutes(deps: {
             path: resolved.absolutePath,
             gitRoot: resolved.gitRoot,
             verified: true,
+            productId: row.id,
+            name: row.name,
           }
-        : { path: row.localPath, gitRoot: null, verified: false, reason: resolved.reason },
+        : { path: row.localPath, gitRoot: null, verified: false, reason: resolved.reason, productId: row.id },
       queuePaused: row.queuePaused,
+      products: await listProducts(database),
     });
   });
 
@@ -186,26 +181,62 @@ export function createStudioRoutes(deps: {
     const body = await c.req.json().catch(() => null);
     const path = typeof body?.path === "string" ? body.path.trim() : "";
     if (!path) return c.json({ error: "A project path is required." }, 400);
-    const resolved = await resolveProjectPath(path);
-    if (!resolved.ok) return c.json({ error: resolved.reason }, 400);
-
     await ensureProduct();
-    await database
-      .update(studioProducts)
-      .set({ localPath: resolved.absolutePath })
-      .where(eq(studioProducts.id, STUDIO_PRODUCT_ID));
-
-    return c.json({
-      project: { path: resolved.absolutePath, gitRoot: resolved.gitRoot, verified: true },
+    const result = await registerProduct(database, {
+      path,
+      name: typeof body?.name === "string" ? body.name : undefined,
+      id: typeof body?.id === "string" ? body.id : undefined,
+      select: true,
     });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    const resolved = await resolveProjectPath(result.product.localPath!);
+    return c.json({
+      project: resolved.ok
+        ? { path: resolved.absolutePath, gitRoot: resolved.gitRoot, verified: true, productId: result.product.id }
+        : { path: result.product.localPath, verified: false },
+      product: result.product,
+      created: result.created,
+    });
+  });
+
+  routes.get("/products", async (c: Context) => {
+    await ensureProduct();
+    const products = await listProducts(database);
+    const selected = await getSelectedProduct(database);
+    return c.json({ products, selectedProductId: selected?.id ?? null });
+  });
+
+  routes.post("/products", async (c: Context) => {
+    const body = await c.req.json().catch(() => null);
+    const path = typeof body?.path === "string" ? body.path.trim() : "";
+    if (!path) return c.json({ error: "A project path is required." }, 400);
+    await ensureProduct();
+    const result = await registerProduct(database, {
+      path,
+      name: typeof body?.name === "string" ? body.name : undefined,
+      id: typeof body?.id === "string" ? body.id : undefined,
+      select: body?.select !== false,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ product: result.product, created: result.created }, result.created ? 201 : 200);
+  });
+
+  routes.post("/products/:id/select", async (c: Context) => {
+    const id = c.req.param("id");
+    if (!id) return c.json({ error: "id required" }, 400);
+    const result = await selectProduct(database, id);
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ product: result.product });
   });
 
   routes.get("/tasks", async (c: Context) => {
     const active = await admission.active();
+    const selected = await getSelectedProduct(database);
+    const productId = selected?.id ?? STUDIO_PRODUCT_ID;
     const rows = await database
       .select()
       .from(studioTasks)
-      .where(eq(studioTasks.productId, STUDIO_PRODUCT_ID))
+      .where(eq(studioTasks.productId, productId))
       .orderBy(desc(studioTasks.updatedAt))
       .limit(50);
     const evidenceRows = await database.select().from(studioEvidence);
@@ -343,11 +374,7 @@ export function createStudioRoutes(deps: {
       });
     }
 
-    const [product] = await database
-      .select({ localPath: studioProducts.localPath })
-      .from(studioProducts)
-      .where(eq(studioProducts.id, STUDIO_PRODUCT_ID))
-      .limit(1);
+    const product = await getSelectedProduct(database);
     if (!product?.localPath) return c.json({ error: "No project is selected." }, 400);
     const resolved = await resolveProjectPath(product.localPath);
     if (!resolved.ok) return c.json({ error: resolved.reason }, 400);
@@ -358,7 +385,7 @@ export function createStudioRoutes(deps: {
       admission,
       taskStore,
       database,
-      productId: STUDIO_PRODUCT_ID,
+      productId: product.id,
       projectPath: resolved.absolutePath,
       taskId,
       botId: task.ownerBotId ?? CURSOR_ENGINEER_BOT_ID,
@@ -378,20 +405,24 @@ export function createStudioRoutes(deps: {
 
   routes.post("/queue/pause", async (c: Context) => {
     await ensureProduct();
+    const selected = await getSelectedProduct(database);
+    if (!selected) return c.json({ error: "No product selected." }, 400);
     await database
       .update(studioProducts)
       .set({ queuePaused: true })
-      .where(eq(studioProducts.id, STUDIO_PRODUCT_ID));
-    return c.json({ queuePaused: true });
+      .where(eq(studioProducts.id, selected.id));
+    return c.json({ queuePaused: true, productId: selected.id });
   });
 
   routes.post("/queue/resume", async (c: Context) => {
     await ensureProduct();
+    const selected = await getSelectedProduct(database);
+    if (!selected) return c.json({ error: "No product selected." }, 400);
     await database
       .update(studioProducts)
       .set({ queuePaused: false })
-      .where(eq(studioProducts.id, STUDIO_PRODUCT_ID));
-    return c.json({ queuePaused: false });
+      .where(eq(studioProducts.id, selected.id));
+    return c.json({ queuePaused: false, productId: selected.id });
   });
 
   routes.post("/coding-test", async (c: Context) => {
@@ -410,10 +441,11 @@ export function createStudioRoutes(deps: {
       }, 409);
     }
 
+    const selected = await getSelectedProduct(database);
     const taskId = `coding-test-${randomUUID()}`;
     await taskStore.createTask({
       id: taskId,
-      productId: STUDIO_PRODUCT_ID,
+      productId: selected?.id ?? STUDIO_PRODUCT_ID,
       title: "Coding test: fix add() in the disposable fixture",
       kind: "execution",
       state: "ready",

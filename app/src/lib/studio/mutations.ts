@@ -91,3 +91,18 @@ export function resumeStudioQueueMutationOptions(queryClient: QueryClient) {
     onSuccess: () => invalidateStudio(queryClient),
   });
 }
+
+export function selectStudioProductByIdMutationOptions(queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async (id: string): Promise<{ product: StudioProductLike }> =>
+      (
+        await client(`/api/studio/products/${encodeURIComponent(id)}/select`, {
+          method: "POST",
+          fallback: FALLBACK,
+        })
+      ).json(),
+    onSuccess: () => invalidateStudio(queryClient),
+  });
+}
+
+type StudioProductLike = { id: string; name: string; localPath: string | null; isSelected: boolean };

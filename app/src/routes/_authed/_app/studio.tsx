@@ -36,11 +36,13 @@ import {
   runCodingTestMutationOptions,
   runStudioTaskMutationOptions,
   selectStudioProjectMutationOptions,
+  selectStudioProductByIdMutationOptions,
   stopStudioTaskMutationOptions,
 } from "@/lib/studio/mutations";
 import {
   type StudioTask,
   studioProjectQueryOptions,
+  studioProductsQueryOptions,
   studioSetupQueryOptions,
   studioTasksQueryOptions,
 } from "@/lib/studio/queries";
@@ -69,12 +71,14 @@ function StudioPage() {
   const queryClient = useQueryClient();
   const setup = useQuery(studioSetupQueryOptions());
   const project = useQuery(studioProjectQueryOptions());
+  const products = useQuery(studioProductsQueryOptions());
   const hasActiveWork = (setup.data?.activeCount ?? 0) > 0;
   const tasks = useQuery(studioTasksQueryOptions(hasActiveWork));
 
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectPathInput, setProjectPathInput] = useState("");
   const [projectError, setProjectError] = useState<string | null>(null);
+  const selectProductById = useMutation(selectStudioProductByIdMutationOptions(queryClient));
   const selectProject = useMutation({
     ...selectStudioProjectMutationOptions(queryClient),
     onSuccess: () => {
@@ -189,6 +193,32 @@ function StudioPage() {
                   {project.data?.project && !project.data.project.verified
                     ? ` — ${project.data.project.reason ?? "not verified"}`
                     : null}
+
+              {(products.data?.products?.length ?? 0) > 0 ? (
+                <ul className="mt-2 space-y-1 text-sm">
+                  {(products.data?.products ?? []).map((p) => (
+                    <li key={p.id} className="flex items-center justify-between gap-2">
+                      <span className={p.isSelected ? "font-medium" : "text-muted-foreground"}>
+                        {p.name}{p.isSelected ? " (selected)" : ""}
+                        <span className="block text-xs text-muted-foreground truncate max-w-[28rem]">
+                          {p.localPath}
+                        </span>
+                      </span>
+                      {!p.isSelected ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={selectProductById.isPending}
+                          onClick={() => selectProductById.mutate(p.id)}
+                        >
+                          Select
+                        </Button>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
                 </ItemDescription>
               </ItemContent>
               <ItemActions>

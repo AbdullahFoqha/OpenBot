@@ -199,3 +199,4 @@ Implement in backlog order after P0 demos. Each gets its own AC doc when started
 ## Implemented
 
 - **P0.1** `studio_spawn_bot` — shipped (local). Phase 1b cursor_execute follow-up.
+- **P0.2** multi-project register/select — shipped (local).

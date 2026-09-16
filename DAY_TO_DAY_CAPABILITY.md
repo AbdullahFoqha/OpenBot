@@ -59,3 +59,5 @@ Worktree hygiene (2026-09-16): `./studio prune-worktrees` dry-run lists; `--appl
 Auto-prune on complete (2026-09-16): runner + markInterrupted call `pruneTaskWorktree` when terminal; `STUDIO_PRUNE_ON_COMPLETE=1` default (set `0` to keep worktrees).
 
 P0.1 studio_spawn_bot (2026-09-16): Lead tool + `POST /api/studio/bots` creates dynamic chat bots (`studio_dynamic_bots` ∪ `agents`). Custom badge in UI. Phase 1b `cursor_execute` / ownerBotId=dynamic still follow-up. Spec: GROK_BOT_AUTONOMY_PARITY.md §6.
+
+P0.2 multi-project (2026-09-16): register/list/select via `/api/studio/products`; `studio_run_task` uses selected product path. UI lists products with Select. Maestro app id via `STUDIO_APP_ID` env (udid still preferred default).

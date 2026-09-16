@@ -21,7 +21,7 @@ import type { NativeWorker } from "../native-worker/worker";
 
 export const STUDIO_PREFERRED_IOS_UDID = "812A595B-0FDA-4C3F-9346-088E6C07A489";
 const MAESTRO_BIN_DIR = join(homedir(), ".maestro", "bin");
-const DEFAULT_APP_ID = "app.pocketlove.private";
+const DEFAULT_APP_ID = process.env.STUDIO_APP_ID?.trim() || "app.pocketlove.private";
 
 export type InstallResult = {
   status: "skipped" | "cloned" | "release" | "expo" | "failed";

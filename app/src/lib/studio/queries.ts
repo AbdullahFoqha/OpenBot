@@ -19,9 +19,24 @@ export type ProjectInfo = {
   gitRoot: string | null;
   verified: boolean;
   reason?: string;
+  productId?: string;
+  name?: string;
 };
 
-export type ProjectStatus = { project: ProjectInfo | null; queuePaused?: boolean };
+export type StudioProduct = {
+  id: string;
+  name: string;
+  localPath: string | null;
+  isSelected: boolean;
+  queuePaused: boolean;
+  retiredAt: string | null;
+};
+
+export type ProjectStatus = {
+  project: ProjectInfo | null;
+  queuePaused?: boolean;
+  products?: StudioProduct[];
+};
 
 export type TaskEvidence = {
   taskId: string;
@@ -93,6 +108,7 @@ export const studioKeys = {
   all: ["studio"] as const,
   setup: () => ["studio", "setup"] as const,
   project: () => ["studio", "project"] as const,
+  products: () => ["studio", "products"] as const,
   tasks: () => ["studio", "tasks"] as const,
   task: (taskId: string) => ["studio", "task", taskId] as const,
 };
@@ -140,4 +156,15 @@ export const studioTaskQueryOptions = (taskId: string, pollWhileRunning: boolean
         })
       ).json(),
     refetchInterval: pollWhileRunning ? 2_000 : false,
+  });
+
+export const studioProductsQueryOptions = () =>
+  queryOptions({
+    queryKey: studioKeys.products(),
+    queryFn: async (): Promise<{ products: StudioProduct[]; selectedProductId: string | null }> =>
+      (
+        await client("/api/studio/products", {
+          fallback: "Could not list studio products",
+        })
+      ).json(),
   });
