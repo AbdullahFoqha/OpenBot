@@ -185,11 +185,13 @@ export function parseCursorListModelsOutput(raw: string): ListedModel[] {
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean)
-    .filter((l) => !l.startsWith("#") && !/^models?:/i.test(l));
-  return lines.map((id) => {
-    // "id — description" or "id: description"
-    const m = id.match(/^([^\s—:\[]+)(?:\s*[—:-]\s*(.+))?$/);
-    const modelId = (m?.[1] ?? id).trim();
+    .filter((l) => !l.startsWith("#"))
+    // Real catalog lines look like "id - Label". Skip headers such as "Available models".
+    .filter((l) => /\s[-—]\s/.test(l) || /^[\w./+-]+\s*:\s+\S/.test(l));
+  return lines.map((line) => {
+    // "id - description", "id — description", or "id: description"
+    const m = line.match(/^([^\s—:\[]+)(?:\s*[—:-]\s*(.+))?$/);
+    const modelId = (m?.[1] ?? line).trim();
     const label = (m?.[2] ?? modelId).trim();
     return { id: modelId, label, provider: "cursor" as const };
   });

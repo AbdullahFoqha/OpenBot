@@ -78,8 +78,10 @@ describe("lists", () => {
 
   test("parses line-oriented cursor-agent --list-models", () => {
     const parsed = parseCursorListModelsOutput(
-      "cursor-grok-4.6-high — Grok\nclaude-sonnet-5-thinking-high\n",
+      "Available models\n\nauto - Auto (default)\ncursor-grok-4.6-high - Cursor Grok 4.6\nclaude-sonnet-5-thinking-high - Claude Sonnet\n",
     );
+    expect(parsed.map((m) => m.id)).not.toContain("Available models");
+    expect(parsed.map((m) => m.id)).toContain("auto");
     expect(parsed.map((m) => m.id)).toContain("cursor-grok-4.6-high");
     expect(parsed.map((m) => m.id)).toContain("claude-sonnet-5-thinking-high");
   });
