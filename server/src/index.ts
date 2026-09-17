@@ -1151,11 +1151,25 @@ const copilotRuntime = mountCopilotRuntime(
  */
 let workOfferedListener: WorkOfferedListener | undefined;
 
+/*
+ * Raised from the queue's default of 5 (≈5 minutes at the 60s release delay). A relay — carrying
+ * an answer back into the asking Bot's own conversation — needs that conversation's run-lock, and
+ * a relay whose lock keeps losing to a person actively chatting there gets NO notice on exhaustion
+ * (an `answerIn`-carrying hop is deliberately exempt, to stop a notice-that-fails from recursing —
+ * see handoff-runner.ts). So a relay that outlives 5 minutes of "busy" used to vanish with only a
+ * `last_error` in `work_items` that nobody reads — observed live: a Bot's carefully-asked question
+ * for the person was lost this way. 20 attempts (~20 minutes) covers an ordinary conversation
+ * without pretending the underlying no-notice-on-a-failed-relay gap is closed; it only shrinks the
+ * odds. Must match the reaper's below — see its own comment.
+ */
+const HANDOFF_MAX_ATTEMPTS = 20;
+
 if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
   const runner = createHandoffRunner({
     queue: createWorkQueue(database),
     owner: workOwner("handoff"),
     auditStore: bootAuditStore,
+    maxAttempts: HANDOFF_MAX_ATTEMPTS,
     /*
      * The signed statement of the run the addressed Bot is about to start, carrying how deep the
      * chain has gone. Minted here, where the key lives, and one deeper than the run that asked.
@@ -1307,6 +1321,8 @@ const reaper = createHandoffRunner({
   owner: workOwner("reaper"),
   sign: () => "",
   auditStore: bootAuditStore,
+  // Must match the sweeper's maxAttempts above: `reap` and `claim` need the same idea of "over."
+  maxAttempts: HANDOFF_MAX_ATTEMPTS,
   // Never called: `reap` deletes rows by age and claims nothing.
   delivery: {
     deliver: async () => {
