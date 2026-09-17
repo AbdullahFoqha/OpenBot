@@ -6,6 +6,8 @@
  */
 import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
+import { readFile, stat } from "node:fs/promises";
+import { relative, resolve as resolvePath } from "node:path";
 import type { Database } from "../db/client";
 import { studioEvidence, studioPullRequests, studioTasks } from "../db/schema";
 import { REFUSAL_MARKER, type GrantedTool } from "../plugins/tools";
@@ -1220,6 +1222,134 @@ export function studioTools(options: {
             }
           }
           return result.stdout.trim() || "{}";
+        },
+      },
+      {
+        name: "studio_read_file",
+        ref: "studio/read_file",
+        description:
+          "READ-ONLY: read one file's content from the selected product's local checkout (whatever branch is currently checked out there). Use for code, config, or docs already on disk (e.g. specs, existing implementations). For a file on a branch that isn't checked out locally (e.g. a PR's head branch), use studio_github_read with query: file_view instead. Paste the returned text into chat as the answer. Do NOT call studio_run_task to read a file.",
+        parameters: z.object({
+          path: z.string().min(1).describe("File path relative to the product's repo root, e.g. src/features/restore/restore.ts"),
+        }),
+        execute: async (args) => {
+          const parsed = z.object({ path: z.string().min(1) }).safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} path is required.`;
+          }
+          const product = await getSelectedProduct(database);
+          if (!product?.localPath) {
+            return `${REFUSAL_MARKER} No product is selected. Register/select a project first.`;
+          }
+          const resolved = await resolveProjectPath(product.localPath);
+          if (!resolved.ok) {
+            return `${REFUSAL_MARKER} ${resolved.reason}`;
+          }
+          const root = resolved.absolutePath;
+          const target = resolvePath(root, parsed.data.path);
+          // Refuse anything that escapes the product root (e.g. `../../etc/passwd`).
+          if (target !== root && !target.startsWith(`${root}/`)) {
+            return `${REFUSAL_MARKER} "${parsed.data.path}" is outside the product's repo root.`;
+          }
+          const relPath = relative(root, target).replaceAll("\\", "/");
+          let info;
+          try {
+            info = await stat(target);
+          } catch {
+            return `${REFUSAL_MARKER} No such file: ${relPath}`;
+          }
+          if (!info.isFile()) {
+            return `${REFUSAL_MARKER} "${relPath}" is not a file.`;
+          }
+          const CAP_BYTES = 200_000;
+          if (info.size > CAP_BYTES) {
+            return `${REFUSAL_MARKER} "${relPath}" is ${info.size} bytes, too large to read here (cap ${CAP_BYTES}).`;
+          }
+          let content: string;
+          try {
+            content = await readFile(target, "utf8");
+          } catch (error) {
+            return `${REFUSAL_MARKER} Could not read "${relPath}" as text: ${error instanceof Error ? error.message : String(error)}`;
+          }
+          const CAP_CHARS = 20_000;
+          return content.length > CAP_CHARS
+            ? `${content.slice(0, CAP_CHARS)}\n\n[truncated — file is ${content.length} chars, showing first ${CAP_CHARS}]`
+            : content;
+        },
+      },
+      {
+        name: "studio_web_fetch",
+        ref: "studio/web_fetch",
+        description:
+          "READ-ONLY: fetch a web page or API URL and return its text content (HTML is stripped to readable text). Use to look up documentation, an external reference, or a URL the person pasted. It cannot search the web — it only fetches a URL you already have. Paste the returned text into chat as the answer, quoting only what's relevant.",
+        parameters: z.object({
+          url: z.string().url().describe("Full http(s) URL to fetch."),
+        }),
+        execute: async (args) => {
+          const parsed = z.object({ url: z.string().url() }).safeParse(args ?? {});
+          if (!parsed.success) {
+            return `${REFUSAL_MARKER} A valid url is required.`;
+          }
+          let parsedUrl: URL;
+          try {
+            parsedUrl = new URL(parsed.data.url);
+          } catch {
+            return `${REFUSAL_MARKER} Invalid URL.`;
+          }
+          if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+            return `${REFUSAL_MARKER} Only http/https URLs are allowed.`;
+          }
+          const host = parsedUrl.hostname.toLowerCase();
+          const isPrivateHost =
+            host === "localhost" ||
+            host === "0.0.0.0" ||
+            host === "169.254.169.254" ||
+            host.endsWith(".local") ||
+            /^127\./.test(host) ||
+            /^10\./.test(host) ||
+            /^192\.168\./.test(host) ||
+            /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+          if (isPrivateHost) {
+            return `${REFUSAL_MARKER} Refusing to fetch a private/internal address.`;
+          }
+
+          let response: Response;
+          try {
+            response = await fetch(parsedUrl, {
+              redirect: "follow",
+              signal: AbortSignal.timeout(15_000),
+              headers: { "user-agent": "openbot-studio/1.0 (+read-only tool)" },
+            });
+          } catch (error) {
+            return `${REFUSAL_MARKER} Fetch failed: ${error instanceof Error ? error.message : String(error)}`;
+          }
+          if (!response.ok) {
+            return `${REFUSAL_MARKER} ${response.status} ${response.statusText} fetching ${parsedUrl.href}`;
+          }
+          const contentType = response.headers.get("content-type") ?? "";
+          const raw = await response.text();
+          const CAP_CHARS = 20_000;
+          let text = raw;
+          if (contentType.includes("html")) {
+            text = raw
+              .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+              .replace(/<!--[\s\S]*?-->/g, " ")
+              .replace(/<br\s*\/?>/gi, "\n")
+              .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+              .replace(/<[^>]+>/g, " ")
+              .replace(/&nbsp;/g, " ")
+              .replace(/&amp;/g, "&")
+              .replace(/&lt;/g, "<")
+              .replace(/&gt;/g, ">")
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .replace(/[ \t]+/g, " ")
+              .replace(/\n{3,}/g, "\n\n")
+              .trim();
+          }
+          return text.length > CAP_CHARS
+            ? `${text.slice(0, CAP_CHARS)}\n\n[truncated — content is ${text.length} chars, showing first ${CAP_CHARS}]`
+            : text;
         },
       },
       {
