@@ -9,6 +9,7 @@ import type { Database } from "../db/client";
 import { agents } from "../db/schema/core";
 import { agentProfiles } from "../db/schema/coworker";
 import { studioDynamicBots } from "../db/schema/studio";
+import { grantLeadCanMessage } from "./bot-messaging";
 
 export const BUILTIN_BOT_IDS = [
   "studio-lead",
@@ -20,6 +21,52 @@ export const BUILTIN_BOT_IDS = [
 ] as const;
 
 export type BuiltinBotId = (typeof BUILTIN_BOT_IDS)[number];
+
+/**
+ * Appended to every dynamically spawned bot's systemPrompt, on top of whatever role text the
+ * spawning Bot wrote.
+ *
+ * THE SIX BUILT-INS GET THIS SEPARATELY, in the tenant package's agents.yaml (outside this repo,
+ * per deployment) — hand-written there because that file is the one thing actually re-synced into
+ * the database on every boot. A spawned bot has no such file behind it: whatever systemPrompt
+ * studio_spawn_bot was given is the whole prompt, forever, unless something appends to it here.
+ * Observed live without this: a spawned "Pocket Love Researcher" with a four-sentence role
+ * description had no idea studio_message_bot existed, no self-serve instinct, and narrated having
+ * "sent a summary notice" that no tool call ever produced. A marker check guards both call sites
+ * below so re-saving an existing bot never doubles this up.
+ */
+const SPAWNED_BOT_POLICY_MARKER = "Never narrate an action you did not take";
+const SPAWNED_BOT_POLICY = `
+
+## Self-serve before you stall
+
+You have tools to get your own inputs — do not ask the person or another bot to hand you a report, a code excerpt, or a link before you will start, when a tool can get it for you in the same turn: studio_read_file (local checkout), studio_inspect_product (screen/route inventory), studio_github_read (PR/issue/repo status, or a file's content on any branch via query: file_view), studio_web_fetch (a URL you already have), studio_task_status / studio_list_tasks (task status). Only ask a person or another bot for something none of these tools can get you — a business decision, a preference, evidence that exists nowhere else.
+
+## Tool usage & chat policy
+
+A question or lookup — including one from another bot — gets answered directly in chat with the matching read-only tool, not by calling studio_run_task. Only call studio_run_task when the request is explicitly to implement, fix, or ship a code change; it always culminates in a draft PR once files change, so it is the wrong tool for anything else. When you call it, you will automatically receive a priority message with the outcome once the task finishes (shipped or blocked) — you do not have to remember to poll studio_task_status. When that message says blocked or failed, decide whether to retry, hand it to a different bot, or escalate with the evidence — do not just acknowledge it.
+
+## When a bot you delegated to needs the person's input
+
+If a bot you handed something to comes back with questions it cannot answer itself, do not treat that as the end of the thread. Bring it to the person plainly: say who you asked, what they need to know, and ask directly. If a delegated ask never gets an answer back, say so — do not assume it worked.
+
+## Never narrate an action you did not take
+
+Only say you sent, notified, reported to, or delivered something to another bot or the person when a tool call for that actually ran and returned success. If you did not call a tool, say plainly what you actually did instead — do not describe an outcome that did not happen.
+
+## "Report to X" / "tell X" / "let X know" means calling a tool, not talking about it
+
+This is an instruction to call studio_message_bot (or message_bot) with that bot's id as the target, in the same turn — not answering in your own chat, not drawing an interface, not saying what you would tell them.
+
+## When told to proceed without waiting for more input
+
+"Just do it", "do your best", "go ahead anyway" means: use your own judgment to produce a real, substantive first draft now, marking guesses as assumptions to validate — not a restatement of the questions you wish someone would answer. A framework of blank questions is not a deliverable.`;
+
+function withSpawnedBotPolicy(prompt: string): string {
+  return prompt.includes(SPAWNED_BOT_POLICY_MARKER)
+    ? prompt
+    : prompt + SPAWNED_BOT_POLICY;
+}
 
 const BOT_ID_RE = /^[a-z][a-z0-9-]{1,63}$/;
 
@@ -66,7 +113,7 @@ export async function resolveSystemPrompt(
   input: SpawnBotInput,
 ): Promise<{ ok: true; prompt: string } | { ok: false; error: string }> {
   const direct = input.systemPrompt?.trim();
-  if (direct) return { ok: true, prompt: direct };
+  if (direct) return { ok: true, prompt: withSpawnedBotPolicy(direct) };
   const template = input.templateRoleId?.trim();
   if (!template) {
     return { ok: false, error: "systemPrompt is required unless templateRoleId is set." };
@@ -84,7 +131,7 @@ export async function resolveSystemPrompt(
       error: `templateRoleId "${template}" has no systemPrompt to copy.`,
     };
   }
-  return { ok: true, prompt };
+  return { ok: true, prompt: withSpawnedBotPolicy(prompt) };
 }
 
 export async function listMergedBots(database: Database): Promise<CatalogBot[]> {
@@ -264,7 +311,9 @@ export async function updateDynamicBot(
 
   const name = patch.name?.trim() ?? row.name;
   const title = patch.title?.trim() ?? row.title ?? name;
-  const systemPrompt = patch.systemPrompt?.trim() ?? row.systemPrompt;
+  const systemPrompt = patch.systemPrompt?.trim()
+    ? withSpawnedBotPolicy(patch.systemPrompt.trim())
+    : row.systemPrompt;
   const avatarSeed = patch.avatarSeed?.trim() ?? row.avatarSeed ?? id;
 
   await database.transaction(async (tx) => {
