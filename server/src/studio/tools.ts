@@ -1014,6 +1014,7 @@ export function studioTools(options: {
             maestroFlow: parsed.data.maestroFlow,
             deviceUdid: parsed.data.deviceUdid,
             background: parsed.data.background,
+            requestedByBotId: botId,
           });
           if (!result.ok) {
             return `${REFUSAL_MARKER} ${result.error}`;

@@ -13,6 +13,7 @@ import type { Admission } from "./admission";
 import { CURSOR_ENGINEER_BOT_ID, runProjectTask } from "./runner";
 import type { TaskStore } from "./task-store";
 import type { NativeWorker } from "../native-worker/worker";
+import type { BotMessaging } from "./bot-messaging";
 import { getSelectedProduct } from "./products";
 import { resolveProjectPath, STUDIO_PRODUCT_ID } from "./project-path";
 export { resolveProjectPath, STUDIO_PRODUCT_ID } from "./project-path";
@@ -48,6 +49,13 @@ export type SubmitStudioTaskInput = {
    * and the global maxActiveExecutionTasks, not the primary per-bot slot.
    */
   background?: boolean;
+  /**
+   * The Bot whose tool call created this task, if any. When set (and a bot-messaging bus is
+   * wired), the requester is sent a priority message on completion or failure — mirroring the
+   * handoff queue's guaranteed report-back, since otherwise this Bot only learns the outcome by
+   * remembering to poll studio_task_status.
+   */
+  requestedByBotId?: string;
 };
 
 export type SubmitStudioTaskResult =
@@ -70,8 +78,11 @@ export function createStudioDispatcher(deps: {
    * When absent, Maestro requests will fail with a clear error message.
    */
   nativeWorker?: NativeWorker;
+  /** Lazy: the messaging bus is constructed after the dispatcher elsewhere in boot. */
+  getBotMessaging?: () => BotMessaging | undefined;
+  messagingActorId?: string;
 }): StudioDispatcher {
-  const { database, admission, taskStore, nativeWorker } = deps;
+  const { database, admission, taskStore, nativeWorker, getBotMessaging, messagingActorId } = deps;
   const inFlight = new Map<string, InFlightRun>();
   const submitted = new Map<string, string>();
 
@@ -155,6 +166,22 @@ export function createStudioDispatcher(deps: {
 
       const taskId = `task-${randomUUID()}`;
       if (idempotencyKey) submitted.set(idempotencyKey, taskId);
+      const requestedByBotId = input.requestedByBotId?.trim() || undefined;
+
+      const notifyRequester = async (message: string) => {
+        if (!requestedByBotId || requestedByBotId === ownerBotId) return;
+        const botMessaging = getBotMessaging?.();
+        if (!botMessaging) return;
+        await botMessaging
+          .send({
+            fromBotId: ownerBotId,
+            toBotId: requestedByBotId,
+            message,
+            priority: true,
+            actorId: messagingActorId ?? "dev-local-user",
+          })
+          .catch(() => {});
+      };
 
       await taskStore.createTask({
         id: taskId,
@@ -192,8 +219,27 @@ export function createStudioDispatcher(deps: {
         ...(input.deviceUdid ? { deviceUdid: input.deviceUdid } : {}),
         ...(nativeWorker ? { nativeWorker } : {}),
       })
+        .then(async (outcome) => {
+          const lines = [
+            outcome.ok
+              ? `Task "${title}" (${taskId}) finished.`
+              : `Task "${title}" (${taskId}) is blocked.`,
+            outcome.blocker ? `Blocker: ${outcome.blocker}` : null,
+            outcome.changedFiles.length > 0
+              ? `Changed files: ${outcome.changedFiles.length}`
+              : null,
+            outcome.pullRequest ? `PR: ${outcome.pullRequest.url}` : null,
+            "Call studio_task_status with this taskId for full evidence.",
+          ]
+            .filter((line): line is string => line !== null)
+            .join("\n");
+          await notifyRequester(lines);
+        })
         .catch(async (err) => {
           await taskStore.markInterrupted(taskId, String(err));
+          await notifyRequester(
+            `Task "${title}" (${taskId}) was interrupted: ${String(err)}`,
+          );
         })
         .finally(() => {
           inFlight.delete(taskId);

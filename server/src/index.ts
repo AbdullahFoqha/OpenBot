@@ -37,7 +37,7 @@ import { createDelegationStore } from "./studio/delegation-store";
 import { createTaskStore } from "./studio/task-store";
 import { loadStudioPolicy } from "./studio/policy";
 import { studioTools } from "./studio/tools";
-import { createBotMessaging } from "./studio/bot-messaging";
+import { createBotMessaging, type BotMessaging } from "./studio/bot-messaging";
 import { createStudioChannelBus } from "./studio/studio-channels";
 import { createStudioMemoryStore } from "./studio/studio-memory";
 import { createStudioSkillPackStore } from "./studio/studio-skill-packs";
@@ -404,6 +404,13 @@ useRoutineTools(routineStore);
  * addressed it, and a hop held in memory is lost the moment either is rescheduled.
  */
 let kickHandoffRef: (() => void) | undefined;
+/**
+ * Set once `studioBotMessaging` exists (it's built after `studioDispatcher`, further down this
+ * file). `studioDispatcher` takes a getter rather than the value itself so a task that finishes
+ * can notify whichever Bot asked for it — including on failure — the same way a bot-to-bot handoff
+ * always reports back, instead of leaving that Bot's `studio_task_status` poll as the only path.
+ */
+let studioBotMessagingRef: BotMessaging | undefined;
 
 const handoffDesk = createHandoffDesk({
   queue: createWorkQueue(database),
@@ -469,6 +476,8 @@ const studioDispatcher = createStudioDispatcher({
   admission,
   taskStore: studioTaskStore,
   nativeWorker: studioNativeWorker,
+  getBotMessaging: () => studioBotMessagingRef,
+  messagingActorId: "dev-local-user",
 });
 
 void recordAuditEvent(bootAuditStore, {
@@ -1372,6 +1381,7 @@ const studioBotMessaging = createBotMessaging({
   },
   kickHandoff: () => kickHandoffRef?.(),
 });
+studioBotMessagingRef = studioBotMessaging;
 
 const studioChannelBus = createStudioChannelBus({
   database,
